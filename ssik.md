@@ -146,3 +146,81 @@ for T_target in trajectory_points:
 · 换 ssik 后：不需要“换很多种子”，但每个点仍需用上一帧关节角来选解，保证运动连续。
 
 如果你现在失败在从 1.76 到 1.24 的下降过程中，最直接有效的改法就是：把数值 IK 的种子从“固定起始点”改成“上一帧求出的关节角”，再配合多初值重试或加中间路点。
+
+
+
+让机械臂运动一段轨迹，核心是规划（Planning） 和执行（Execution） 两个环节。具体需要写哪些脚本，取决于你的机械臂品牌、开发环境（ROS或厂商SDK）以及任务需求。
+
+🧬 通用脚本框架（以ROS MoveIt为例）
+
+无论实现哪种轨迹，基于ROS MoveIt的Python脚本通常都遵循一个固定的生命周期：
+
+1. 初始化：初始化ROS节点和MoveIt连接。
+2. 创建规划组：创建MoveGroupCommander对象，指定要控制的机械臂规划组（如 "arm"）。
+3. 设置目标：设置目标关节角度或末端位姿。
+4. 运动规划：调用规划函数，计算出一条无碰撞的轨迹。
+5. 执行轨迹：将规划好的轨迹发送给控制器执行。
+6. 清理关闭：释放资源，断开连接。
+
+🎯 两种核心轨迹规划方法
+
+根据你的任务需求，选择以下两种方式之一。
+
+方法一：关节空间规划 (Joint Space Planning)
+
+适用场景：点到点（PTP）运动，不关心中间路径，常用于快速移动、抓取前的就位等。
+核心逻辑：直接指定每个关节的目标角度，由规划器在关节空间进行插值。
+脚本命令示例：
+
+```python
+# 设置目标关节角度 (单位：弧度)
+joint_goal = [0.0, -1.57, 0.0, -1.57, 0.0, 0.0] 
+move_group.set_joint_value_target(joint_goal)
+
+# 进行规划并执行
+plan = move_group.plan()
+move_group.execute(plan, wait=True)
+```
+
+如果你使用厂商SDK（如睿尔曼），命令会更简洁，例如直接调用 rm_movej() 并传入关节角度数组即可。
+
+方法二：笛卡尔空间规划 (Cartesian Space Planning)
+
+适用场景：需要末端执行器走精确路径，如直线焊接、涂胶、沿平面移动等。
+核心逻辑：给出末端的一系列路径点（Pose），规划器计算出一条让末端依次经过这些点的轨迹。
+脚本命令示例：
+
+```python
+waypoints = []
+# 路径点1：位置(x,y,z)，姿态用四元数表示
+wpose = geometry_msgs.msg.Pose()
+wpose.position.x = 0.5; wpose.position.y = 0.0; wpose.position.z = 0.5
+wpose.orientation.w = 1.0
+waypoints.append(copy.deepcopy(wpose))
+
+# 路径点2：沿Y轴移动10cm
+wpose.position.y += 0.1
+waypoints.append(copy.deepcopy(wpose))
+
+# 进行笛卡尔路径规划 (fraction是成功率，1.0代表完全成功)
+(plan, fraction) = move_group.compute_cartesian_path(
+                                   waypoints,   # 路径点列表
+                                   0.01,        # 插补步长 (eef_step)
+                                   0.0)         # 跳跃阈值 (jump_threshold)
+if fraction == 1.0:
+    move_group.execute(plan, wait=True)
+```
+
+厂商SDK通常提供 rm_movel() 接口，传入目标位姿即可走直线。
+
+⚙️ 其他实用方法与工具
+
+· 直接发送轨迹点：对于更底层的控制，可以直接构建 JointTrajectory 消息，指定每个路径点的位置、速度和时间，通过Action发送给控制器执行。
+· 使用高层级运动库：一些库如 franky-panda 提供了更简洁的API，可以用类似 robot.move(linear_waypoint) 的方式控制Franka机器人。
+· 专用轨迹规划库：像 arm_kinematics_trajectory 这样的库，内置了S曲线速度规划等算法，并提供 MoveLine 等脚本命令，适合对轨迹平滑度有要求的场景。
+· 仿真验证：在真机运行前，强烈建议在RViz或Gazebo中预览轨迹，确认无误后再执行，这能有效避免碰撞风险。
+
+💎 总结与建议
+
+· 如果只要求到达目标点，不关心中间路径，优先选择关节空间规划，它简单且不会出现中间点不可达的问题。
+· 如果任务要求末端走特定路径（如直线），则必须使用笛卡尔空间规划。这时需要特别注意每个插补点的逆解问题，建议采用动态种子（用上一帧的关节角作为下一个点的初值）并配合解析IK（如ssik）来保证解算的稳定性和连续性。
