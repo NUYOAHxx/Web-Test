@@ -224,3 +224,164 @@ if fraction == 1.0:
 
 · 如果只要求到达目标点，不关心中间路径，优先选择关节空间规划，它简单且不会出现中间点不可达的问题。
 · 如果任务要求末端走特定路径（如直线），则必须使用笛卡尔空间规划。这时需要特别注意每个插补点的逆解问题，建议采用动态种子（用上一帧的关节角作为下一个点的初值）并配合解析IK（如ssik）来保证解算的稳定性和连续性。
+
+
+
+机械臂末端“一点一点地动”，本质上就是把一条连续轨迹离散成很多小段，每个控制周期发一个目标点。区别只在于“谁来离散”和“谁来发”。
+
+下面按由高层到低层给你三种典型逻辑，你一看就能明白。
+
+---
+
+一、高层：你只发最终目标，控制器自己“一点一点”走
+
+这是最常见的方式。你调用 moveL / moveJ，底层控制器自动做插补，每个周期自己更新关节角。
+
+```python
+# 伪代码：厂商SDK风格
+robot.move_j([0, -1.57, 0, -1.57, 0, 0])   # 关节空间，控制器内部插补
+robot.move_l(target_pose, speed=0.1)        # 笛卡尔直线，控制器内部插补
+```
+
+逻辑：
+
+· 你只给起点和终点。
+· 控制器内部按固定周期（如 1ms 或 4ms）算出中间每个点的关节角。
+· 你不需要写循环，也不需要管插补。
+
+优点：简单、实时性好。
+缺点：中间过程你无法干预，IK失败时你也不知道发生在哪个点。
+
+---
+
+二、中层：你自己离散轨迹，逐个点发给控制器
+
+你想控制路径形状，就自己把轨迹切成很多小段，每段发一个目标位姿，让控制器走一小步。
+
+```python
+import numpy as np
+import time
+
+def move_linear(start_pose, end_pose, steps=100, dt=0.02):
+    """
+    自己把直线离散成 steps 个点，每个周期发一个目标
+    start_pose / end_pose: 4x4 齐次变换矩阵
+    """
+    for i in range(steps + 1):
+        t = i / steps
+        # 位置线性插值
+        p = (1 - t) * start_pose[:3, 3] + t * end_pose[:3, 3]
+        # 姿态用四元数球面插值（这里简化，实际用 scipy Slerp）
+        R = start_pose[:3, :3]  # 简化：只插位置，姿态不变
+        
+        T_target = np.eye(4)
+        T_target[:3, :3] = R
+        T_target[:3, 3] = p
+        
+        # 每个点求一次IK，用上一帧关节角做种子
+        q_sol = robot.ik(T_target, seed=q_current)
+        if q_sol is None:
+            print(f"IK failed at step {i}, pose={p}")
+            break
+        
+        q_current = q_sol
+        robot.move_j(q_current)   # 或者直接发关节角指令
+        time.sleep(dt)            # 模拟控制周期
+```
+
+逻辑：
+
+· 你自己做位置插值（直线、圆弧、样条）。
+· 每个插补点调用一次 IK。
+· 每个点单独发给机器人。
+· 种子必须动态更新：seed = 上一帧的 q_current。
+
+关键点：
+
+· 这就是你之前遇到“中间点IK失败”的场景。
+· 如果某点失败，可以在这里插入重试、加中间路点、切换IK分支。
+
+---
+
+三、低层：直接构建关节轨迹消息，按时间戳发送
+
+如果你用 ROS，FollowJointTrajectory Action 就是这种模式。你一次性构造整条轨迹，控制器按时间戳逐点执行。
+
+```python
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+import actionlib
+from control_msgs.msg import FollowJointTrajectoryAction
+
+# 构造轨迹
+traj = JointTrajectory()
+traj.joint_names = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+
+dt = 0.02
+for i, q in enumerate(joint_waypoints):
+    point = JointTrajectoryPoint()
+    point.positions = q
+    point.time_from_start = rospy.Duration.from_sec(i * dt)
+    traj.points.append(point)
+
+# 发送给控制器
+client = actionlib.SimpleActionClient(
+    '/joint_trajectory_controller/follow_joint_trajectory',
+    FollowJointTrajectoryAction)
+client.wait_for_server()
+goal = FollowJointTrajectoryGoal()
+goal.trajectory = traj
+client.send_goal(goal)
+client.wait_for_result()
+```
+
+逻辑：
+
+· 你一次性给出所有路径点的关节角 + 时间戳。
+· 控制器按时间戳逐点执行，中间可能再做插值。
+· 每个点的关节角是你自己算好的（或MoveIt规划好的）。
+
+---
+
+四、三种方式对比
+
+方式 谁做插补 谁做IK 你能干预中间点吗 适用场景
+高层 moveL/moveJ 控制器 控制器 不能 简单点到点、直线
+中层 自己离散 你 你 能 需要监控/容错/自定义路径
+低层 轨迹消息 你+控制器 你或MoveIt 能（发送前） ROS标准、多轴同步
+
+---
+
+五、核心逻辑总结
+
+不管哪种方式，末端“一点一点动”的本质都是：
+
+```
+连续轨迹 → 离散成 N 个点 → 每个点求IK → 按周期逐个发送关节角
+```
+
+区别只是：
+
+· 控制器帮你离散：你发终点，它自己走。
+· 你自己离散：你写循环，每个点求IK，逐点发送。
+· 你构造轨迹消息：你一次性打包所有点，控制器按时间执行。
+
+---
+
+六、针对你的问题
+
+你之前从 z=1.76 到 1.24 失败，说明你很可能用的是中层方式（自己做笛卡尔插补 + 逐点IK）。那么改进方向就是：
+
+```python
+q_current = robot.get_joint_positions()   # 起始关节角
+for T_target in cartesian_waypoints:       # 每个插补点
+    sols = ssik_solve(T_target)            # 解析法拿所有解
+    q_next = select_closest(sols, q_current)  # 选最接近的
+    if q_next is None:
+        # 插入中间路点，或用moveJ绕过去
+        break
+    q_current = q_next
+    robot.move_j(q_next)
+    time.sleep(dt)
+```
+
+一句话：让末端一点点动，就是“你算好每个点的关节角，然后按周期一个个发出去”。
