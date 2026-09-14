@@ -115,3 +115,231 @@ V. 推荐落地路径
 4. RViz 里拖末端试 IK 和点到点规划。
 
 一个确认点:你是想要固定基座的双臂+腰(工作站式),还是带腿的全身人形? 如果是固定基座,Talos 或 Valkyrie 把腿/底座固定住最合适;如果要全身带腿,G1 更现代。告诉我你机器人有没有腿/移动底盘,我可以帮你把选择再收窄,并给出把腿冻结成固定基座的具体改法。
+
+
+ TIAGo Dual Robot (ROS 2) - 架构与开发说明文档
+
+本项目为 PAL Robotics 双臂移动协作机器人 **TIAGo Dual** 的核心 ROS 2 仓库（支持 ROS 2 Humble / Jazzy）。包含了机器人的机体结构描述（URDF/Xacro）、运动学与动力学参数、基于 `ros2_control` 的控制器配置、传感器接口、预设多关节协同动作库以及整机启动（Bringup）环境。
+
+---
+
+## 目录
+- [1. 项目整体架构](#1-项目整体架构)
+- [2. 功能包拆解与职责划分](#2-功能包拆解与职责划分)
+- [3. 腰部及双 7 轴机械臂的运动控制与解算分析](#3-腰部及双-7-轴机械臂的运动控制与解算分析)
+  - [3.1 腰部（Torso）机构、控制与解算](#31-腰部torso机构控制与解算)
+  - [3.2 双 7 轴机械臂（Dual 7-DOF Arms）机构、控制与解算](#32-双-7-轴机械臂dual-7-dof-arms机构控制与解算)
+  - [3.3 运动学解算（IK/FK）在系统中的位置](#33-运动学解算ikfk在系统中的位置)
+- [4. 快速上手指南](#4-快速上手指南)
+  - [4.1 核心依赖环境](#41-核心依赖环境)
+  - [4.2 机器人模型与关节可视化 (RViz)](#42-机器人模型与关节可视化-rviz)
+  - [4.3 控制器与硬件 Bringup 启动](#43-控制器与硬件-bringup-启动)
+  - [4.4 常用控制 Topic / Action 接口](#44-常用控制-topic--action-接口)
+  - [4.5 预置动作执行 (`play_motion2`)](#45-预置动作执行-play_motion2)
+- [5. 进阶开发与自定义解算建议](#5-进阶开发与自定义解算建议)
+
+---
+
+## 1. 项目整体架构
+
+TIAGo Dual 是集成了 **差速/全向移动底盘 + 垂直升降腰部 + 双 7 自由度机械臂 + 头部双自由度云台 + 末端灵巧手/夹爪** 的高度模块化服务机器人。
+
+整个软件架构基于 **ROS 2 + ros2_control + MoveIt 2** 标准分层设计：
+
+```
++-----------------------------------------------------------------------------------+
+|                           上层任务与规划层 (Application & Planning)                 |
+|   - 行为树 / 自定义控制节点 (Task Planner)                                         |
+|   - 运动规划与逆解引擎: MoveIt 2 (OMPL, KDL/IKFast/TRAC-IK, 规划组 both_arms_torso)  |
+|   - 预置轨迹回放引擎: play_motion2 (Home, Unfold, Wave, Offer, Reach Floor)       |
++-----------------------------------------------------------------------------------+
+                                          |
+                     [FollowJointTrajectory Action / Topics]
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+|                        控制器层 (Controller Layer - ros2_control)                  |
+|   tiago_dual_controller_configuration:                                            |
+|   - torso_controller (JointTrajectoryController, 1-DOF 升降柱)                    |
+|   - arm_left_controller / arm_right_controller (JointTrajectoryController, 7-DOF) |
+|   - arm_*_gravity_compensation_controller (pal_controllers, 重力补偿/顺应拖动)     |
+|   - joint_state_broadcaster (关节状态广播)                                         |
+|   - ft_sensor_*_controller / 移动底盘控制器 / 夹爪控制器                           |
++-----------------------------------------------------------------------------------+
+                                          |
+                             [Hardware Interface / HAL]
+                                          |
+                                          v
++-----------------------------------------------------------------------------------+
+|                 机器人描述与硬件抽象层 (Description & Hardware Layer)                |
+|   tiago_dual_description:                                                         |
+|   - URDF / Xacro (连杆质量、惯量、关节极限、差动腕部减速比、网格 Mesh)              |
+|   - ros2_control.urdf.xacro (GazeboSystem / RobotControl 硬件插件接口)            |
+|   - 传感器外参与手眼标定 (urdf/calibration/)                                       |
++-----------------------------------------------------------------------------------+
+```
+
+---
+
+## 2. 功能包拆解与职责划分
+
+| 功能包名 | 角色定位 | 核心文件与内容 |
+| :--- | :--- | :--- |
+| **`tiago_dual_robot`** | 元功能包 (Metapackage) | 仅包含 `package.xml` 和 `CMakeLists.txt`，用于一次性索引和管理整个项目。 |
+| **`tiago_dual_description`** | 模型与描述功能包 | - `robots/tiago_dual.urdf.xacro`: 机器人整机统一宏组装入口；<br>- `urdf/torso/torso_dual.urdf.xacro`: 升降腰部动力学/几何模型；<br>- `ros2_control/ros2_control.urdf.xacro`: `ros2_control` 硬件资源映射（含差动腕部映射）；<br>- `config/tiago_dual_configuration.yaml`: 默认模块选型（底盘、手臂、夹爪、传感器）；<br>- `launch/show.launch.py`: 纯模型可视化（集成 RViz 和 GUI 关节滑动条）。 |
+| **`tiago_dual_controller_configuration`** | 控制器配置与加载包 | - `config/torso_controller.yaml`: 腰部轨迹控制器参数；<br>- `config/arm_{left,right}_controller.yaml`: 双臂轨迹控制器参数及容差设置；<br>- `config/arm_{left,right}_gravity_compensation_controller_*.yaml`: 重力补偿力矩控制（针对 Parker / ILM 电机）；<br>- `launch/default_controllers.launch.py`: 根据配置动态拉起各关节控制器。 |
+| **`tiago_dual_bringup`** | 整机启动与协同调度包 | - `launch/tiago_dual_bringup.launch.py`: 整机启动总入口；<br>- `config/motions/`: 预定义双臂与腰部复合运动动作库（YAML 格式定义各时间点关键帧）；<br>- `config/motion_planner/`: 规划组映射与无碰撞路径规划配置（`both_arms_torso`）；<br>- `launch/twist_mux.launch.py`: 底盘多路控制输入优先级仲裁。 |
+
+---
+
+## 3. 腰部及双 7 轴机械臂的运动控制与解算分析
+
+### 3.1 腰部（Torso）机构、控制与解算
+
+1. **机械机构特性**：
+   - 机器人的腰部并非回转机构（Yaw/Pitch），而是 **1 自由度棱柱升降柱（Prismatic Lift Column）**。
+   - 关节名称：`torso_lift_joint`。
+   - 运动轴向：沿世界坐标系的 $Z$ 轴方向上下直线运动。
+   - 运动范围与限位：`0.0m ~ 0.35m`（升降行程 35 厘米），最大运行速度为 `0.07 m/s`。
+2. **运动控制实现**：
+   - 本项目配置了专用控制器 `torso_controller`，类型为 `joint_trajectory_controller/JointTrajectoryController`。
+   - 提供位置目标控制，可在上层规划时通过 Action 目标实时指定升降高度。
+   - 在 `play_motion2` 中，腰部升降作为全身协同动作的重要维度（例如伸手拾取地面物品时，腰部降低到 `0.12m`，抬升物体时升至 `0.30m`）。
+3. **运动学解算分析**：
+   - 腰部自身为单一平动关节，其正逆运动学为线性映射：$Z_{torso} = Z_0 + d_{lift}$，无奇异点。
+   - 它的真正解算价值体现在与双臂组合成的 **全身运动学（Whole-body Kinematics）**：升降腰部能够极大扩展双臂在纵向空间的工作空间（Reachable Workspace）。
+
+---
+
+### 3.2 双 7 轴机械臂（Dual 7-DOF Arms）机构、控制与解算
+
+1. **关节定义与拓扑结构**：
+   - 左臂 7 轴：`arm_left_1_joint` 到 `arm_left_7_joint`。
+   - 右臂 7 轴：`arm_right_1_joint` 到 `arm_right_7_joint`。
+   - 腕部差动传动（Differential Wrist）：
+     - 关节 1~4 为大臂、肘部旋转/摆动关节；
+     - 关节 5 为前臂旋转滚转关节；
+     - 关节 6 和关节 7 构成了机械差动腕部。在 `ros2_control.urdf.xacro` 中通过 `<xacro:ros2_control_wrist_differential>` 配置了执行器到关节的减速比转换（`act_reduction_1=-1.0`, `act_reduction_2=1.0`, `jnt_reduction_1=1.0`, `jnt_reduction_2=-1.0`）。
+2. **运动控制实现（本仓库的核心配置）**：
+   - **高精度轨迹跟踪控制**：
+     - 控制器：`arm_left_controller` 与 `arm_right_controller`。
+     - 类型：`joint_trajectory_controller/JointTrajectoryController`。
+     - 接收标准的 `trajectory_msgs/JointTrajectory` 轨迹指令，执行时间点插值、PID 反馈及前馈控制。
+   - **重力补偿控制器（Gravity Compensation）**：
+     - 控制器：`arm_{left,right}_gravity_compensation_controller`。
+     - 插件类型：`pal_controllers/GravityCompensationController`。
+     - 功能：根据机械臂当前的动力学模型（连杆质心、质量和惯量矩阵），实时计算各关节抵抗重力所需的力矩并直接输出至驱动器，使机械臂处于“失重”浮动状态，便于**拖动示教**与交互安全防护。
+   - **预设动作库协同**：
+     - 在 `tiago_dual_bringup/config/motions/` 中定义了双臂与腰部联动的多姿态轨迹：如双臂归位（`home`）、左/右臂展开（`unfold_arm_*`）、挥手致意（`wave`）、递送/伸手（`offer`）、接近地面（`reach_floor`）等。
+
+---
+
+### 3.3 运动学解算（IK/FK）在系统中的位置
+
+> **核心结论明确说明**：
+> 1. **当前仓库内是否包含解算代码？**
+>    - 当前仓库 **不包含自研的独立 IK/FK 求解器源码（例如基于解析几何法或闭形式代数解的自定义 C++ 解算库）**。
+>    - 本仓库是 **描述（Description）与控制配置（Control Configuration）层**。
+> 2. **那么运动学解算如何完成？**
+>    - 双 7 轴机械臂属于**冗余机械臂（Redundant Manipulators）**，末端拥有 6 个笛卡尔自由度，而单臂拥有 7 个关节，具有 1 个冗余度（零空间运动，Null-space Motion），因此存在无穷多组逆解。
+>    - 在 PAL 官方标准架构中，逆解求解与笛卡尔轨迹规划由 **MoveIt 2** 生态（配合 `tiago_dual_moveit_config` 功能包）承担。
+>    - MoveIt 2 会直接读取本仓库中 `tiago_dual_description` 导出的 URDF 运动链，并调用成熟的求解器插件：
+>      - **KDL Kinematics Plugin**（基于雅可比矩阵伪逆的数值迭代法）
+>      - **TRAC-IK / BioIK**（解决局部极小值与关节限位的高性能逆解插件）
+>      - **IKFast**（解析生成插件，通常需将 7 轴中的某个轴作为自由参数求解）
+>    - 本仓库中的 `tiago_dual_bringup/config/motion_planner` 已经预定义了 MoveIt 规划组名称：`both_arms_torso`（腰部 + 左右双臂共 15 自由度全身解算组）。
+
+---
+
+## 4. 快速上手指南
+
+### 4.1 核心依赖环境
+- **操作系统**：Ubuntu 22.04 (ROS 2 Humble) 或 Ubuntu 24.04 (ROS 2 Jazzy)
+- **核心中间件**：`ros2_control`, `ros2_controllers`, `joint_state_publisher_gui`, `xacro`
+- **PAL 基础工具包**：`launch_pal`, `pal_urdf_utils`, `play_motion2`
+
+### 4.2 机器人模型与关节可视化 (RViz)
+在不需要启动控制器和物理仿真器的情况下，可以通过下列命令直接在 RViz 中预览整机模型并通过 GUI 滑动条调整腰部和双 7 轴机械臂的关节姿态：
+
+```bash
+source /opt/ros/$ROS_DISTRO/setup.bash
+# 切换到工作空间根目录编译并生效环境变量
+colcon build --symlink-install
+source install/setup.bash
+
+# 启动整机可视化
+ros2 launch tiago_dual_description show.launch.py
+```
+> **提示**：可以在命令后附加参数自定义构型，例如：
+> `ros2 launch tiago_dual_description show.launch.py end_effector_left:=pal-hey5 end_effector_right:=pal-gripper`
+
+### 4.3 控制器与硬件 Bringup 启动
+启动整机状态发布器以及关节控制器管理：
+
+```bash
+# 实体机或仿真环境下启动 Bringup 链路
+ros2 launch tiago_dual_bringup tiago_dual_bringup.launch.py is_public_sim:=true
+```
+
+检查控制器是否正常加载运行：
+```bash
+ros2 control list_controllers
+```
+正常情况下会看到：
+- `joint_state_broadcaster[active]`
+- `torso_controller[active]`
+- `arm_left_controller[active]`
+- `arm_right_controller[active]`
+
+---
+
+### 4.4 常用控制 Topic / Action 接口
+
+1. **获取当前全身关节状态**：
+   ```bash
+   ros2 topic echo /joint_states
+   ```
+2. **通过 Action 发送双臂及腰部轨迹控制指令**：
+   - 控制器 Action 接口：
+     - 左臂：`/arm_left_controller/follow_joint_trajectory` (`control_msgs/action/FollowJointTrajectory`)
+     - 右臂：`/arm_right_controller/follow_joint_trajectory` (`control_msgs/action/FollowJointTrajectory`)
+     - 腰部：`/torso_controller/follow_joint_trajectory` (`control_msgs/action/FollowJointTrajectory`)
+3. **切换/激活重力补偿模式（拖动示教）**：
+   默认情况下重力补偿控制器以 inactive 状态启动，可通过 `ros2controlcli` 切换：
+   ```bash
+   # 停止位置轨迹控制器，激活重力补偿
+   ros2 control switch_controllers --deactivate arm_left_controller --activate arm_left_gravity_compensation_controller
+   ```
+
+---
+
+### 4.5 预置动作执行 (`play_motion2`)
+系统内置了 `play_motion2` 动作服务器，可以直接调用预定义宏动作：
+
+```bash
+# 列出系统支持的预设动作
+ros2 run play_motion2_cli list_motions
+
+# 执行双臂复位动作
+ros2 run play_motion2_cli run_motion home
+
+# 执行打招呼挥手动作
+ros2 run play_motion2_cli run_motion wave
+```
+
+---
+
+## 5. 进阶开发与自定义解算建议
+
+如果你需要针对 TIAGo Dual 编写**自定义运动学解算算法**（例如解析逆解、零空间优化、笛卡尔阻抗控制）：
+
+1. **获取完整的运动学链参数**：
+   - 直接读取并解析 `tiago_dual_description/robots/tiago_dual.urdf.xacro` 生成的 URDF。
+   - 基座 Link：`base_link`；
+   - 腰部 Link：`torso_lift_link`（父节点为 `base_link`，偏移量 $Z=0.597m$）；
+   - 左臂起点：`arm_left_1_link`（相对 `torso_lift_link` 的偏移：`xyz="0.02556 0.19 -0.171"`，旋转 `rpy="3.14159 0 1.5708"`）；
+   - 右臂起点：`arm_right_1_link`（相对 `torso_lift_link` 的偏移：`xyz="0.02556 -0.19 -0.171"`，旋转 `rpy="0 0 -1.5708"`）；
+   - 末端法兰工具参考系：`arm_left_tool_link` / `arm_right_tool_link`。
+2. **轻量级算法开发推荐框架**：
+   - **Pinocchio (C++ / Python)**：现代高性能刚体动力学与运动学计算库，可直接从 URDF 加载模型，秒级计算正逆解、雅可比矩阵（Jacobian）、质心矩阵与重力补偿力矩；
+   - **MoveIt 2 C++ API (`MoveGroupInterface`)**：若进行避障轨迹规划，推荐建立独立的 ROS 2 节点，通过 `moveit::planning_interface::MoveGroupInterface` 操作规划组 `both_arms_torso`。
