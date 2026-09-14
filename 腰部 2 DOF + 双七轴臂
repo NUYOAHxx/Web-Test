@@ -1,0 +1,117 @@
+技术选型报告
+MONDAY, SEPTEMBER 14 2026
+腰部 2 DOF + 七轴臂
+IK 与点到点规划选型
+先把整机当成一条 9 自由度冗余链来求解,不要把腰部和机械臂拆开硬解。 腰部旋转 + 俯仰(2 DOF)加七轴臂(7 DOF)共 9 个关节,任务空间只有 6 维,冗余度达 3。这类系统没有通用解析解,主流做法是"数值/优化式 IK + 采样或优化式点到点规划"。工程上不要自己从零写求解器 —— 直接基于 MoveIt 2、Pinocchio、cuRobo 这三条成熟栈搭环境,模型资产从 MuJoCo Menagerie 和各厂商官方 description 仓拉。
+
+9
+总自由度
+腰部 2 + 臂 7
+3
+冗余自由度
+9 − 6(SE(3) 位姿)
+∞
+IK 解集
+冗余臂无解析闭式
+I. 建模决策:一条链还是分层  
+1. 整机 9-DOF 统一求解(推荐)
+推荐
+把腰部两个关节和七轴臂拼成一条 9 关节的 URDF/MJCF 运动链,交给数值 IK 一次解算。 冗余臂(>6 DOF)的完整解集无法解析表达,只能用数值优化在配置空间里局部搜索。9 自由度的好处是冗余度更高:同一末端位姿有无穷多组关节解,可以在零空间里同时优化避障、避关节限位、避奇异、保持可操作度。
+
+腰部俯仰关节要在 URDF 里正确标定 DH/screw 参数,和臂共用一个 base frame。
+给腰部关节设更保守的速度/加速度上限,规划器会自然倾向"能用臂就少动腰"。
+2. 分层解耦(次选)
+腰部当"宏动"负责把工作空间对准目标,七轴臂做精细 IK。 实现简单、调试直观,但会浪费冗余度,腰-臂协调不平滑,靠近工作空间边界时容易失败。仅在腰部运动很慢、或腰部有独立控制回路(如与移动底盘耦合)时才值得。
+
+II. IK 求解器选型
+1. 对比结论
+TRAC-IK 做在线单解、Pinocchio/Pink 做带约束的微分 IK、cuRobo 做批量并行 + 碰撞感知。 IKFast 这类解析求解器只适用于 ≤6 DOF 或特定结构,对 9-DOF 冗余系统直接排除。
+
+求解器	类型	适配 9-DOF 冗余	定位
+KDL	数值(牛顿法)	可用,收敛率一般	ROS 老牌基线
+TRAC-IK	数值(SQP+KDL 并行)	好,收敛率明显高于 KDL	在线求单解首选
+Pinocchio	微分 IK / 雅可比 / QP	很好,可写零空间任务	自研控制器的底座
+Pink / PlaCo	QP 任务空间 IK	很好,原生支持多约束	带约束的分层 IK
+cuRobo	GPU 批量优化	优秀,碰撞感知	批量 + 规划一体
+IKFast	解析	不适用	仅 ≤6 DOF
+2. 具体建议
+如果走 ROS 2:先用 TRAC-IK 作为 MoveIt 的 kinematics 插件跑通,再按需换 cuRobo 提速。 TRAC-IK 内部同时跑 KDL 牛顿法和 SQP 两个线程取先返回的可行解,对 7+ 冗余臂的成功率和速度都优于纯 KDL。[1]Generative Graphical IK — 综述了 KDL / TRAC-IK / IKFast 的适用边界
+
+要在零空间里加"腰部尽量少动 / 保持某姿态"等次级目标,用 Pinocchio 或 Pink 写加权 QP 更灵活。
+需要一次算大量候选解、或 IK 与避障耦合,用 cuRobo 的 GPU 批量求解。[2]NVlabs/curobo — CUDA 加速机器人库
+III. 点到点规划栈
+1. MoveIt 2 + OMPL(通用基线)
+首选起点
+点到点在关节空间用 OMPL 的采样规划器(RRTConnect / RRT* / PRM)+ 碰撞检测,MoveIt 2 把 IK、规划、时间参数化、执行串成一条链。 用 MoveIt Setup Assistant 导入你的 9-DOF URDF,自动生成 SRDF、碰撞矩阵和 planning group,是最快跑通的路径。[3]moveit/moveit2 — MoveIt for ROS 2
+
+较新的 MoveIt 支持并行规划(同时跑多个规划器取最优),对冗余臂求解更稳。[4]Parallel Planning with MoveIt 2 — PickNik
+规划出的路径再用 TOTG / Ruckig 做时间最优参数化,得到可执行轨迹。
+2. cuRobo(需要快 / 需要优化式)
+cuRobo 的 motion_gen 在 GPU 上做碰撞感知的轨迹优化,单次点到点规划常在几十毫秒级,远快于 CPU 采样规划。 它把 IK、碰撞、轨迹优化统一在一个批量优化框架里,冗余臂尤其受益,可作为 MoveIt 的规划插件或独立使用。[5]cuRobo 文档 — CUDA Accelerated Robot Library
+
+IV. 从哪些开源项目拉环境与模型资产
+1. 规划与控制框架
+先拉这三个,分别覆盖"框架 / 运动学库 / GPU 加速"。
+
+MoveIt 2 — 规划框架 + Setup Assistant + RViz 可视化。github.com/moveit/moveit2,教程 moveit.picknik.ai。
+Pinocchio — 快速正/逆运动学、雅可比、动力学与解析导数;支持 URDF / SDF / MJCF,自研微分 IK 与控制器的底座。github.com/stack-of-tasks/pinocchio。
+cuRobo — GPU 批量 IK + 碰撞感知轨迹优化,自带多款机器人配置示例。github.com/nvlabs/curobo。
+2. 仿真环境
+验证规划先在仿真里跑,按精度/GPU 需求二选一。
+
+MuJoCo — 轻量、接触仿真准,适合快速验证 IK/轨迹;配 MuJoCo Menagerie 直接有高质量模型。
+Isaac Lab / Isaac Sim — NVIDIA 的 GPU 大规模并行仿真,适合强化学习和批量 rollout。github.com/isaac-sim/IsaacLab。
+Gazebo — 与 ROS 2 / MoveIt 集成最成熟,做全栈联调时用。
+3. 模型资产(URDF / MJCF)
+不要自己画臂模型 —— 拉一个成熟七轴臂的 description 做基准,再把你的腰部两关节拼上去。
+
+MuJoCo Menagerie — DeepMind 维护的高质量模型集,含 Franka、Kinova、UR、xArm、各种人形等,惯量/接触参数都调过,是最省事的起点。github.com/google-deepmind/mujoco_menagerie。
+Franka description — 官方 7 轴臂(FR3/FP3)URDF + 网格,可脚本生成。github.com/frankarobotics/franka_description。
+其他厂商七轴臂(Kinova Gen3、KUKA iiwa/LWR、xArm7)都有官方或社区 description 仓,选和你硬件最接近的那款。
+V. 推荐落地路径
+四步走
+1. 建模 — 拉一款相近七轴臂的 URDF,在其 base 上串接腰部 2 关节,得到完整 9-DOF URDF/MJCF;先在 MuJoCo 或 RViz 里确认正运动学和关节限位正确。
+2. 打通 IK + 规划 — 用 MoveIt 2 Setup Assistant 生成配置,kinematics 插件选 TRAC-IK,OMPL 跑 RRTConnect 做点到点,验证碰撞检测和可达性。
+3. 加冗余优化 — 用 Pinocchio 或 Pink 在零空间里加"腰部少动 / 避奇异 / 避限位"等次级目标,提升解的质量与一致性。
+4. 提速 / 上量 — 需要实时或批量时,把规划换成 cuRobo 的 GPU motion_gen;需要学习式策略或大规模并行仿真时上 Isaac Lab。
+
+
+好问题——你要的是”腰部能动 + 双 7 轴臂”这种拓扑,正好有几个开源人形机器人几乎完全对得上。我先核实一下它们的腰部自由度和 ROS 2 仿真资产是否齐全,再给你能直接导入的具体仓库。
+
+搞定——你要的”腰部旋转 + 俯仰 + 双 7 轴臂”这种拓扑,有几个开源人形几乎是照着你的需求做的。下面按匹配度从高到低给你能直接 clone 的模型,再说工具。
+
+最匹配你规格的模型
+
+1. PAL Robotics Talos —— 首选,几乎是精确匹配
+躯干正好是 2 自由度(‎⁠torso_1⁠ 偏航 + ‎⁠torso_2⁠ 俯仰),加两条 7 轴臂,和你”腰部旋转+俯仰 + 双 7 轴臂”的描述一模一样。PAL 官方提供完整的 ROS / ROS 2 + Gazebo 支持,‎⁠talos_description⁠ 里有 URDF 和网格。到 GitHub 的 ‎⁠pal-robotics⁠ 组织里找 ‎⁠talos_robot⁠ / ‎⁠talos_description⁠ 即可(也可直接 ‎⁠apt install ros-<distro>-talos-*⁠)。
+
+2. NASA Valkyrie (R5)
+3 自由度躯干 + 双 7 轴臂,ROS + Gazebo 生态成熟,由 IHMC 维护。​⁠GitHub (https://github.com/ihmcrobotics/ihmc_valkyrie_ros) 比你需要的多一个腰部滚转自由度,锁掉一个就退化成你的 2-DOF 腰。
+
+3. iCub
+躯干 3 自由度(偏航/滚转/俯仰)+ 双臂,官方 URDF 和 SDF 都有,Gazebo 直接能跑。​⁠https://github.com/robotology/icub-models
+
+4. Unitree G1(最现代)
+带腰部关节 + 7 轴臂(EDU 版本),在 MuJoCo Menagerie 里有调好的高质量模型,Isaac 生态也支持得好。​⁠Readthedocs (https://mujoco.readthedocs.io/en/stable/models.html) 缺点是它是全身腿式机器人,你要的是固定基座双臂的话得把腿固定住。
+
+工具推荐(Ubuntu + 你已经在 ROS 2)
+
+主力:Gazebo (Harmonic) + ROS 2 + MoveIt 2。 这是和你现有栈最顺的组合——Talos / Valkyrie / iCub 都自带 Gazebo + ROS 包,‎⁠apt⁠ 装完直接 ‎⁠ros2 launch⁠ 就能在 Gazebo 里起来,再接 MoveIt 做 IK 和点到点。用 MoveIt Setup Assistant 导入它们的 URDF 就能生成规划配置。
+
+快速验证物理/IK:MuJoCo。 不想搭 ROS 只想先看模型和试 IK,直接 ‎⁠pip install mujoco⁠,把 Menagerie 的 G1 拖进 ‎⁠python -m mujoco.viewer⁠ 就能交互查看,最省事。
+
+要 GPU 并行 / 强化学习:Isaac Sim / Isaac Lab(需要 NVIDIA 显卡),否则不必上。
+
+建议路径
+
+以你的规格,直接拿 Talos 起步最省事——腰部自由度和臂数都对得上,不用改模型。流程:
+
+1. ‎⁠apt⁠ 装 Talos 的 description + Gazebo 包(或从 ‎⁠pal-robotics⁠ clone)。
+
+2. ‎⁠ros2 launch⁠ 在 Gazebo 里起 Talos,确认腰 + 双臂关节都能动。
+
+3. MoveIt Setup Assistant 导入 URDF,按上一轮说的建 ‎⁠left_arm⁠ / ‎⁠right_arm⁠ / ‎⁠both_arms⁠ 组,多末端组挂 bio_ik。
+
+4. RViz 里拖末端试 IK 和点到点规划。
+
+一个确认点:你是想要固定基座的双臂+腰(工作站式),还是带腿的全身人形? 如果是固定基座,Talos 或 Valkyrie 把腿/底座固定住最合适;如果要全身带腿,G1 更现代。告诉我你机器人有没有腿/移动底盘,我可以帮你把选择再收窄,并给出把腿冻结成固定基座的具体改法。
