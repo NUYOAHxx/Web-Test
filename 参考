@@ -1,0 +1,47 @@
+下面是我用关键词（waist / torso / 7dof / 7-DOF / whole_body / waist_joint / moveit / ikfast）在公开 GitHub 代码中快速检索到、与“躯干/腰部自由度 + 7 自由度手臂联合扩展工作空间并用于 IK 求解”最相关的仓库或文件片段。注意：代码搜索结果可能不完整（检索响应被截断），下面是高相关性的初步结果和直接链接——要进一步深入我可以抓取并解释具体文件内容、或按语言/框架做更精细的检索。
+
+高相关条目（按相关性/实用性简短说明）：
+
+1) UM-ARM-Lab / visual_servoing — src/visual_servoing/val.py  
+   - 包含 get_arm_jacobian(include_torso=True) 与伪逆求解，示例如何把躯干/torso 与 7-DOF 臂一起构造雅可比并用于速度/逆解控制。  
+   - 文件： https://github.com/UM-ARM-Lab/visual_servoing/blob/7fe0d26257a346c64344a531395fce995658afc0/src/visual_servoing/val.py
+
+2) rdiankov / openrave — python/ikfast_sympy0_6.py  
+   - IKFast（OpenRAVE）的示例/工具，明确提到“7 DOF Barrett WAM where the 3rd joint is a free parameter”，说明如何为 7-DOF 冗余臂生成带自由参数的 IK 代码（可把腰/躯干当作自由参数或额外变量处理）。  
+   - 文件： https://github.com/rdiankov/openrave/blob/ec22ecfaf006688cbc5ee0fdd8fa05d2c5676d37/python/ikfast_sympy0_6.py
+
+3) UPenn-RoboCup / UPennDev2 — Robots/THOROP1/lua_THOROPKinematics.cpp  
+   - 有 l_arm_torso_7 / inverse_l_arm_7 等函数，直接把“torso/waist”与 7-DOF 臂联合用于正运动学/逆运动学接口，是整合躯干关节与手臂 IK 的实用示例。  
+   - 文件： https://github.com/UPenn-RoboCup/UPennDev2/blob/131cf5e650df3a2f66078f92be51184610597e27/Robots/THOROP1/lua_THOROPKinematics.cpp
+
+4) Astribot-Dev / astribot_descriptions — URDF / MJCF / USD（README_zh.md 提及 whole_body_urdf）  
+   - 仓库包含“躯干 + 双 7 自由度手臂”的 URDF/MJCF 模型，适合拿来做 IK/whole-body 规划实验（模型文件 + joint 定义）。  
+   - README（含文件列表）： https://github.com/Astribot-Dev/astribot_descriptions/blob/8c651a1abbe2821824a692aa3a3aa4cbf88e4122/README_zh.md
+
+5) wirobotics-rih / allex_model — URDF / MJCF（ALLEX 模型）  
+   - 仓库说明 ALLEX 有“two 7-DOF arms + 2-DOF waist”，并包含 URDF 与示例，适合做整合躯干腰部的运动学/规划研究。  
+   - 仓库： https://github.com/wirobotics-rih/allex_model
+
+6) movo / movo_7dof_moveit_config（docs & examples）  
+   - Movo 平台文档/MoveIt 配置中有 7-DOF 臂与 torso 的集成示例（MoveIt group / IK 求解器选择 / TRAC-IK 推荐），适合作为 ROS/MoveIt 实现参考。  
+   - 文档片段示例： https://github.com/zkytony/robotdev/blob/6c400c992d31c5e67c02f8d78feb91526066f540/movo/docs/MiscUsage.md  
+   - MoveIt 配置示例（在多个仓库里可见，例如 movo_moveit_config）
+
+7) TIAGO / tiago_moveit_config（CHANGELOG 与配置）  
+   - TIAGO/MoveIt 配置仓库含基于 MoveIt 的多关节（含 base/torso）配置与注意事项，可借鉴如何把 base/torso 纳入规划组。  
+   - 示例页面： https://github.com/LucreziaPonti/tesi_reuleaux_tiago/blob/1d92ad72f8ce06212e3cbd2e3bafa0dd15476643/tiago/tiago_moveit_config/CHANGELOG.rst
+
+8) 若干“whole body / whole_body_tracking / whole_body” 项目（示例、控制器、论文实现）  
+   - HybridRobotics / motion_tracking_controller、hope_training / whole_body_tracking 等仓库包含整体/整身体控制或轨迹追踪的实现范例，可用于参考整合腰部 DoF 的控制策略。  
+   - HybridRobotics readme： https://github.com/HybridRobotics/motion_tracking_controller/blob/742924f1e119dc98995dfe2daf99ae84d020f512/README.md
+
+快速建议 / 我可以做的下一步（选一项回复我即可）：
+- A) 为某个条目抓取完整文件并解释关键代码（例如 UM-ARM-Lab 的 val.py 或 UPenn 的 lua_THOROPKinematics.cpp）。  
+- B) 在 GitHub 上按语言（C++ / Python / ROS）和框架（MoveIt / IKFast / TRAC-IK / Pinocchio）做更精细的搜索并返回更多仓库与文件路径。  
+- C) 帮你把某个 URDF/MJCF 仿真模型（例如 Astribot 或 ALLEX）下载并指出如何在 MoveIt/IKFast 中把腰部作为额外自由度加入 IK 求解（给出实现步骤和示例命令）。  
+- D) 给出针对“腰 + 7-DOF 臂”的常见 IK 处理策略总结（自由参数化、null-space 优先、QP/优化式 IK、IKFast + freeindex、MoveIt 的 redundant_joint/virtual joint 用法等），并配上实现建议。
+
+另外，如果你希望我把检索范围扩大或只看公开仓库/某个组织，请告诉我。要查看更多原始代码搜索结果（GitHub UI），你也可以打开这个搜索页面（结果可能与我检索时略有差异）：
+https://github.com/search?q=waist+%227dof%22+torso+7dof&type=code
+
+要我现在就做哪一项？
