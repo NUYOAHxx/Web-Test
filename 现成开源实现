@@ -1,0 +1,50 @@
+现成开源实现
+双臂 + 可动腰整机 IK
+没有哪个项目正好是你的机器人,但有三类现成实现能覆盖你 90% 的工作,你只需换 URDF。 最接近"直接能跑"的是 Stack-of-Tasks 的 TALOS 整机栈——TALOS 本身就是 2 自由度躯干 + 双 7 轴臂,和你的规格几乎一致,自带 Gazebo + ROS。想要轻量、今天就能改的 Python 整机 IK,mink 和 PyRoki 都自带双臂 + 人形(含躯干)示例。ROS 2 里则有 MoveIt 官方的双臂教程做骨架。下面按"能直接参考的程度"排序。
+
+I. 最接近你规格的整机栈
+1. Stack-of-Tasks + TALOS
+规格几乎一致
+TALOS 是 2 自由度躯干(偏航 + 俯仰)+ 双 7 轴臂,和你的描述基本对上;SoT 的任务优先级框架天然做整机求解,躯干作为公共关节参与两臂任务。 有完整的 Gazebo 仿真 + ROS 控制接口,官方 whole-body 教程演示了同时控躯干、双手、CoM 的任务栈。[1]Stack-of-Tasks — TALOS whole-body motion 教程
+
+直接价值:把 TALOS 的任务栈结构照搬,腰 + 双臂的任务优先级、控制器映射都是现成的参考。
+代价:SoT 的 dynamic-graph 学习曲线陡,偏研究级;固定基座场景要把腿的 contact 任务去掉。
+2. TSID(优化式整机控制)
+基于 Pinocchio 的任务空间逆动力学库,exercises 里有 Talos 等人形的整机(躯干 + 双臂)示例。[2]stack-of-tasks/tsid — 基于 Pinocchio 的任务空间逆动力学 如果你要的不只是 IK 而是力矩级整机控制(带动力学、接触),从这里起步。C++ + Python 绑定,conda 一行装。
+
+II. Python 整机 IK 库(自带双臂/躯干示例,今天可改)
+1. mink
+推荐起步
+基于 MuJoCo 的可微 IK,直接自带双臂(dual_panda、dual_iiwa)和人形(G1、H1、Apollo)示例,还原生支持通过等式约束做闭链——正好是"双手夹同一物体"的协同场景。[3]kevinzakka/mink — 基于 MuJoCo 的 Python 可微 IK,活跃维护至 2026 任务用加权 QP 组合、带关节/速度限位和任意 geom 对的碰撞规避,Apache-2.0,活跃维护,pip install mink 即用。
+
+拿 dual_panda 示例做模板,把两臂 URDF 换成你的、在两臂公共父 link 之上插入腰的 2 个关节,腰就自动进两个 FrameTask 的求解。
+协同抓取用它的 equality-constraint 闭链能力,不用自己推相对约束。
+2. PyRoki
+Berkeley 的 JAX 运动学优化工具,示例里直接有 Bimanual IK、Humanoid Retargeting、带碰撞的 IK、轨迹优化和在线规划——IK 到 trajopt 一套统一框架。[4]chungmin99/pyroki — Berkeley 模块化运动学优化工具,IROS 2025 跨 CPU/GPU/TPU,支持运动学树(你的双臂共腰树没问题),MIT。
+
+比 mink 多了轨迹优化和在线规划,想 IK + 点到点一体化用它;GPU 批量求解也强。
+局限:不支持闭环机构,纯双手协同闭链要自己加软约束;碰撞用胶囊近似。
+3. Pink
+mink 的 Pinocchio 版前身,同样是多任务加权 QP,有人形和双臂示例。[5]stephane-caron/pink — 基于 Pinocchio 的可微 IK 你如果整条栈都在 Pinocchio/ROS 生态(而非 MuJoCo),用它比 mink 更顺,是前一份报告里"路线 B"的直接落地实现。
+
+III. ROS 2 / MoveIt 参考
+MoveIt 2 双臂官方教程
+MoveIt 官方的 dual_arms 教程给了多组双臂的 SRDF、控制器和规划骨架,是你在 ROS 2 里搭 both_arms 组的现成起点。[6]moveit/moveit2_tutorials — dual_arms 教程 在它的基础上把腰的 2 个关节加进规划组、kinematics 插件换成 bio_ik(教程默认的链式求解器解不了双 tip),就成了你要的整机组。
+
+IV. 横向对比:从哪个起步
+按你的优先级选
+项目	引擎/语言	双臂示例	躯干/整机	碰撞	ROS 2
+SoT + TALOS	C++ / dynamic-graph	是(TALOS)	原生(2-DOF 腰)	是	是
+TSID	C++ / Python	是	原生(逆动力学)	是	可接
+mink	MuJoCo / Python	是	是 + 闭链	是	否(纯 Py)
+PyRoki	JAX / Python	是	是 + trajopt	胶囊近似	否(纯 Py)
+Pink	Pinocchio / Python	是	是	是	可接
+MoveIt 2 dual_arms	ROS 2 / C++	是	需自建组	是	原生
+想最快看到双臂+腰动起来、验证可行性:mink,拿 dual_panda 示例改 URDF,一下午能跑。
+目标是 ROS 2 上线:MoveIt 2 dual_arms 教程 + bio_ik 搭骨架,再按需上 cuMotion。
+规格对齐 + 要整机控制参考:SoT/TSID 的 TALOS 栈,直接照搬任务结构。
+V. 适配到你机器人的三步
+通用改法
+换 URDF/MJCF:拿示例(dual_panda / dual_iiwa / TALOS)的双臂结构,把臂换成你的型号,在两臂公共父 link 之上插入腰的偏航 + 俯仰两个关节。
+确认腰在链里:任务/求解器的 root 设在腰下方,示例里两个 end-effector 的 FrameTask 会自动把腰当作共享变量求解——不用改求解代码。
+协同任务:双手夹同一物体时,mink 用等式约束闭链、Pink/PyRoki 加相对任务软约束、MoveIt 用 path constraints。
