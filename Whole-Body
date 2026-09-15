@@ -1,0 +1,154 @@
+技术指南
+TUESDAY, SEPTEMBER 15 2026
+整机 Whole-Body IK
+16-DOF 双臂 + 共享腰
+把腰(2)+ 左臂(7)+ 右臂(7)= 16 个关节放进同一个求解器,给两只手各一个位姿目标、给腰一个正则目标,一次联合求解。 关键不是选哪个工具,而是三件事:运动链的根设在腰下方、腰关节在两条链的雅可比里共享、用权重而不是锁死来约束腰。下面给三条可落地路线(MoveIt+bio_ik / Pinocchio+Pink QP / cuRoboV2),每条都带配置或代码模板,以及共享腰和规划衔接的处理细节。
+
+16
+决策变量 q
+腰 2 + 双臂 14
+12
+任务维度
+2 × SE(3) 末端
+4
+冗余维度
+留给零空间目标
+I. 数学形式:堆叠雅可比与共享腰
+1. 微分 IK 的核心方程
+两只手的任务误差堆成一个向量,雅可比按行堆叠,一次解出全 16 个关节的增量。 设 q ∈ R¹⁶,左右手的末端位姿误差各是 6 维:
+
+e_L = log( X_L(q)⁻¹ · X_L* ) ∈ R⁶ (左手位姿误差)
+e_R = log( X_R(q)⁻¹ · X_R* ) ∈ R⁶ (右手位姿误差)
+
+J_L = ∂X_L/∂q ∈ R⁶ˣ¹⁶ , J_R = ∂X_R/∂q ∈ R⁶ˣ¹⁶
+
+堆叠: J = [ J_L ; J_R ] ∈ R¹²ˣ¹⁶ , e = [ e_L ; e_R ]
+求解: Δq = J⁺ · e (+ 零空间项)
+共享腰的本质就藏在这里: 腰的两个关节(设为 q 的前 2 列)在 J_L 和 J_R 里都有非零列 —— 动一下腰,两只手同时动。所以你无法把 J_L、J_R 拆开各自求逆,必须对堆叠后的 J 一起解。这正是"不能独立解两条臂"的数学原因。
+
+2. 零空间与加权 QP
+16 − 12 = 4 维冗余,用来在不破坏两手目标的前提下塞入次级目标。 实践中不直接用伪逆,而是写成一个带约束的 QP,每帧解一次:
+
+min_Δq Σᵢ wᵢ ‖ Jᵢ Δq − αᵢ eᵢ ‖² + w_reg ‖ Δq − Δq_ref ‖²
+s.t. q⁻ ≤ q + Δq ≤ q⁺ (关节限位)
+          −v_max·dt ≤ Δq ≤ v_max·dt (速度限位)
+两只手的任务用高权重 w_L, w_R;腰的"少动/回中"作为 posture 正则用低权重 w_reg,只作用于腰的 2 列。
+要腰几乎不动就把腰的正则权重调高;要充分利用腰扩大可达范围就调低。这比硬锁腰更灵活。
+II. 运动链结构:根必须在腰下方
+URDF 树与 tip 定义
+最易踩错
+把链的根 link 设在腰关节下方,腰才会进 IK;根设在肩部,腰永远不动。 树状拓扑长这样:
+
+base_link
+ └── waist_yaw_joint   (revolute, 腰旋转)
+      └── waist_pitch_joint  (revolute, 腰俯仰)
+           └── torso_link  ← 双臂的公共父 link
+                ├── l_arm_joint1..7 → l_hand_tcp   (左末端 tip)
+                └── r_arm_joint1..7 → r_hand_tcp   (右末端 tip)
+两个 tip:l_hand_tcp 与 r_hand_tcp,都要在 URDF 里作为独立 link 定义好(带正确的工具坐标偏移)。
+整机组的 base 用 base_link(腰下方),不要用 torso_link,否则腰的 2 个关节不在 base→tip 的路径上,求解器看不到它们。
+III. 路线 A:MoveIt 2 + bio_ik(最快落地)
+1. SRDF 定义整机组
+建一个含全部 16 关节的 group,腰关节只出现一次。 在 Setup Assistant 生成的 SRDF 里:
+
+<group name="both_arms">
+  <joint name="waist_yaw_joint"/>
+  <joint name="waist_pitch_joint"/>
+  <chain base_link="torso_link" tip_link="l_hand_tcp"/>
+  <chain base_link="torso_link" tip_link="r_hand_tcp"/>
+</group>
+另外可保留单臂组 left_arm / right_arm(腰 + 单臂 9-DOF)供单手任务用。
+
+2. kinematics.yaml 挂 bio_ik
+TRAC-IK / KDL 是串行链求解器,解不了这个双 tip 组;bio_ik 原生支持多末端与非链 group。[1]TAMS-Group/bio_ik — MoveIt 多目标 kinematics 插件
+
+both_arms:
+  kinematics_solver: bio_ik/BioIKKinematicsPlugin
+  kinematics_solver_search_resolution: 0.005
+  kinematics_solver_timeout: 0.02
+  kinematics_solver_attempts: 2
+3. 下发多目标 + 腰正则
+bio_ik 把 IK 当作多目标加权优化,你给两个 PoseGoal + 一个 MinimalDisplacementGoal 约束腰。 C++ 里通过 bio_ik::BioIKKinematicsQueryOptions 塞入 goals:
+
+bio_ik::BioIKKinematicsQueryOptions opts;
+opts.replace = true;                       // 用自定义 goals 替换默认
+opts.goals.emplace_back(new bio_ik::PoseGoal(
+      "l_hand_tcp", l_target_pos, l_target_rot, /*weight*/ 1.0));
+opts.goals.emplace_back(new bio_ik::PoseGoal(
+      "r_hand_tcp", r_target_pos, r_target_rot, /*weight*/ 1.0));
+// 让腰尽量少动(相对当前姿态最小位移),低权重
+opts.goals.emplace_back(new bio_ik::MinimalDisplacementGoal(/*weight*/ 0.1));
+
+robot_state.setFromIK(jmg, EigenSTL::vector_Isometry3d(),
+      std::vector<std::string>(), 0.0, moveit::core::GroupStateValidityCallbackFn(), opts);
+双手夹同一物体(闭链协同):把其中一个 PoseGoal 换成 RelativePoseGoal / LinkFunctionGoal,约束两 tip 的相对位姿而非各自绝对位姿。
+还想避奇异/避关节限位,再叠加 ManipulabilityGoal、JointLimitAvoidanceGoal,都进同一个加权目标。
+IV. 路线 B:Pinocchio + Pink QP(最灵活)
+任务栈 + 每帧 QP
+Pinocchio 天然按树建模,Pink 在其上把每个目标写成一个 task,自动组装成加权 QP。[2]stephane-caron/pink — 基于 Pinocchio 的可微 IK 两个 FrameTask(左右手)+ 一个 PostureTask(腰回中正则):
+
+import pink, pinocchio as pin
+from pink.tasks import FrameTask, PostureTask
+
+robot = pin.RobotWrapper.BuildFromURDF("dual_arm_waist.urdf", root_joint=None)
+config = pink.Configuration(robot.model, robot.data, q0)
+
+l_task = FrameTask("l_hand_tcp", position_cost=1.0, orientation_cost=1.0)
+r_task = FrameTask("r_hand_tcp", position_cost=1.0, orientation_cost=1.0)
+posture = PostureTask(cost=1e-2)          # 低权重:约束整体(含腰)少乱动
+posture.set_target(q0)
+
+l_task.set_target(X_l_des)                # SE3 目标
+r_task.set_target(X_r_des)
+
+# 每个控制周期:
+dq = pink.solve_ik(config, [l_task, r_task, posture], dt, solver="quadprog")
+q  = pin.integrate(robot.model, config.q, dq * dt)
+config.update(q)
+关节 / 速度限位由 Pink 的 configuration limits 自动加成 QP 约束,不用手写。
+只想让腰慢动:给腰的关节单独设更小的速度上限,或用单独的 PostureTask 只作用腰 + 高 cost。
+双手协同:加一个作用在"左 tip 相对右 tip"的 RelativeFrameTask,把闭链约束写进 QP。
+这条路适合做实时伺服(几百 Hz 微分 IK),也可当 cuMotion 之外的自研控制器底座。
+V. 路线 C:cuRoboV2 whole-body(GPU + 碰撞感知)
+整机配置与批量求解
+标准 cuRobo 的 motion_gen 是单臂的;要双臂 + 腰联合的碰撞感知 IK 和轨迹优化,走 cuRoboV2 的 whole-body 模式。[3]cuRoboV2 — whole-body 轨迹优化,支持双臂/48-DoF 人形 机器人 YAML 把 16 个关节全列进 cspace,并声明两个末端 link:
+
+robot_cfg:
+  kinematics:
+    urdf_path: dual_arm_waist.urdf
+    base_link: base_link            # 腰下方,腰因此进链
+    ee_links: [l_hand_tcp, r_hand_tcp]   # 双末端
+    cspace:
+      joint_names: [waist_yaw_joint, waist_pitch_joint,
+                    l_arm_joint1, ..., l_arm_joint7,
+                    r_arm_joint1, ..., r_arm_joint7]
+      retract_config: [ ... 16 个默认角 ... ]
+      null_space_weight: [ 5.0, 5.0,  1.0,...,1.0 ]  # 腰权重高=少动
+null_space_weight 给腰两列设更大值,GPU 优化时腰的运动代价高,自然少动,等价于路线 A/B 的正则。
+碰撞环境用 nvblox 从深度相机实时构建,双臂自碰撞由 map-reduce self-collision 处理,适合动态避障。
+前提:NVIDIA GPU。ROS 2 里通过 cuMotion 包挂成 MoveIt 规划插件。
+VI. 共享腰的处理:权重、仲裁、控制器
+1. 三种腰的"参与度"策略
+场景	腰的处理	怎么做
+粗到位 / 扩大可达	充分参与	腰正则/权重调低
+精细双手操作	冻结	腰移出组或设为 mimic/fixed
+常规联合运动	慢速参与	腰高权重 + 低速度上限
+2. 控制器冲突(执行层的坑)
+务必注意
+腰关节在定义上可以出现在多个 group,但执行时绝不能被两个 controller 同时命令。 联合运动一定要用 both_arms 这一个组规划、由一个 JointTrajectoryController 统一下发全 16 轴;不要一边跑 left_arm 控制器、一边跑 right_arm 控制器,否则两者会对腰发出矛盾指令。[4]moveit/moveit2 — ros2_control 控制器与 group 映射
+
+ros2_control 里给整机配一个覆盖 16 关节的轨迹控制器;单臂控制器与整机控制器不要同时 active。
+主从方案(一臂拥有腰)时,从臂的求解要把腰当前值当作固定输入,避免它也去解腰。
+VII. 与点到点规划的衔接
+从 whole-body IK 到可执行轨迹
+whole-body IK 只给你一个满足双手目标的 16-DOF 配置;点到点还需要在 16 维关节空间里规划一条无碰撞路径。
+
+目标生成:先用 bio_ik / Pink 对双手目标位姿解出目标关节配置 q_goal(含腰),作为规划的终点。
+关节空间规划:MoveIt 在 both_arms(16-DOF)上跑 OMPL RRTConnect,自带自碰撞与环境碰撞检测;或用 cuMotion 做 GPU 轨迹优化。
+时间参数化:规划出的路径用 Ruckig / TOTG 生成带速度加速度约束的可执行轨迹,注意腰的速度上限设得比臂低。
+协同任务:双手夹同一物体的过程约束(相对位姿全程不变),用带约束的规划(MoveIt 的 path constraints,或直接在 cuRoboV2/Pink 的轨迹优化里加相对任务)。
+建议的实现顺序
+1. URDF 确认腰在 base→tip 路径上,两 tip 坐标正确;RViz 里手动拖能看到腰动。
+2. 先用路线 A(MoveIt + bio_ik)把双手 IK + 腰正则跑通,验证可达性和腰的参与。
+3. 需要实时伺服或更精细的冗余控制,上路线 B(Pink QP)。
+4. 需要 GPU 提速 + 深度相机动态避障,上路线 C(cuRoboV2 / cuMotion)。
