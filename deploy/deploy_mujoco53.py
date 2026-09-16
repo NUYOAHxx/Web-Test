@@ -12,11 +12,15 @@ import math  # 为方向计算添加
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Union
 import os
+import sys
+
+# 获取项目根目录并添加到 sys.path
+dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if dir_root not in sys.path:
+    sys.path.insert(0, dir_root)
 
 # 导入RRT算法
 from deploy.rrt.RRT_star import RRTStar3D, Node3D
-
-dir_root = os.path.dirname(os.path.abspath(__file__)).replace("deploy", '')
 
 # 全局变量，用于走路控制
 cmd = [0, 0, 0]  # 行走命令 [前进速度, 侧向速度, 转向速度]
@@ -143,6 +147,15 @@ class ArmConfig:
             'right_wrist_pitch': [-1.61443, 1.61443],  # 腕部俯仰
             'right_wrist_yaw': [-1.61443, 1.61443],  # 腕部偏航
 
+            # 左臂关节限位
+            'left_shoulder_pitch': [-3.0892, 2.6704],
+            'left_shoulder_roll': [-1.5882, 2.2515],
+            'left_shoulder_yaw': [-2.618, 2.618],
+            'left_elbow': [-1.0472, 2.0944],
+            'left_wrist_roll': [-1.97222, 1.97222],
+            'left_wrist_pitch': [-1.61443, 1.61443],
+            'left_wrist_yaw': [-1.61443, 1.61443],
+
             # 左手关节限位
             'L_thumb_proximal_yaw': [-0.1, 1.3],
             'L_thumb_proximal_pitch': [0, 0.5],
@@ -182,6 +195,15 @@ class ArmConfig:
             'right_wrist_roll': 25,
             'right_wrist_pitch': 5,
             'right_wrist_yaw': 5,
+
+            # 左臂关节力矩限制
+            'left_shoulder_pitch': 25,
+            'left_shoulder_roll': 25,
+            'left_shoulder_yaw': 25,
+            'left_elbow': 25,
+            'left_wrist_roll': 25,
+            'left_wrist_pitch': 5,
+            'left_wrist_yaw': 5,
 
             # 左手关节力矩限制
             'L_thumb_proximal_yaw': 1,
@@ -301,6 +323,16 @@ class ArmBaseController:
             self.dof_offset = 34
 
         self.target_dof_pos = config.default_angles.copy()
+
+        # 初始化高精度 Pinocchio 混合逆运动学求解器
+        self.arm_name = f"{arm_side}_arm"
+        try:
+            from deploy.g1_hybrid_ik import G1HybridIKSolver
+            self.ik_solver = G1HybridIKSolver()
+            print(f"[{arm_side}臂] 成功加载 G1HybridIKSolver 混合逆运动学求解器")
+        except Exception as e:
+            print(f"[{arm_side}臂] G1HybridIKSolver 初始化失败: {e}, 将使用原生阻尼最小二乘法")
+            self.ik_solver = None
 
     def _get_arm_joint_ids(self) -> List[int]:
         """获取机械臂关节在模型中的索引"""
@@ -641,14 +673,15 @@ class ArmBaseController:
 
         # 将误差转换到基座坐标系
         R = quat_to_mat(base_quat)
-        pos_error = R.T @ pos_error
+        pos_error_pelvis = R.T @ pos_error
 
         # 根据误差大小动态调整步长
         scale = min(0.5, max(0.1, error_norm))
-        pos_error *= scale
+        pos_error_scaled = pos_error_pelvis * scale
 
-        # 使用改进的阻尼最小二乘法求解逆运动学
-        dq = self.damped_ls_ik(jacp, pos_error)
+        start_idx = self.dof_offset
+        end_idx = start_idx + 7
+        current_q = self.target_dof_pos[start_idx:end_idx].copy()
 
         # 保存当前单独控制的关节角度
         saved_angles = {}
@@ -656,10 +689,35 @@ class ArmBaseController:
             if dof_idx < len(self.target_dof_pos):
                 saved_angles[dof_idx] = angle
 
-        # 更新目标关节角度（各自7个关节）
-        start_idx = self.dof_offset
-        end_idx = start_idx + 7
-        self.target_dof_pos[start_idx:end_idx] += dq * self.move_speed
+        # 优先使用高精度 Pinocchio 混合解算器 (带热启动与零空间自然下垂角投影)
+        solved_by_hybrid = False
+        if self.ik_solver is not None:
+            # 坐标变换：转换目标点到 Pinocchio URDF 空间 (原点 world 在 pelvis 初始位置下方的 0.763m 处)
+            pelvis_pos = self.data.xpos[base_id]
+            target_rel = R.T @ (self.last_target_pos - pelvis_pos)
+            target_pin = target_rel + np.array([0.0, 0.0, 0.763])
+
+            success, q_sol, info = self.ik_solver.solve_ik(
+                arm=self.arm_name,
+                target_pos=target_pin,
+                seed_q=current_q,
+                pos_tol=2e-3,
+                max_iters=30,
+            )
+            if success:
+                solved_by_hybrid = True
+                # 平滑步进向目标解，避免突变
+                delta_q = q_sol - current_q
+                max_step = 0.04
+                norm_step = np.linalg.norm(delta_q)
+                if norm_step > max_step:
+                    delta_q *= max_step / norm_step
+                self.target_dof_pos[start_idx:end_idx] += delta_q
+
+        if not solved_by_hybrid:
+            # 使用改进的阻尼最小二乘法求解逆运动学 (兜底方案)
+            dq = self.damped_ls_ik(jacp, pos_error_scaled)
+            self.target_dof_pos[start_idx:end_idx] += dq * self.move_speed
 
         # 恢复单独控制的关节角度（覆盖IK结果）
         for dof_idx, angle in saved_angles.items():
@@ -856,11 +914,13 @@ class ArmRightWithHandController:
 
         # 初始化右手目标位置为当前位置，避免突然运动
         self.hand_target_pos = hand_qpos.copy()
+        self.target_start_pos = hand_qpos.copy()
+        self.target_end_pos = hand_qpos.copy()
 
         # 逐渐过渡到默认状态的插值因子
         self.interp_factor = 0.0
         self.transition_speed = 0.001  # 每次更新增加的插值因子
-        self.transitioning = True  # 标记是否正在过渡中
+        self.transitioning = False  # 标记是否正在过渡中
 
         # 右手状态标记 - True表示握住，False表示松开
         self.is_grasping = False
@@ -1110,11 +1170,13 @@ class ArmLeftWithHandController:
 
         # 初始化左手目标位置为当前位置，避免突然运动
         self.hand_target_pos = hand_qpos.copy()
+        self.target_start_pos = hand_qpos.copy()
+        self.target_end_pos = hand_qpos.copy()
 
         # 逐渐过渡到默认状态的插值因子
         self.interp_factor = 0.0
         self.transition_speed = 0.001  # 每次更新增加的插值因子
-        self.transitioning = True  # 标记是否正在过渡中
+        self.transitioning = False  # 标记是否正在过渡中
 
         # 左手状态标记 - True表示握住，False表示松开
         self.is_grasping = False
@@ -1518,8 +1580,8 @@ class SquatController:
         dqj = np.zeros(self.n_joints, dtype=np.float32)
 
         for i, key in enumerate(self.joint_names):
-            qj[i] = self.data.joint(key).qpos
-            dqj[i] = self.data.joint(key).qvel
+            qj[i] = self.data.joint(key).qpos[0]
+            dqj[i] = self.data.joint(key).qvel[0]
 
         # 获取姿态信息
         quat = self.data.qpos[3:7].copy()
@@ -1632,8 +1694,8 @@ class SquatController:
 
         foot_names = self.joint_names[:12]
         for i, key in enumerate(foot_names):
-            current_pos[i] = self.data.joint(key).qpos
-            current_vel[i] = self.data.joint(key).qvel
+            current_pos[i] = self.data.joint(key).qpos[0]
+            current_vel[i] = self.data.joint(key).qvel[0]
 
         # 获取PD控制增益
         leg_kp = self.config.kps[:12] if len(self.config.kps) >= 12 else np.ones(12) * 100
@@ -1811,7 +1873,10 @@ class InputThread(threading.Thread):
         print("- 输入 'help' 显示帮助信息")
 
         while True:
-            user_input = input("> ")
+            try:
+                user_input = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                break
             parts = user_input.split()
 
             if not parts:
@@ -1915,12 +1980,12 @@ class InputThread(threading.Thread):
 def main():
     """主函数"""
     # 解析命令行参数
-    parser = argparse.ArgumentParser()
-    parser.add_argument("config_file", type=str, help="config file name in the config folder")
+    parser = argparse.ArgumentParser(description="Unitree G1 MuJoCo Simulation Deploy")
+    parser.add_argument("config_file", nargs="?", default="g1_53.yaml", type=str, help="config file name in the config folder (default: g1_53.yaml)")
     args = parser.parse_args()
 
     # 加载配置文件
-    config_path = f"{dir_root}/deploy/config/{args.config_file}"
+    config_path = os.path.join(dir_root, "deploy", "config", args.config_file)
     config = ArmConfig.from_yaml(config_path)
 
     # 打印工作空间限制
@@ -2021,8 +2086,8 @@ def main():
                     elif i in waist_indices:  # 腰部关节 (12-14)
                         # 对腰部关节应用简单的PD控制，保持在默认位置
                         joint_name = waist_joint_names[i - 12]  # 获取对应的关节名称
-                        current_pos = data.joint(joint_name).qpos
-                        current_vel = data.joint(joint_name).qvel
+                        current_pos = data.joint(joint_name).qpos[0]
+                        current_vel = data.joint(joint_name).qvel[0]
 
                         # 从配置文件获取目标位置
                         target_pos = config.default_angles[i] if i < len(config.default_angles) else 0.0
