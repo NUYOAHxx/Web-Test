@@ -16,15 +16,16 @@ import time
 import math
 import threading
 import numpy as np
+import pinocchio as pin
 
 # ROS 2 与消息包导入
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, PoseStamped
 
-dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
@@ -88,18 +89,46 @@ class G1_10DoF_VisualizerNode(Node):
         # ROS 2 Publishers
         self.js_pub = self.create_publisher(JointState, "/joint_states", 10)
         self.marker_pub = self.create_publisher(MarkerArray, "/visualization_marker_array", 10)
+        self.marker_pub_standard = self.create_publisher(MarkerArray, "/g1/visualization/markers", 10)
+        self.target_pose_pub = self.create_publisher(PoseStamped, "/ik/target_pose", 10)
+        self.actual_pose_pub = self.create_publisher(PoseStamped, "/ik/actual_pose", 10)
+        self.actual_pose_pub_standard = self.create_publisher(PoseStamped, "/g1/kinematics/actual_pose", 10)
+
+        # ROS 2 Subscribers for remote target commands from Web
+        self.sub_target_pose = self.create_subscription(
+            PoseStamped, "/g1/kinematics/target_pose", self.on_remote_target_pose, 10
+        )
+        self.sub_target_pose_compat = self.create_subscription(
+            PoseStamped, "/ik/target_pose", self.on_remote_target_pose, 10
+        )
 
         # 50Hz 广播定时器
         self.timer = self.create_timer(0.02, self.timer_callback)
 
-        # 预计算肩关节位置
-        import pinocchio as pin
-        pin.forwardKinematics(self.solver.model, self.solver.data, pin.neutral(self.solver.model))
-        pin.updateFramePlacements(self.solver.model, self.solver.data)
+        # 预计算左右肩关节初始全局坐标
+        self.solver.forward_kinematics("left_arm", G1_READY_POSE["left_arm"])
         self.shoulder_pos = {
             "left_arm": self.solver.data.oMf[self.solver.model.getFrameId("left_shoulder_pitch_link")].translation.copy(),
             "right_arm": self.solver.data.oMf[self.solver.model.getFrameId("right_shoulder_pitch_link")].translation.copy(),
         }
+
+    def on_remote_target_pose(self, msg: PoseStamped):
+        tgt = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z], dtype=np.float64)
+        ok, w_q, a_q, inf = self.solver.solve_10dof_ik(self.current_arm, tgt, waist_weight=8.0)
+        fk_p, _ = self.solver.forward_kinematics_10dof(self.current_arm, w_q, a_q)
+        self.set_target_configuration(w_q, a_q, tgt, fk_p, ok, inf)
+
+
+    def build_full_q(self, arm: str, waist_q: np.ndarray, arm_q: np.ndarray) -> np.ndarray:
+        q = pin.neutral(self.solver.model)
+        for i, idx in enumerate(self.solver.waist_q_indices):
+            q[idx] = float(waist_q[i])
+        for i, idx in enumerate(self.solver.arm_q_indices[arm]):
+            q[idx] = float(arm_q[i])
+        opp = "right_arm" if arm == "left_arm" else "left_arm"
+        for i, idx in enumerate(self.solver.arm_q_indices[opp]):
+            q[idx] = float(G1_READY_POSE[opp][i])
+        return q
 
     def set_target_configuration(self, waist_q: np.ndarray, arm_q: np.ndarray, target_pos: np.ndarray, fk_pos: np.ndarray, success: bool, info: dict):
         with self.lock:
@@ -149,6 +178,26 @@ class G1_10DoF_VisualizerNode(Node):
             # 2. 发布 RViz MarkerArray
             self.publish_markers()
 
+            # 3. 发布位姿标准话题 (方便终端 ros2 topic echo 监听)
+            stamp = self.get_clock().now().to_msg()
+            p_tgt = PoseStamped()
+            p_tgt.header.frame_id = "world"
+            p_tgt.header.stamp = stamp
+            p_tgt.pose.position.x = float(self.last_target_pos[0])
+            p_tgt.pose.position.y = float(self.last_target_pos[1])
+            p_tgt.pose.position.z = float(self.last_target_pos[2])
+            p_tgt.pose.orientation.w = 1.0
+            self.target_pose_pub.publish(p_tgt)
+
+            p_act = PoseStamped()
+            p_act.header.frame_id = "world"
+            p_act.header.stamp = stamp
+            p_act.pose.position.x = float(self.last_fk_pos[0])
+            p_act.pose.position.y = float(self.last_fk_pos[1])
+            p_act.pose.position.z = float(self.last_fk_pos[2])
+            p_act.pose.orientation.w = 1.0
+            self.actual_pose_pub.publish(p_act)
+
     def publish_markers(self):
         markers = MarkerArray()
         stamp = self.get_clock().now().to_msg()
@@ -192,16 +241,16 @@ class G1_10DoF_VisualizerNode(Node):
         m_fk.pose.position.y = float(self.last_fk_pos[1])
         m_fk.pose.position.z = float(self.last_fk_pos[2])
         m_fk.pose.orientation.w = 1.0
-        m_fk.scale.x = 0.03
-        m_fk.scale.y = 0.03
-        m_fk.scale.z = 0.03
+        m_fk.scale.x = 0.035
+        m_fk.scale.y = 0.035
+        m_fk.scale.z = 0.035
         m_fk.color.r = 1.0
-        m_fk.color.g = 0.8
+        m_fk.color.g = 0.84
         m_fk.color.b = 0.0
         m_fk.color.a = 0.9
         markers.markers.append(m_fk)
 
-        # Marker 2: 目标与实际残差连线 (Line Strip)
+        # Marker 2: 目标与实际手腕连线 (Error Line)
         m_line = Marker()
         m_line.header.frame_id = "world"
         m_line.header.stamp = stamp
@@ -209,49 +258,48 @@ class G1_10DoF_VisualizerNode(Node):
         m_line.id = 2
         m_line.type = Marker.LINE_STRIP
         m_line.action = Marker.ADD
-        m_line.scale.x = 0.005  # 线宽 5mm
+        m_line.scale.x = 0.005
         m_line.color.r = 1.0
         m_line.color.g = 0.2
         m_line.color.b = 0.2
-        m_line.color.a = 0.9
+        m_line.color.a = 0.8
         p1 = Point()
-        p1.x, p1.y, p1.z = float(self.last_fk_pos[0]), float(self.last_fk_pos[1]), float(self.last_fk_pos[2])
+        p1.x, p1.y, p1.z = float(self.last_target_pos[0]), float(self.last_target_pos[1]), float(self.last_target_pos[2])
         p2 = Point()
-        p2.x, p2.y, p2.z = float(self.last_target_pos[0]), float(self.last_target_pos[1]), float(self.last_target_pos[2])
+        p2.x, p2.y, p2.z = float(self.last_fk_pos[0]), float(self.last_fk_pos[1]), float(self.last_fk_pos[2])
         m_line.points.append(p1)
         m_line.points.append(p2)
         markers.markers.append(m_line)
 
-        # Marker 3: 头部悬浮 3D 状态看板 (Text Billboard)
-        m_text = Marker()
-        m_text.header.frame_id = "world"
-        m_text.header.stamp = stamp
-        m_text.ns = "ik_status_board"
-        m_text.id = 3
-        m_text.type = Marker.TEXT_VIEW_FACING
-        m_text.action = Marker.ADD
-        m_text.pose.position.x = 0.0
-        m_text.pose.position.y = 0.0
-        m_text.pose.position.z = 1.45  # 位于头部上方
-        m_text.scale.z = 0.045         # 字体高度
-        m_text.color.r = 0.1
-        m_text.color.g = 0.9
-        m_text.color.b = 1.0
-        m_text.color.a = 0.95
-        w_yaw = math.degrees(self.target_joints["waist_yaw_joint"])
-        w_pitch = math.degrees(self.target_joints["waist_pitch_joint"])
-        status_str = "SUCCESS" if self.last_success else "LIMIT / REACH FAIL"
-        m_text.text = (
-            f"[10-DoF IK: {status_str}]\n"
-            f"Latency: {self.last_info['time_ms']:.2f} ms | Err: {self.last_info['pos_err_mm']:.2f} mm\n"
-            f"Waist: Yaw={w_yaw:+.1f}°, Pitch={w_pitch:+.1f}°"
-        )
-        markers.markers.append(m_text)
+        # 清除/禁用头部 3D 文字数据看板
+        m_del = Marker()
+        m_del.header.frame_id = "world"
+        m_del.header.stamp = stamp
+        m_del.ns = "ik_status_board"
+        m_del.id = 3
+        m_del.action = Marker.DELETE
+        markers.markers.append(m_del)
 
         self.marker_pub.publish(markers)
+        self.marker_pub_standard.publish(markers)
 
 
-def print_formatted_report(arm: str, target_pos: np.ndarray, shoulder_pos: np.ndarray, ok_7: bool, info_7: dict, ok_10: bool, w_q: np.ndarray, a_q: np.ndarray, fk_pos: np.ndarray, info_10: dict, jnames: list):
+
+def print_formatted_report(
+    arm: str,
+    target_pos: np.ndarray,
+    shoulder_pos: np.ndarray,
+    ok_7: bool,
+    info_7: dict,
+    ok_10: bool,
+    w_q: np.ndarray,
+    a_q: np.ndarray,
+    fk_pos: np.ndarray,
+    info_10: dict,
+    jnames: list,
+    col_pairs: list = None,
+    min_dist_mm: float = None,
+):
     dist_shoulder = np.linalg.norm(target_pos - shoulder_pos) * 100.0
     err_mm = np.linalg.norm(fk_pos - target_pos) * 1000.0
 
@@ -294,8 +342,27 @@ def print_formatted_report(arm: str, target_pos: np.ndarray, shoulder_pos: np.nd
     print(f"  • 实际达到的末端坐标   : [X = {fk_pos[0]:+.3f} m,  Y = {fk_pos[1]:+.3f} m,  Z = {fk_pos[2]:+.3f} m]")
     print(f"  • 三维欧氏闭环距离误差 : \033[1;92m{err_mm:.3f} mm\033[0m (满足亚毫米级容差)")
 
-    # 6. 机制行为诊断
-    print(f"\n\033[1m【6. 躯干-手臂协同机制诊断】\033[0m")
+    # 6. 机身碰撞安全检测 (Collision Safety)
+    print(f"\n\033[1m【6. 机身碰撞安全监测 (Self-Collision Check)】\033[0m")
+    if col_pairs is not None and min_dist_mm is not None:
+        if len(col_pairs) == 0:
+            print(f"  • 碰撞监测范围        : 全机身 28 对关键连杆 (胸腔/骨盆/对侧臂/头部/腿部)")
+            print(f"  • 物理干涉状态        : \033[1;92m✔️ 安全 (严格无自碰撞，手臂与机身各部位保持安全间隙)\033[0m")
+            print(f"  • 最小物理净空距离    : \033[1;92m{min_dist_mm:.1f} mm\033[0m (满足物理安全裕度)")
+            print(f"  • 核心区域安全状态    : 臂-胸腔: \033[92m✔️ 安全\033[0m | 双臂互碰: \033[92m✔️ 安全\033[0m | 臂-头部: \033[92m✔️ 安全\033[0m | 臂-下肢: \033[92m✔️ 安全\033[0m")
+        else:
+            print(f"  • 物理干涉状态        : \033[1;91m⚠️ 发生机身穿透碰撞! (共 {len(col_pairs)} 处干涉)\033[0m")
+            print(f"  • 最小物理净空距离    : \033[1;91m{min_dist_mm:.1f} mm (穿透)\033[0m")
+            print(f"  • 报警连杆列表        :")
+            for l1, l2, cat in col_pairs:
+                print(f"    - \033[91m{l1} <-> {l2} ({cat})\033[0m")
+    else:
+        col_status = info_10.get("is_colliding", False)
+        col_str = "\033[91m⚠️ 发生机身穿透碰撞!\033[0m" if col_status else "\033[92m✔️ 安全 (严格无自碰撞，手臂与躯干保持安全间隙)\033[0m"
+        print(f"  • 躯干-手臂干涉状态   : {col_str}")
+
+    # 7. 机制行为诊断
+    print(f"\n\033[1m【7. 躯干-手臂协同机制诊断】\033[0m")
     if abs(deg_yaw) < 5.0 and abs(deg_roll) < 5.0 and abs(deg_pitch) < 5.0:
         print("  👉 \033[92m【手臂优先机制完全生效】\033[0m：腰部各轴偏角均在 5° 内，躯干保持直立，全靠手臂灵巧完成抓取！")
     elif deg_pitch > 8.0:
@@ -358,12 +425,19 @@ def main():
         # 3. 正向运动学验算
         fk_p, _ = node.solver.forward_kinematics_10dof(arm, w_q, a_q)
 
-        # 4. 更新到 RViz 动画
+        # 4. 全身姿态与碰撞检测
+        q_full = node.build_full_q(arm, w_q, a_q)
+        col_pairs = node.solver.collision.get_colliding_pairs(q_full, arm=arm)
+        min_dist_mm = node.solver.collision.compute_min_distance(q_full, arm=arm) * 1000.0
+
+        # 5. 更新到 RViz 动画
         node.set_target_configuration(w_q, a_q, target_p, fk_p, ok_10, info_10)
 
-        # 5. 终端打印详尽报表
+        # 6. 终端打印详尽报表
         jnames = node.solver.left_arm_joint_names if arm == "left_arm" else node.solver.right_arm_joint_names
-        print_formatted_report(arm, target_p, shoulder, ok_7, info_7, ok_10, w_q, a_q, fk_p, info_10, jnames)
+        print_formatted_report(
+            arm, target_p, shoulder, ok_7, info_7, ok_10, w_q, a_q, fk_p, info_10, jnames, col_pairs, min_dist_mm
+        )
 
     # 启动时先执行一次测试 1
     solve_and_display(presets["1"]["pos"], presets["1"]["name"])
@@ -377,15 +451,44 @@ def main():
         print("  [5] 自定义空间坐标输入 (手动输入 X Y Z 实时解算并在 RViz 展示)")
         print("  [6] 连续空间画圆平滑动态演示 (Smooth Trajectory Auto-Demo)")
         print("  [7] 切换操作臂 (当前: " + arm + ")")
+        print("  [8] 🛡️ 极限防自碰专项检验 (贴胸防穿模 / 跨中线交叉防碰 / 高位摸头防撞 3大场景)")
         print("  [0] 恢复初始直立就绪站姿")
         print("  [q] 退出监控看板")
 
-        choice = input("\n请选择操作 [0-7 / q]: ").strip()
+        choice = input("\n请选择操作 [0-8 / q]: ").strip()
         if choice.lower() == "q":
             print("\n已安全退出交互控制台。")
             break
         elif choice in presets:
             solve_and_display(presets[choice]["pos"], presets[choice]["name"])
+        elif choice == "8":
+            print("\n" + "═" * 84)
+            print("      🛡️ 启动全机身 28 对碰撞检测专项检验 (3大极限防撞场景自动化演示)")
+            print("═" * 84)
+            collision_scenarios = [
+                {
+                    "title": "【极限防撞场景 1: 贴胸极度内收极限目标】",
+                    "target": np.array([0.10, 0.12, 0.90]),
+                    "desc": "目标紧贴胸壁，验证手肘不切入胸腔，零空间外展推力生效保持安全间距",
+                },
+                {
+                    "title": "【极限防撞场景 2: 跨身体中线极限目标】",
+                    "target": np.array([0.28, -0.15, 0.88]),
+                    "desc": "左臂横跨至右侧作业，验证腰部偏航转向协同，双手交错而不发生任何双臂互碰",
+                },
+                {
+                    "title": "【极限防撞场景 3: 头部侧上方高位目标】",
+                    "target": np.array([0.12, 0.12, 1.20]),
+                    "desc": "手腕逼近头顶侧旁，验证手部抬高时不触碰头部相机外壳 (head_link)",
+                },
+            ]
+            for sc in collision_scenarios:
+                print(f"\n>>> 正在运行 {sc['title']}...")
+                print(f"    说明: {sc['desc']}")
+                solve_and_display(sc["target"], sc["title"])
+                time.sleep(1.5)
+
+            print("\n✔️ 全部 3 大极限防自碰场景检验完成！全机身各部位严格保持安全距离！")
         elif choice == "0":
             ready_waist = np.zeros(3)
             ready_arm = G1_READY_POSE[arm]

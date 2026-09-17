@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unitree G1 · 实时高精度数字孪生与遥测监控大屏 (Pure Telemetry & Dispatcher)</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+    <!-- 本地离线 Three.js 与 OrbitControls 及 STLLoader -->
+    <script src="three.min.js"></script>
+    <script src="OrbitControls.js"></script>
+    <script src="STLLoader.js"></script>
+</head>
+<body class="theme-cyber-dark">
+    <!-- 顶部 HUD 导航栏 -->
+    <header class="hud-header">
+        <div class="brand-group">
+            <div class="logo-orb"></div>
+            <div class="brand-text">
+                <span class="brand-sub">UNITREE G1 HUMANOID ROBOTICS</span>
+                <h1 class="brand-title">Digital Twin & Safety Telemetry Monitor</h1>
+            </div>
+        </div>
+
+        <div class="status-center">
+            <div class="status-chip" id="connectionChip">
+                <span class="pulse-dot"></span>
+                <span class="chip-text" id="connectionStatus">DDS LINK: STANDBY</span>
+            </div>
+            <div class="status-chip chip-cyan" id="topicChip">
+                <span class="chip-label">TOPIC:</span>
+                <span class="chip-val" id="topicNameText">/joint_states</span>
+            </div>
+            <div class="status-chip" id="armDisplayChip">
+                <span class="chip-label">EXEC ARM:</span>
+                <span class="chip-val" id="activeArmText">LEFT ARM</span>
+            </div>
+            <div class="status-chip chip-safe" id="globalCollisionChip">
+                <span class="chip-label">SAFETY:</span>
+                <span class="chip-val" id="globalCollisionText">SECURE (0 Collisions)</span>
+            </div>
+        </div>
+
+        <div class="header-actions">
+            <button class="btn-action-glow" id="btnCircleDemo" title="Trigger continuous trajectory demonstration">
+                <span class="icon">🌀</span>
+                <span>Trajectory Demo</span>
+            </button>
+            <button class="btn-action-ghost" id="btnResetStand" title="Restore nominal stand posture">
+                <span class="icon">🔄</span>
+                <span>Reset Stand</span>
+            </button>
+            <div class="passive-badge">
+                <span class="badge-dot cyan"></span>
+                <span>PASSIVE TELEMETRY (Zero IK · Display Only)</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- 主网格布局 -->
+    <main class="dashboard-grid">
+        <!-- 左侧栏：目标指令控制 + 空间位姿实测 + 测控事件日志 -->
+        <aside class="panel-column left-column">
+            <!-- 模块 1: 目标指令控制 -->
+            <section class="card glass-card">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-tag">COMMAND</span>
+                        <h2 class="card-title">Target Dispatch</h2>
+                    </div>
+                </div>
+
+                <div class="command-panel">
+                    <!-- 操作臂选择 -->
+                    <div class="cmd-row">
+                        <span class="cmd-label">Active Arm:</span>
+                        <div class="arm-toggle-group">
+                            <button class="arm-btn active" id="btnSelectLeftArm" data-arm="left_arm">Left Arm</button>
+                            <button class="arm-btn" id="btnSelectRightArm" data-arm="right_arm">Right Arm</button>
+                        </div>
+                    </div>
+
+                    <!-- 3 轴笛卡尔空间坐标滑块调节 (X, Y, Z) -->
+                    <div class="coord-stepper-grid">
+                        <div class="stepper-item">
+                            <div class="stepper-header">
+                                <span class="axis-badge x">X</span>
+                                <span class="stepper-val" id="valInputX">0.350 m</span>
+                            </div>
+                            <input type="range" id="sliderX" min="0.05" max="0.65" step="0.005" value="0.35">
+                        </div>
+
+                        <div class="stepper-item">
+                            <div class="stepper-header">
+                                <span class="axis-badge y">Y</span>
+                                <span class="stepper-val" id="valInputY">0.220 m</span>
+                            </div>
+                            <input type="range" id="sliderY" min="-0.45" max="0.45" step="0.005" value="0.22">
+                        </div>
+
+                        <div class="stepper-item">
+                            <div class="stepper-header">
+                                <span class="axis-badge z">Z</span>
+                                <span class="stepper-val" id="valInputZ">0.850 m</span>
+                            </div>
+                            <input type="range" id="sliderZ" min="0.45" max="1.25" step="0.005" value="0.85">
+                        </div>
+                    </div>
+
+                    <!-- 典型工况预设 -->
+                    <div class="presets-section">
+                        <span class="presets-title">Presets:</span>
+                        <div class="presets-grid-simple">
+                            <button class="preset-btn" onclick="applyPreset(0.111, 0.212, 0.751, 'Standby')">Standby</button>
+                            <button class="preset-btn" onclick="applyPreset(0.35, 0.22, 0.85, 'Table Reach')">Table Reach</button>
+                            <button class="preset-btn" onclick="applyPreset(0.55, 0.20, 0.80, 'Long Reach')">Long Reach</button>
+                            <button class="preset-btn" onclick="applyPreset(0.38, 0.18, 0.55, 'Low Pick')">Low Pick</button>
+                            <button class="preset-btn" onclick="applyPreset(0.25, 0.42, 0.82, 'Side Reach')">Side Reach</button>
+                            <button class="preset-btn" onclick="applyPreset(0.28, -0.15, 0.88, 'Chest Cross')">Chest Cross</button>
+                        </div>
+                    </div>
+
+                    <!-- 立即下发按钮 -->
+                    <button class="btn-dispatch-solid" id="btnDispatchTarget">
+                        Dispatch Target Pose
+                    </button>
+                </div>
+            </section>
+
+            <!-- 模块 2: 笛卡尔空间位姿遥测 (整洁紧凑表格) -->
+            <section class="card glass-card">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-tag">TELEMETRY</span>
+                        <h2 class="card-title">Spatial Pose (World Frame)</h2>
+                    </div>
+                </div>
+
+                <div class="pose-table-wrap">
+                    <table class="pose-table">
+                        <thead>
+                            <tr>
+                                <th>Axis</th>
+                                <th>Target (cmd)</th>
+                                <th>Actual (FK)</th>
+                                <th>Delta (Δ)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><span class="axis-pill x">X</span></td>
+                                <td class="num" id="tgtX">+0.111</td>
+                                <td class="num" id="actX">+0.111</td>
+                                <td class="num delta" id="deltaX">0.0 mm</td>
+                            </tr>
+                            <tr>
+                                <td><span class="axis-pill y">Y</span></td>
+                                <td class="num" id="tgtY">+0.212</td>
+                                <td class="num" id="actY">+0.212</td>
+                                <td class="num delta" id="deltaY">0.0 mm</td>
+                            </tr>
+                            <tr>
+                                <td><span class="axis-pill z">Z</span></td>
+                                <td class="num" id="tgtZ">+0.751</td>
+                                <td class="num" id="actZ">+0.751</td>
+                                <td class="num delta" id="deltaZ">0.0 mm</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="pose-summary-row">
+                    <div class="summary-metric">
+                        <span class="metric-lbl">Tracking Error ||e||:</span>
+                        <span class="metric-val val-green" id="posErrNum">0.00</span>
+                        <span class="metric-unit">mm</span>
+                    </div>
+                    <div class="summary-metric">
+                        <span class="metric-lbl">Rate:</span>
+                        <span class="metric-val val-cyan" id="streamHzNum">50.0</span>
+                        <span class="metric-unit">Hz</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 模块 3: 实时测控事件日志流 -->
+            <section class="card glass-card flex-auto">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-tag">LOGS</span>
+                        <h2 class="card-title">System Activity Logs</h2>
+                    </div>
+                </div>
+                <div class="log-stream" id="logStream">
+                    <!-- 动态注入日志条目 -->
+                </div>
+            </section>
+        </aside>
+
+        <!-- 中央栏：3D 交互高质感数字孪生视口 -->
+        <section class="center-stage">
+            <div class="viewport-wrapper">
+                <div id="threeCanvasContainer" class="three-container"></div>
+
+                <!-- 视口交互操作提示 -->
+                <div class="viewport-overlay top-left">
+                    <div class="overlay-badge">
+                        <span class="ctrl-key">L-Drag</span> <span>Rotate</span>
+                        <span class="ctrl-sep">·</span>
+                        <span class="ctrl-key">R-Drag</span> <span>Pan</span>
+                        <span class="ctrl-sep">·</span>
+                        <span class="ctrl-key">Wheel</span> <span>Zoom</span>
+                    </div>
+                </div>
+
+                <div class="viewport-overlay top-right">
+                    <button class="btn-glass" id="btnResetCamera">Reset View</button>
+                    <button class="btn-glass" id="btnToggleGrid">Toggle Grid</button>
+                </div>
+
+                <!-- 3D 遥测图例 (标准专业术语) -->
+                <div class="viewport-overlay bottom-left">
+                    <div class="legend-box">
+                        <div class="legend-item"><span class="orb-legend green"></span> Target Pose (p_cmd)</div>
+                        <div class="legend-item"><span class="orb-legend gold"></span> Gripper Actual (p_act FK)</div>
+                        <div class="legend-item"><span class="orb-legend red"></span> Residual Vector (Δe)</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 底部：测控状态底栏 -->
+            <div class="monitor-footer glass-card">
+                <div class="footer-status-left">
+                    <span class="pulse-sparkle"></span>
+                    <span class="footer-status-text" id="footerStatusText">Passive Telemetry: Listening on /joint_states (50Hz) · ROS 2 IK Channel Connected</span>
+                </div>
+                <div class="footer-status-right">
+                    <span class="tag-status">36-Link CAD Model</span>
+                    <span class="tag-status">28 Collision Pairs</span>
+                    <span class="tag-status">10-DoF Weighted DLS</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 右侧栏：航天级 10-DOF 关节遥测仪表 + 全域 28 对安全雷达 -->
+        <aside class="panel-column right-column">
+            <!-- 腰部 3 自由度关节遥测仪表 -->
+            <section class="card glass-card">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-tag">WAIST 3-DOF</span>
+                        <h2 class="card-title">Waist Telemetry (3-DoF)</h2>
+                    </div>
+                    <span class="badge-axis-count">W_waist=8.0</span>
+                </div>
+                <div class="joints-list" id="waistJointsList">
+                    <!-- 动态注入腰部 3 轴双向仪表 -->
+                </div>
+            </section>
+
+            <!-- 机械臂 7 自由度关节遥测仪表 -->
+            <section class="card glass-card">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-tag">ARM 7-DOF</span>
+                        <h2 class="card-title">Arm Telemetry (7-DoF)</h2>
+                    </div>
+                    <span class="badge-axis-count" id="armDofBadge">7-DoF · Left Arm</span>
+                </div>
+                <div class="joints-list" id="armJointsList">
+                    <!-- 动态注入手臂 7 轴双向仪表 -->
+                </div>
+            </section>
+
+            <!-- 全域 28 对安全雷达 (置于关节仪表下方) -->
+            <section class="card glass-card flex-auto">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-tag">SAFETY RADAR</span>
+                        <h2 class="card-title">Safety Radar (28 Pairs)</h2>
+                    </div>
+                    <div class="radar-status-badge safe" id="radarBadge">SECURE</div>
+                </div>
+
+                <div class="radar-metrics">
+                    <div class="clearance-box">
+                        <span class="clearance-label">Min Clearance (d_min)</span>
+                        <div class="clearance-num-row">
+                            <span class="clearance-val" id="minClearanceVal">35.0</span>
+                            <span class="clearance-unit">mm</span>
+                        </div>
+                        <div class="safety-indicator-bar">
+                            <div class="indicator-marker" id="clearanceMarker" style="left: 70%;"></div>
+                        </div>
+                    </div>
+
+                    <!-- 4 大重点区域状态切片 -->
+                    <div class="radar-zones-grid">
+                        <div class="zone-card safe" id="zoneTorso">
+                            <span class="zone-name">Arm - Torso</span>
+                            <span class="zone-status">12 pairs · SECURE</span>
+                        </div>
+                        <div class="zone-card safe" id="zoneArm">
+                            <span class="zone-name">Inter-Arm</span>
+                            <span class="zone-status">4 pairs · SECURE</span>
+                        </div>
+                        <div class="zone-card safe" id="zoneHead">
+                            <span class="zone-name">Arm - Head</span>
+                            <span class="zone-status">4 pairs · SECURE</span>
+                        </div>
+                        <div class="zone-card safe" id="zoneLeg">
+                            <span class="zone-name">Arm - Legs</span>
+                            <span class="zone-status">8 pairs · SECURE</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 碰撞告警清单 -->
+                <div class="collision-alert-box" id="collisionAlertBox" style="display: none;">
+                    <div class="alert-header">⚠️ Colliding Pairs Detected:</div>
+                    <ul class="alert-list" id="alertPairsList"></ul>
+                </div>
+            </section>
+        </aside>
+    </main>
+
+    <!-- 前端驱动逻辑 -->
+    <script src="app.js"></script>
+</body>
+</html>

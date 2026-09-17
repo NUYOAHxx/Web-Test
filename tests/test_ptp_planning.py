@@ -288,7 +288,9 @@ def diagnose_starts_comparison(
 
     # 4. 可选生成可视化分析图
     if export_plot:
-        plot_path = os.path.join(current_dir, "ptp_planning_analysis.png")
+        output_dir = os.path.join(root_dir, "output")
+        os.makedirs(output_dir, exist_ok=True)
+        plot_path = os.path.join(output_dir, "ptp_planning_analysis.png")
         generate_analysis_plot(res_A, res_B, start_A, start_B, goal, plot_path)
         print(f"[图表生成] 诊断分析图已保存至: {plot_path}")
 
