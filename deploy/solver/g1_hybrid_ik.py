@@ -114,23 +114,30 @@ class G1HybridIKSolver:
 
         # ── 1. 构建精选种子链 (Smart Seeding Pipeline) ──
         seed_chain: List[np.ndarray] = []
+        seed_names: List[str] = []
         if seed_q is not None:
             seed_chain.append(np.clip(np.asarray(seed_q, dtype=np.float64), lower_limit, upper_limit))
+            seed_names.append("Warm Start")
         seed_chain.append(ready_q.copy())
+        seed_names.append("Ready Pose")
 
         # 肘部伸直反向种子 (跳出局部极小)
         flipped_elbow = ready_q.copy()
         flipped_elbow[3] = 0.0
         seed_chain.append(flipped_elbow)
+        seed_names.append("Flipped Elbow")
 
         # 4 组限位空间伪随机种子 (终极兜底)
-        for _ in range(4):
+        for idx in range(4):
             rnd = lower_limit + np.random.rand(7) * (upper_limit - lower_limit)
             seed_chain.append(rnd)
+            seed_names.append(f"Random #{idx+1}")
 
         best_q: Optional[np.ndarray] = None
         best_err = float("inf")
         total_iters = 0
+        convergence_trace: List[float] = []
+        seed_switches: List[int] = []
 
         if q_full_base is None:
             q_full = pin.neutral(self.model)
@@ -144,6 +151,7 @@ class G1HybridIKSolver:
         # ── 2. 多级启发式迭代求解 ──
         for seed_idx, current_seed in enumerate(seed_chain):
             q_arm = current_seed.copy()
+            seed_switches.append(total_iters)
 
             for it in range(iters_per_seed):
                 total_iters += 1
@@ -173,6 +181,8 @@ class G1HybridIKSolver:
                     err_vec = pos_err
                     err_val = pos_norm
 
+                convergence_trace.append(round(float(pos_norm * 1000.0), 2))
+
                 # 碰撞检查 (解耦自碰撞引擎)
                 is_col = False
                 if check_collision and self.collision is not None:
@@ -193,6 +203,10 @@ class G1HybridIKSolver:
                             "pos_err_mm": pos_norm * 1000.0,
                             "rot_err_deg": np.degrees(rot_norm),
                             "seed_used": seed_idx,
+                            "seed_name": seed_names[seed_idx] if seed_idx < len(seed_names) else f"Seed #{seed_idx}",
+                            "seed_names": seed_names,
+                            "seed_switches": seed_switches,
+                            "convergence_trace": convergence_trace,
                             "is_colliding": False,
                         }
                     else:
@@ -251,6 +265,10 @@ class G1HybridIKSolver:
             "pos_err_mm": best_err * 1000.0 if best_err != float("inf") else 999.0,
             "rot_err_deg": 0.0,
             "seed_used": -1,
+            "seed_name": "None (Failed)",
+            "seed_names": seed_names,
+            "seed_switches": seed_switches,
+            "convergence_trace": convergence_trace,
             "is_colliding": False,
         }
 
@@ -298,20 +316,25 @@ class G1HybridIKSolver:
 
         # ── 1. 构建 10-DoF 多级精选种子链 ──
         seed_chain: List[np.ndarray] = []
+        seed_names: List[str] = []
         if seed_waist is not None and seed_arm is not None:
             sw = np.clip(np.asarray(seed_waist, dtype=np.float64), self.waist_limits[0], self.waist_limits[1])
             sa = np.clip(np.asarray(seed_arm, dtype=np.float64), self.limits[arm][0], self.limits[arm][1])
             seed_chain.append(np.concatenate([sw, sa]))
+            seed_names.append("Warm Start")
         elif seed_arm is not None:
             sa = np.clip(np.asarray(seed_arm, dtype=np.float64), self.limits[arm][0], self.limits[arm][1])
             seed_chain.append(np.concatenate([ready_waist, sa]))
+            seed_names.append("Warm Arm")
 
         seed_chain.append(ready_10dof.copy())
+        seed_names.append("Ready Pose")
 
         # 腰部前倾俯仰种子 (前倾 ~14 度)
         bend_waist = ready_10dof.copy()
         bend_waist[2] = 0.25
         seed_chain.append(bend_waist)
+        seed_names.append("Waist Pitch")
 
         # 目标方位角偏航转向预估种子
         yaw_angle = np.arctan2(target_pos[1], max(1e-3, target_pos[0]))
@@ -319,11 +342,13 @@ class G1HybridIKSolver:
         turn_waist = ready_10dof.copy()
         turn_waist[0] = yaw_angle * 0.5
         seed_chain.append(turn_waist)
+        seed_names.append("Target Yaw")
 
         # 3 组伪随机种子
-        for _ in range(3):
+        for idx in range(3):
             rnd = lower_limit + np.random.rand(10) * (upper_limit - lower_limit)
             seed_chain.append(rnd)
+            seed_names.append(f"Random #{idx+1}")
 
         # ── 2. 构造非对称加权度量矩阵 W (腰部惩罚大，手臂惩罚小) ──
         weights = np.array([
@@ -337,6 +362,8 @@ class G1HybridIKSolver:
         best_q: Optional[np.ndarray] = None
         best_err = float("inf")
         total_iters = 0
+        convergence_trace: List[float] = []
+        seed_switches: List[int] = []
 
         if q_full_base is None:
             q_full = pin.neutral(self.model)
@@ -350,6 +377,7 @@ class G1HybridIKSolver:
         # ── 3. 协同优化主循环 ──
         for seed_idx, current_seed in enumerate(seed_chain):
             q_10dof = current_seed.copy()
+            seed_switches.append(total_iters)
 
             for it in range(iters_per_seed):
                 total_iters += 1
@@ -377,6 +405,8 @@ class G1HybridIKSolver:
                     err_vec = pos_err
                     err_val = pos_norm
 
+                convergence_trace.append(round(float(pos_norm * 1000.0), 2))
+
                 is_col = False
                 if check_collision and self.collision is not None:
                     is_col = self.collision.is_colliding(arm, q_full, update_fk=False)
@@ -395,6 +425,10 @@ class G1HybridIKSolver:
                             "pos_err_mm": pos_norm * 1000.0,
                             "rot_err_deg": np.degrees(rot_norm),
                             "seed_used": seed_idx,
+                            "seed_name": seed_names[seed_idx] if seed_idx < len(seed_names) else f"Seed #{seed_idx}",
+                            "seed_names": seed_names,
+                            "seed_switches": seed_switches,
+                            "convergence_trace": convergence_trace,
                             "is_colliding": False,
                         }
                     else:
@@ -445,5 +479,9 @@ class G1HybridIKSolver:
             "pos_err_mm": best_err * 1000.0 if best_err != float("inf") else 999.0,
             "rot_err_deg": 0.0,
             "seed_used": -1,
+            "seed_name": "None (Failed)",
+            "seed_names": seed_names,
+            "seed_switches": seed_switches,
+            "convergence_trace": convergence_trace,
             "is_colliding": False,
         }

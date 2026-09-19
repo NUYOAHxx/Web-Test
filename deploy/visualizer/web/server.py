@@ -130,6 +130,10 @@ class RobotTelemetryManager:
             "iters": 0,
             "arm": self.active_arm,
             "mode": "INITIAL_STANDBY",
+            "seed_used": 0,
+            "seed_name": "Standby",
+            "seed_switches": [0],
+            "convergence_trace": [],
             "algorithm": "10-DoF Weighted DLS (W_waist=8.0) + 28-Pair Barrier",
         }
 
@@ -219,10 +223,12 @@ class RobotTelemetryManager:
             data = json.loads(msg.data)
             with self.lock:
                 self.solver_metrics.update(data)
+                seed_info = data.get("seed_name") or f"Seed #{data.get('seed_used', 0)}"
+                seed_desc = f" ({seed_info})" if data.get("seed_used", 0) > 0 else ""
                 self.add_event_log(
                     "IK_SOLVER",
                     f"IK 解算收敛 ({data.get('time_ms', 0):.1f}ms)",
-                    f"残差: {data.get('pos_err_mm', 0):.2f}mm | 步数: {data.get('iters', 0)} | 模式: {data.get('mode', '10-DoF')}"
+                    f"残差: {data.get('pos_err_mm', 0):.2f}mm | 步数: {data.get('iters', 0)}{seed_desc} | 模式: {data.get('mode', '10-DoF')}"
                 )
         except Exception:
             pass

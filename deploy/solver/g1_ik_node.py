@@ -113,6 +113,10 @@ class G1IKSolverNode(Node):
             "iters": 0,
             "arm": self.current_arm,
             "mode": "INITIAL_STANDBY",
+            "seed_used": 0,
+            "seed_name": "Standby",
+            "seed_switches": [0],
+            "convergence_trace": [],
         }
         self.last_collision_status: Dict[str, Any] = {
             "is_colliding": False,
@@ -270,6 +274,10 @@ class G1IKSolverNode(Node):
                 "iters": int(info.get("iters", 0)),
                 "arm": arm,
                 "mode": "10DOF_WEIGHTED_DLS",
+                "seed_used": int(info.get("seed_used", 0)),
+                "seed_name": str(info.get("seed_name", "")),
+                "seed_switches": info.get("seed_switches", [0]),
+                "convergence_trace": info.get("convergence_trace", []),
             }
             self.last_collision_status = {
                 "is_colliding": len(col_pairs) > 0,
@@ -308,6 +316,10 @@ class G1IKSolverNode(Node):
                 "iters": 0,
                 "arm": arm,
                 "mode": "RESET_STAND",
+                "seed_used": 0,
+                "seed_name": "Standby",
+                "seed_switches": [0],
+                "convergence_trace": [0.0],
             }
             self.last_collision_status = {
                 "is_colliding": False,

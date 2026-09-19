@@ -185,7 +185,57 @@
                 </div>
             </section>
 
-            <!-- 模块 3: 实时测控事件日志流 -->
+            <!-- 模块 3: IK 求解收敛动力学曲线 (Convergence Trace) -->
+            <section class="card glass-card" id="cardConvergenceTrace">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-tag">IK CONVERGENCE</span>
+                        <h2 class="card-title">Convergence Trace</h2>
+                    </div>
+                    <span class="badge-axis-count" id="convergenceModeBadge">10-DoF DLS</span>
+                </div>
+
+                <!-- 求解性能指标摘要行 -->
+                <div class="trace-stats-bar">
+                    <div class="trace-stat-item">
+                        <span class="stat-lbl">Time</span>
+                        <span class="stat-val" id="traceTimeVal">0.0 ms</span>
+                    </div>
+                    <div class="trace-stat-item">
+                        <span class="stat-lbl">Iters</span>
+                        <span class="stat-val" id="traceItersVal">0</span>
+                    </div>
+                    <div class="trace-stat-item">
+                        <span class="stat-lbl">Seed</span>
+                        <span class="stat-val" id="traceSeedVal">Standby</span>
+                    </div>
+                    <div class="trace-stat-item">
+                        <span class="stat-lbl">Residue</span>
+                        <span class="stat-val val-green" id="traceResidueVal">0.00 mm</span>
+                    </div>
+                </div>
+
+                <!-- 曲线绘制容器 -->
+                <div class="trace-canvas-wrap">
+                    <canvas id="convergenceCanvas" width="320" height="110"></canvas>
+                    <div class="trace-tooltip" id="traceTooltip" style="display: none;"></div>
+                </div>
+
+                <!-- 曲线底部图例与门限说明 -->
+                <div class="trace-footer">
+                    <div class="trace-legend-item">
+                        <span class="trace-line-sample"></span>
+                        <span class="legend-text">Residual ||e||</span>
+                    </div>
+                    <div class="trace-legend-item">
+                        <span class="tol-line-sample"></span>
+                        <span class="legend-text">Tol (2.0 mm)</span>
+                    </div>
+                    <div class="trace-status-tag safe" id="traceStatusTag">STANDBY</div>
+                </div>
+            </section>
+
+            <!-- 模块 4: 实时测控事件日志流 -->
             <section class="card glass-card flex-auto">
                 <div class="card-header">
                     <div class="card-title-group">

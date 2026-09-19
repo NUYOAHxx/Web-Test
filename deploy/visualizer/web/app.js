@@ -73,6 +73,17 @@ const dom = {
     // 视口辅助
     btnResetCamera: document.getElementById("btnResetCamera"),
     btnToggleGrid: document.getElementById("btnToggleGrid"),
+
+    // IK 收敛动力学曲线
+    cardConvergenceTrace: document.getElementById("cardConvergenceTrace"),
+    convergenceModeBadge: document.getElementById("convergenceModeBadge"),
+    traceTimeVal: document.getElementById("traceTimeVal"),
+    traceItersVal: document.getElementById("traceItersVal"),
+    traceSeedVal: document.getElementById("traceSeedVal"),
+    traceResidueVal: document.getElementById("traceResidueVal"),
+    convergenceCanvas: document.getElementById("convergenceCanvas"),
+    traceTooltip: document.getElementById("traceTooltip"),
+    traceStatusTag: document.getElementById("traceStatusTag"),
 };
 
 // ── 初始化启动入口 ──
@@ -80,6 +91,7 @@ window.addEventListener("DOMContentLoaded", () => {
     initThreeScene();
     initCommandPanel();
     initEventListeners();
+    initConvergenceCanvasEvents();
     connectSSE();
 });
 
@@ -686,6 +698,11 @@ function updateDashboardUI(data) {
     if (data.activity_logs && data.activity_logs.length > 0) {
         renderActivityLogs(data.activity_logs);
     }
+
+    // 8. IK 求解收敛动力学曲线渲染
+    if (data.solver_diagnostics) {
+        renderConvergenceTrace(data.solver_diagnostics);
+    }
 }
 
 function updateZoneCard(elemId, distMm, titleName, defaultCount) {
@@ -795,4 +812,284 @@ function renderActivityLogs(logs) {
             </div>
         </div>
     `).join("");
+}
+
+// ─────────────────────────────────────────────────────────────
+// 8. IK 求解收敛动力学曲线交互与高质感 Canvas 渲染引擎
+// ─────────────────────────────────────────────────────────────
+let currentTraceData = null;
+let hoverTraceIndex = -1;
+
+function initConvergenceCanvasEvents() {
+    const canvas = dom.convergenceCanvas;
+    if (!canvas) return;
+
+    canvas.addEventListener("mousemove", (e) => {
+        if (!currentTraceData || !currentTraceData.convergence_trace || currentTraceData.convergence_trace.length === 0) {
+            return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const padLeft = 32;
+        const padRight = 12;
+        const plotW = rect.width - padLeft - padRight;
+        const trace = currentTraceData.convergence_trace;
+
+        if (mouseX < padLeft || mouseX > padLeft + plotW) {
+            hoverTraceIndex = -1;
+            if (dom.traceTooltip) dom.traceTooltip.style.display = "none";
+            drawTraceCanvas(currentTraceData);
+            return;
+        }
+
+        const ratio = (mouseX - padLeft) / plotW;
+        hoverTraceIndex = Math.round(ratio * (trace.length - 1));
+        hoverTraceIndex = Math.max(0, Math.min(trace.length - 1, hoverTraceIndex));
+
+        // 浮动 Tooltip 显示当前步残差与种子
+        if (dom.traceTooltip) {
+            const errVal = trace[hoverTraceIndex];
+            const getX = padLeft + (hoverTraceIndex / Math.max(1, trace.length - 1)) * plotW;
+            dom.traceTooltip.style.display = "block";
+            dom.traceTooltip.style.left = `${getX}px`;
+
+            let activeSeed = 0;
+            const switches = currentTraceData.seed_switches || [0];
+            const names = currentTraceData.seed_names || [];
+            for (let i = 0; i < switches.length; i++) {
+                if (hoverTraceIndex >= switches[i]) activeSeed = i;
+            }
+            const sName = names[activeSeed] || `Seed #${activeSeed}`;
+            dom.traceTooltip.innerHTML = `Step ${hoverTraceIndex + 1}: <strong>${errVal.toFixed(1)}mm</strong> <span style="opacity:0.7">(${sName})</span>`;
+        }
+
+        drawTraceCanvas(currentTraceData);
+    });
+
+    canvas.addEventListener("mouseleave", () => {
+        hoverTraceIndex = -1;
+        if (dom.traceTooltip) dom.traceTooltip.style.display = "none";
+        if (currentTraceData) drawTraceCanvas(currentTraceData);
+    });
+
+    window.addEventListener("resize", () => {
+        if (currentTraceData) drawTraceCanvas(currentTraceData);
+    });
+}
+
+function renderConvergenceTrace(diagnostics) {
+    currentTraceData = diagnostics;
+    const timeMs = diagnostics.time_ms !== undefined ? diagnostics.time_ms : 0.0;
+    const iters = diagnostics.iters !== undefined ? diagnostics.iters : 0;
+    const posErr = diagnostics.pos_err_mm !== undefined ? diagnostics.pos_err_mm : 0.0;
+    const seedUsed = diagnostics.seed_used !== undefined ? diagnostics.seed_used : 0;
+    const seedName = diagnostics.seed_name || (seedUsed >= 0 ? `Seed #${seedUsed}` : "None");
+    const mode = diagnostics.mode || "10DOF_WEIGHTED_DLS";
+
+    if (dom.convergenceModeBadge) dom.convergenceModeBadge.textContent = mode.replace(/_/g, " ");
+    if (dom.traceTimeVal) dom.traceTimeVal.textContent = `${timeMs.toFixed(1)} ms`;
+    if (dom.traceItersVal) dom.traceItersVal.textContent = `${iters}`;
+    if (dom.traceSeedVal) dom.traceSeedVal.textContent = seedName;
+    if (dom.traceResidueVal) {
+        dom.traceResidueVal.textContent = `${posErr.toFixed(2)} mm`;
+        dom.traceResidueVal.className = posErr < 2.5 ? "stat-val val-green" : (posErr < 15.0 ? "stat-val val-gold" : "stat-val val-red");
+    }
+    if (dom.traceStatusTag) {
+        if (iters === 0) {
+            dom.traceStatusTag.textContent = "STANDBY";
+            dom.traceStatusTag.className = "trace-status-tag safe";
+        } else if (posErr < 2.5) {
+            dom.traceStatusTag.textContent = "CONVERGED";
+            dom.traceStatusTag.className = "trace-status-tag safe";
+        } else if (posErr < 15.0) {
+            dom.traceStatusTag.textContent = "APPROXIMATE";
+            dom.traceStatusTag.className = "trace-status-tag warn";
+        } else {
+            dom.traceStatusTag.textContent = "LOCAL MIN";
+            dom.traceStatusTag.className = "trace-status-tag alert";
+        }
+    }
+
+    drawTraceCanvas(diagnostics);
+}
+
+function drawTraceCanvas(diag) {
+    const canvas = dom.convergenceCanvas;
+    if (!canvas) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const width = rect.width || 320;
+    const height = rect.height || 110;
+
+    if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+    }
+
+    const ctx = canvas.getContext("2d");
+    ctx.save();
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, width, height);
+
+    const padLeft = 32;
+    const padRight = 12;
+    const padTop = 14;
+    const padBottom = 20;
+    const plotW = Math.max(10, width - padLeft - padRight);
+    const plotH = Math.max(10, height - padTop - padBottom);
+
+    const trace = (diag && diag.convergence_trace) ? diag.convergence_trace : [];
+
+    // 背景参考网格线
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.05)";
+    ctx.lineWidth = 1.0;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, padTop);
+    ctx.lineTo(padLeft + plotW, padTop);
+    ctx.moveTo(padLeft, padTop + plotH / 2);
+    ctx.lineTo(padLeft + plotW, padTop + plotH / 2);
+    ctx.moveTo(padLeft, padTop + plotH);
+    ctx.lineTo(padLeft + plotW, padTop + plotH);
+    ctx.stroke();
+
+    if (!trace || trace.length === 0) {
+        ctx.fillStyle = "rgba(100, 150, 190, 0.4)";
+        ctx.font = "10px Inter, monospace";
+        ctx.textAlign = "center";
+        ctx.fillText("Standby (Ready for next IK dispatch)", width / 2, height / 2 + 3);
+        ctx.restore();
+        return;
+    }
+
+    const maxErr = Math.max(15.0, Math.max(...trace) * 1.06);
+
+    const getX = (idx) => padLeft + (idx / Math.max(1, trace.length - 1)) * plotW;
+    const getY = (val) => padTop + plotH - (Math.min(maxErr, Math.max(0, val)) / maxErr) * plotH;
+
+    // 绘制容差门限线 (pos_tol = 2.0 mm)
+    const tolY = getY(2.0);
+    ctx.save();
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = "rgba(255, 184, 0, 0.7)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, tolY);
+    ctx.lineTo(padLeft + plotW, tolY);
+    ctx.stroke();
+    ctx.restore();
+
+    // 刻度文本
+    ctx.fillStyle = "rgba(255, 184, 0, 0.85)";
+    ctx.font = "9px 'JetBrains Mono', monospace";
+    ctx.textAlign = "right";
+    ctx.fillText("2mm", padLeft - 4, tolY + 3);
+
+    ctx.fillStyle = "rgba(140, 160, 180, 0.5)";
+    ctx.fillText(`${Math.round(maxErr)}m`, padLeft - 4, padTop + 9);
+    ctx.fillText("0", padLeft - 4, padTop + plotH);
+
+    // X 轴刻度
+    ctx.textAlign = "left";
+    ctx.fillText("it:1", padLeft, height - 4);
+    ctx.textAlign = "right";
+    ctx.fillText(`it:${trace.length}`, padLeft + plotW, height - 4);
+
+    // 多种子划分虚线 (Multi-start Seed Dividers)
+    const switches = diag.seed_switches || [0];
+    if (switches.length > 1) {
+        switches.slice(1).forEach((swIdx, i) => {
+            if (swIdx < trace.length) {
+                const sx = getX(swIdx);
+                ctx.save();
+                ctx.setLineDash([2, 3]);
+                ctx.strokeStyle = "rgba(0, 240, 255, 0.4)";
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(sx, padTop);
+                ctx.lineTo(sx, padTop + plotH);
+                ctx.stroke();
+
+                ctx.fillStyle = "rgba(0, 240, 255, 0.7)";
+                ctx.font = "8px 'JetBrains Mono', monospace";
+                ctx.textAlign = "center";
+                ctx.fillText(`S${i + 1}`, sx, padTop - 3);
+                ctx.restore();
+            }
+        });
+    }
+
+    // 渐变面积填充
+    const areaGrad = ctx.createLinearGradient(0, padTop, 0, padTop + plotH);
+    areaGrad.addColorStop(0, "rgba(0, 240, 255, 0.22)");
+    areaGrad.addColorStop(0.7, "rgba(0, 255, 136, 0.08)");
+    areaGrad.addColorStop(1, "rgba(0, 255, 136, 0.01)");
+
+    ctx.beginPath();
+    ctx.moveTo(getX(0), padTop + plotH);
+    for (let i = 0; i < trace.length; i++) {
+        ctx.lineTo(getX(i), getY(trace[i]));
+    }
+    ctx.lineTo(getX(trace.length - 1), padTop + plotH);
+    ctx.closePath();
+    ctx.fillStyle = areaGrad;
+    ctx.fill();
+
+    // 核心收敛折线
+    ctx.save();
+    ctx.beginPath();
+    for (let i = 0; i < trace.length; i++) {
+        const px = getX(i);
+        const py = getY(trace[i]);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = "#00f0ff";
+    ctx.lineWidth = 2.0;
+    ctx.shadowColor = "rgba(0, 240, 255, 0.6)";
+    ctx.shadowBlur = 5;
+    ctx.stroke();
+    ctx.restore();
+
+    // 起点与终点圆点
+    const startX = getX(0);
+    const startY = getY(trace[0]);
+    ctx.beginPath();
+    ctx.arc(startX, startY, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#00f0ff";
+    ctx.fill();
+
+    const lastX = getX(trace.length - 1);
+    const lastY = getY(trace[trace.length - 1]);
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = "#00ff88";
+    ctx.shadowColor = "rgba(0, 255, 136, 0.8)";
+    ctx.shadowBlur = 8;
+    ctx.fill();
+
+    // 悬停光标指示器 (Hover Inspection Marker)
+    if (hoverTraceIndex >= 0 && hoverTraceIndex < trace.length) {
+        const hx = getX(hoverTraceIndex);
+        const hy = getY(trace[hoverTraceIndex]);
+
+        ctx.save();
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.4)";
+        ctx.setLineDash([2, 2]);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(hx, padTop);
+        ctx.lineTo(hx, padTop + plotH);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffffff";
+        ctx.shadowColor = "rgba(0, 240, 255, 0.9)";
+        ctx.shadowBlur = 10;
+        ctx.fill();
+        ctx.restore();
+    }
+
+    ctx.restore();
 }
