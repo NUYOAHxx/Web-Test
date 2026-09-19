@@ -12,7 +12,7 @@ Unitree G1 机械臂混合逆运动学核心优化求解器 (Hybrid IK Numerical
 """
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import pinocchio as pin
 
@@ -21,8 +21,18 @@ from deploy.kinematics.g1_model import (
     G1_JOINT_LIMITS,
     G1_WAIST_LIMITS,
     G1_READY_POSE,
+    G1_DEFAULT_STAND_JOINTS,
 )
 from deploy.collision.g1_collision import G1CollisionChecker
+
+# 逆运动学算法五大计算流水线阶段定义 (Stack-of-Tasks 工业标准架构)
+IK_PIPELINE_STAGES = [
+    {"id": 1, "name": "Seed Init",    "fullName": "Multi-Seed Warm Start",         "desc": "热启动 + 启发式多级种子链采样（目标偏航预估 / 腰部俯仰 / 随机保底）"},
+    {"id": 2, "name": "Pinocchio FK", "fullName": "Reduced-Model FK (4.1x)",       "desc": "Pinocchio 10-DoF 裁剪子模型高速前向运动学 (<1μs/次) 与 SE(3) 末端位姿提取"},
+    {"id": 3, "name": "SoT P1 Pos",   "fullName": "SVD-DLS Priority-1 Position",  "desc": "P1 主任务：SVD 自适应阻尼最小二乘位置求解 (Nakamura & Hanafusa 1986)"},
+    {"id": 4, "name": "SoT P2 Rot",   "fullName": "SoT Priority-2 Orientation",   "desc": "P2 次任务：SO(3) 李代数姿态残差在 P1 零空间内严格分层求解 (Mansard 2009)"},
+    {"id": 5, "name": "Null APF",     "fullName": "Null-Space Gradient Projection", "desc": "P3 最低优先级：关节限位势场 + CoM 质心平衡 + 碰撞排斥梯度投影到 P1∩P2 零空间"},
+]
 
 
 class G1HybridIKSolver:
@@ -68,15 +78,121 @@ class G1HybridIKSolver:
         self.ee_frame_ids: Dict[str, int] = self.kin.ee_frame_ids
         self.arm_q_indices: Dict[str, List[int]] = self.kin.arm_q_indices
         self.waist_q_indices: List[int] = self.kin.waist_q_indices
+        self.arm_joint_names: Dict[str, List[str]] = self.kin.arm_joint_names
         self.chain_10dof_indices: Dict[str, List[int]] = self.kin.chain_10dof_indices
 
         # 快捷方法委托
         self.forward_kinematics = self.kin.forward_kinematics
         self.forward_kinematics_10dof = self.kin.forward_kinematics_10dof
+        self.build_q_10dof = self.kin.build_q_10dof
         self.is_colliding = self.collision.is_colliding
+        self.evaluate_balance = self.kin.evaluate_balance
+        self.compute_gravity_torques = self.kin.compute_gravity_torques
+        self.compute_manipulability = self.kin.compute_manipulability
+
+    def _extract_solution_telemetry(
+        self, arm: str, waist_q: np.ndarray, arm_q: np.ndarray, target_rot: Optional[np.ndarray] = None
+    ) -> Dict[str, Any]:
+        """提取解算构型下的 Pinocchio 刚体动力学、全身质心平衡与全 6D 空间位姿指标"""
+        q_10dof = np.concatenate([waist_q, arm_q])
+        q_full = self.build_q_10dof(arm, waist_q, arm_q)
+        bal = self.kin.evaluate_balance(q_full)
+        torques = self.kin.compute_gravity_torques(q_full, arm=arm, is_10dof=True)
+        manip = self.kin.compute_manipulability(arm, q_10dof, has_rot=(target_rot is not None))
+
+        fk_pos, fk_rot = self.kin.forward_kinematics_10dof(arm, waist_q, arm_q)
+        act_rpy_rad = pin.rpy.matrixToRpy(fk_rot)
+        act_rpy_deg = [round(float(np.degrees(v)), 2) for v in act_rpy_rad]
+        act_quat = pin.Quaternion(fk_rot)
+
+        tgt_rpy_deg = None
+        rot_err_deg = 0.0
+        if target_rot is not None:
+            tgt_rpy_rad = pin.rpy.matrixToRpy(target_rot)
+            tgt_rpy_deg = [round(float(np.degrees(v)), 2) for v in tgt_rpy_rad]
+            R_err = target_rot @ fk_rot.T
+            rot_err_deg = round(float(np.degrees(np.linalg.norm(pin.log3(R_err)))), 2)
+
+        return {
+            "com_pos": bal["com_pos"],
+            "com_proj": bal["com_proj"],
+            "balance_margin_mm": bal["margin_mm"],
+            "balance_status": bal["status"],
+            "support_polygon": bal["support_polygon"],
+            "gravity_torques": [round(float(v), 3) for v in torques],
+            "manipulability": manip,
+            "actual_rpy_deg": act_rpy_deg,
+            "actual_quat": [round(float(v), 5) for v in [act_quat.x, act_quat.y, act_quat.z, act_quat.w]],
+            "target_rpy_deg": tgt_rpy_deg,
+            "rot_err_deg": rot_err_deg,
+        }
 
     # --------------------------------------------------------------------------
-    # 7-DoF 单臂混合逆运动学求解 (solve_ik)
+    # 工业标准工具函数 (Industrial-Grade Utilities)
+    # --------------------------------------------------------------------------
+
+    @staticmethod
+    def _svd_dls(
+        J: np.ndarray,
+        sigma_0: float = 0.05,
+        lambda_max: float = 0.12,
+    ) -> np.ndarray:
+        """
+        SVD 自适应阻尼最小二乘伪逆 (Selective Damped Least-Squares)
+        ─────────────────────────────────────────────────────────────
+        参考文献: Nakamura & Hanafusa (1986) + Deo & Walker (1995) 逐奇异值阻尼
+        原理:
+          - 对雅可比 J 做 SVD: J = U Σ V^T
+          - 对每个奇异值 σ_i 单独计算阻尼因子:
+              若 σ_i ≥ σ₀: λᵢ = 0  (远离奇异点，不阻尼，接近精确伪逆)
+              若 σ_i < σ₀: λᵢ² = λ_max² · (1-(σ_i/σ₀)²)  (平滑过渡)
+          - 阻尼伪逆: J⁺ = V diag(σ_i/(σ_i²+λᵢ²)) U^T
+        相比固定阻尼: 大奇异值时精度更高，小奇异值时稳定性更好
+        :param J: 任意维度雅可比矩阵 (m×n)
+        :param sigma_0: 奇异值阈值（触发阻尼的边界）
+        :param lambda_max: 最大阻尼系数
+        :return: J 的阻尼伪逆 (n×m)
+        """
+        U, sigma, Vt = np.linalg.svd(J, full_matrices=False)
+        lambda_sq = np.where(
+            sigma < sigma_0,
+            lambda_max ** 2 * (1.0 - (sigma / sigma_0) ** 2),
+            0.0,
+        )
+        sigma_inv = sigma / (sigma ** 2 + lambda_sq + 1e-16)
+        return Vt.T @ (sigma_inv[:, np.newaxis] * U.T)
+
+    @staticmethod
+    def _joint_limit_gradient(
+        q: np.ndarray,
+        lower: np.ndarray,
+        upper: np.ndarray,
+        margin_frac: float = 0.12,
+        gain: float = 0.20,
+    ) -> np.ndarray:
+        """
+        关节限位梯度势场 (Joint-Limit Repulsive Potential)
+        ─────────────────────────────────────────────────
+        在关节行程内侧 margin_frac (12%) 处激活排斥梯度，平滑推离硬限位
+        :param q: 当前关节角 (n,)
+        :param lower: 下限 (n,)
+        :param upper: 上限 (n,)
+        :param margin_frac: 激活区域占全程的比例
+        :param gain: 梯度强度
+        :return: 排斥梯度 (n,)，朝向关节中点
+        """
+        q_range = upper - lower + 1e-8
+        q_mid   = (lower + upper) * 0.5
+        q_norm  = (q - q_mid) / (q_range * 0.5)   # 归一化到 [-1, 1]
+        thresh  = 1.0 - margin_frac
+        active  = np.abs(q_norm) > thresh
+        grad    = np.zeros_like(q)
+        excess  = (np.abs(q_norm) - thresh) / margin_frac   # [0, 1]
+        grad[active] = -gain * np.sign(q_norm[active]) * excess[active]
+        return grad
+
+    # --------------------------------------------------------------------------
+    # 7-DoF 单臂逆运动学求解 (solve_ik) — SVD-DLS + Stack-of-Tasks
     # --------------------------------------------------------------------------
 
     def solve_ik(
@@ -86,22 +202,20 @@ class G1HybridIKSolver:
         target_rot: Optional[np.ndarray] = None,
         seed_q: Optional[np.ndarray] = None,
         q_full_base: Optional[np.ndarray] = None,
-        pos_tol: float = 1e-3,        # 位置容差: 1mm
-        rot_tol: float = 2e-2,        # 姿态容差: ~1.1 度
-        max_iters: int = 80,
-        damping: float = 0.01,
-        max_step: float = 0.2,
-        check_collision: bool = True, # 是否启用机身防碰撞门禁
+        pos_tol: float = 1e-3,
+        rot_tol: float = 2e-2,
+        max_iters: int = 60,
+        max_step: float = 0.20,
+        check_collision: bool = True,
+        damping: Optional[float] = None,
+        **kwargs,
     ) -> Tuple[bool, np.ndarray, Dict[str, float]]:
         """
-        求解 7-DoF 高精度逆运动学 (带多级精选种子、自碰撞安全门禁与零空间姿态优化)
-        :param arm: "left_arm" 或 "right_arm"
-        :param target_pos: (3,) 空间目标位置 [x, y, z]
-        :param target_rot: (3, 3) 目标旋转矩阵 (可选，若为 None 则只约束位置)
-        :param seed_q: (7,) 初始猜测种子 (首选热启动)
-        :param q_full_base: (29,) 全身基础姿势 (可选)
-        :param check_collision: 是否激活机身防穿透安全保护 (默认 True)
-        :return: (success: bool, q_solution: np.ndarray(7,), info: dict)
+        7-DoF 单臂逆运动学 — Stack-of-Tasks + SVD-DLS
+        ─────────────────────────────────────────────
+        P1 (最高优先级): 位置        —— SVD-DLS 伪逆
+        P2 (次级优先级): 姿态在P1零空间 —— 不破坏已收敛的位置
+        P3 (最低优先级): 关节限位 + 碰撞排斥 —— 次任务梯度
         """
         start_time = time.perf_counter()
         target_pos = np.asarray(target_pos, dtype=np.float64)
@@ -111,8 +225,9 @@ class G1HybridIKSolver:
 
         lower_limit, upper_limit = self.limits[arm]
         ready_q = G1_READY_POSE[arm]
+        n = 7  # 关节数
 
-        # ── 1. 构建精选种子链 (Smart Seeding Pipeline) ──
+        # ── 种子链 ──
         seed_chain: List[np.ndarray] = []
         seed_names: List[str] = []
         if seed_q is not None:
@@ -120,24 +235,20 @@ class G1HybridIKSolver:
             seed_names.append("Warm Start")
         seed_chain.append(ready_q.copy())
         seed_names.append("Ready Pose")
-
-        # 肘部伸直反向种子 (跳出局部极小)
-        flipped_elbow = ready_q.copy()
-        flipped_elbow[3] = 0.0
-        seed_chain.append(flipped_elbow)
+        flipped = ready_q.copy(); flipped[3] = 0.0
+        seed_chain.append(flipped)
         seed_names.append("Flipped Elbow")
-
-        # 4 组限位空间伪随机种子 (终极兜底)
-        for idx in range(4):
-            rnd = lower_limit + np.random.rand(7) * (upper_limit - lower_limit)
-            seed_chain.append(rnd)
-            seed_names.append(f"Random #{idx+1}")
+        for i in range(4):
+            seed_chain.append(lower_limit + np.random.rand(n) * (upper_limit - lower_limit))
+            seed_names.append(f"Random #{i+1}")
 
         best_q: Optional[np.ndarray] = None
         best_err = float("inf")
+        best_rot_norm: float = 0.0
         total_iters = 0
         convergence_trace: List[float] = []
         seed_switches: List[int] = []
+        step_details: List[Dict[str, Any]] = []
 
         if q_full_base is None:
             q_full = pin.neutral(self.model)
@@ -146,134 +257,147 @@ class G1HybridIKSolver:
 
         indices = self.arm_q_indices[arm]
         ee_frame_id = self.ee_frame_ids[arm]
-        iters_per_seed = 35
+        I_n = np.eye(n)
 
-        # ── 2. 多级启发式迭代求解 ──
-        for seed_idx, current_seed in enumerate(seed_chain):
-            q_arm = current_seed.copy()
+        for seed_idx, seed in enumerate(seed_chain):
+            if total_iters >= max_iters:
+                break
+            q_arm = seed.copy()
             seed_switches.append(total_iters)
+            prev_err_mm: Optional[float] = None
+            stall_count = 0
+            per_seed_budget = min(40, max_iters - total_iters)
 
-            for it in range(iters_per_seed):
+            for it in range(per_seed_budget):
                 total_iters += 1
                 for i, idx in enumerate(indices):
                     q_full[idx] = q_arm[i]
 
-                # 前向运动学
+                # ── FK ──
                 pin.forwardKinematics(self.model, self.data, q_full)
                 pin.updateFramePlacements(self.model, self.data)
-
                 oMf = self.data.oMf[ee_frame_id]
                 cur_pos = oMf.translation
                 cur_rot = oMf.rotation
 
-                # 计算位姿误差
-                pos_err = target_pos - cur_pos
-                pos_norm = np.linalg.norm(pos_err)
+                # ── 误差 ──
+                e_pos = target_pos - cur_pos
+                pos_norm = float(np.linalg.norm(e_pos))
+                cur_err_mm = pos_norm * 1000.0
+                delta_mm = round(float(prev_err_mm - cur_err_mm), 3) if prev_err_mm is not None else 0.0
+                prev_err_mm = cur_err_mm
 
+                rot_norm = 0.0
+                e_rot = np.zeros(3)
                 if has_rot:
                     R_err = target_rot @ cur_rot.T
-                    rot_err = pin.log3(R_err)
-                    rot_norm = np.linalg.norm(rot_err)
-                    err_vec = np.hstack([pos_err, rot_err * 0.5])
-                    err_val = pos_norm + rot_norm * 0.1
-                else:
-                    rot_norm = 0.0
-                    err_vec = pos_err
-                    err_val = pos_norm
+                    e_rot = pin.log3(R_err)
+                    rot_norm = float(np.linalg.norm(e_rot))
 
-                convergence_trace.append(round(float(pos_norm * 1000.0), 2))
+                convergence_trace.append(round(cur_err_mm, 2))
+                err_val = pos_norm + rot_norm * 0.1
 
-                # 碰撞检查 (解耦自碰撞引擎)
+                # ── 碰撞检查 ──
                 is_col = False
                 if check_collision and self.collision is not None:
                     is_col = self.collision.is_colliding(arm, q_full, update_fk=False)
 
-                # 仅记录无碰撞的历史最佳姿态
                 if err_val < best_err and not is_col:
                     best_err = err_val
                     best_q = q_arm.copy()
+                    best_rot_norm = rot_norm
 
-                # 收敛判据（必须同时满足位姿容差且无机身自碰撞）
+                status = "SEED_INIT" if it == 0 else "SoT_DESCENT"
+                action = f"Seed ({seed_names[seed_idx]})" if it == 0 else "SVD-DLS SoT P1+P2+P3"
                 if pos_norm < pos_tol and (not has_rot or rot_norm < rot_tol):
                     if not is_col:
+                        step_details.append({"step": total_iters, "iter": it+1, "seed_idx": seed_idx,
+                            "seed_name": seed_names[seed_idx], "pos_err_mm": round(cur_err_mm, 2),
+                            "rot_err_deg": round(float(np.degrees(rot_norm)), 2),
+                            "delta_mm": delta_mm, "damping": 0.0, "is_colliding": False,
+                            "status": "CONVERGED", "action": "Target Reached"})
                         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
                         return True, q_arm, {
-                            "iters": total_iters,
-                            "time_ms": elapsed_ms,
-                            "pos_err_mm": pos_norm * 1000.0,
-                            "rot_err_deg": np.degrees(rot_norm),
-                            "seed_used": seed_idx,
-                            "seed_name": seed_names[seed_idx] if seed_idx < len(seed_names) else f"Seed #{seed_idx}",
-                            "seed_names": seed_names,
-                            "seed_switches": seed_switches,
-                            "convergence_trace": convergence_trace,
-                            "is_colliding": False,
+                            "iters": total_iters, "time_ms": elapsed_ms,
+                            "pos_err_mm": pos_norm * 1000.0, "rot_err_deg": float(np.degrees(rot_norm)),
+                            "seed_used": seed_idx, "seed_name": seed_names[seed_idx],
+                            "seed_names": seed_names, "seed_switches": seed_switches,
+                            "convergence_trace": convergence_trace, "step_details": step_details,
+                            "pipeline_stages": IK_PIPELINE_STAGES, "is_colliding": False,
                         }
                     else:
-                        # 发生自碰撞：在肩部施加反冲脉冲，继续搜索
-                        if arm == "left_arm":
-                            q_arm[1] += 0.08
-                        else:
-                            q_arm[1] -= 0.08
+                        q_arm[1] += 0.08 if arm == "left_arm" else -0.08
+                        step_details.append({"step": total_iters, "iter": it+1, "seed_idx": seed_idx,
+                            "seed_name": seed_names[seed_idx], "pos_err_mm": round(cur_err_mm, 2),
+                            "rot_err_deg": round(float(np.degrees(rot_norm)), 2), "delta_mm": delta_mm,
+                            "damping": 0.0, "is_colliding": True, "status": "COLLISION_PULSE",
+                            "action": "Repulsion Pulse"})
+                else:
+                    step_details.append({"step": total_iters, "iter": it+1, "seed_idx": seed_idx,
+                        "seed_name": seed_names[seed_idx], "pos_err_mm": round(cur_err_mm, 2),
+                        "rot_err_deg": round(float(np.degrees(rot_norm)), 2), "delta_mm": delta_mm,
+                        "damping": 0.0, "is_colliding": bool(is_col),
+                        "status": status, "action": action})
 
-                # 自适应阻尼
-                cur_damping = max(5e-4, min(0.02, pos_norm * 0.05))
-
-                # 提取雅可比子空间
+                # ── 雅可比 ──
                 J_full = pin.computeFrameJacobian(
-                    self.model, self.data, q_full, ee_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
-                )
-                J_arm = J_full[:, indices] if has_rot else J_full[:3, indices]
+                    self.model, self.data, q_full, ee_frame_id,
+                    pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
+                J_pos = J_full[:3, indices]   # 3×7
+                J_rot = J_full[3:, indices]   # 3×7
 
-                # 阻尼最小二乘伪逆
-                m = J_arm.shape[0]
-                damping_matrix = (cur_damping ** 2) * np.eye(m)
-                J_pinv = J_arm.T @ np.linalg.solve(J_arm @ J_arm.T + damping_matrix, np.eye(m))
+                # ── Stack-of-Tasks ──
+                # P1: 位置主任务 (SVD-DLS)
+                J1_pinv = self._svd_dls(J_pos)          # 7×3
+                dq = J1_pinv @ e_pos                     # 7
+                N1 = I_n - J1_pinv @ J_pos               # 7×7 (P1零空间)
 
-                # 主任务位移量
-                dq_main = J_pinv @ err_vec
+                if has_rot:
+                    # P2: 姿态次任务，严格在P1零空间内求解（不破坏位置）
+                    J2_aug = J_rot @ N1                   # 3×7, P1零空间中的姿态雅可比
+                    J2_aug_pinv = self._svd_dls(J2_aug)  # 7×3
+                    dq += N1 @ (J2_aug_pinv @ e_rot)     # 7
+                    N12 = N1 @ (I_n - J2_aug_pinv @ J2_aug)  # P1∩P2零空间
+                else:
+                    N12 = N1
 
-                # 零空间次级任务：就绪姿态 + 限位排斥 + 防碰撞外展势场
-                q_mid = (lower_limit + upper_limit) / 2.0
-                q_range = upper_limit - lower_limit
-                grad_limits = -0.1 * (q_arm - q_mid) / (q_range ** 2 + 1e-4)
-                grad_posture = -0.2 * (q_arm - ready_q)
-
-                grad_repulse = np.zeros(7)
+                # P3: 关节限位 + 碰撞排斥（最低优先级，投影到 P1∩P2 零空间）
+                grad_limits = self._joint_limit_gradient(q_arm, lower_limit, upper_limit)
+                grad_posture = -0.15 * (q_arm - ready_q)
+                grad_repulse = np.zeros(n)
                 if check_collision and self.collision is not None:
                     grad_repulse = self.collision.get_repulsion_gradient_7dof(arm, q_arm)
+                dq += N12 @ (grad_posture + grad_limits + grad_repulse)
 
-                null_proj = np.eye(7) - J_pinv @ J_arm
-                dq_null = null_proj @ (grad_posture + grad_limits + grad_repulse)
-
-                dq = dq_main + dq_null
-
-                # 单步截断
+                # ── 步长截断 + 关节限位裁剪 ──
                 step_norm = np.linalg.norm(dq)
                 if step_norm > max_step:
                     dq *= max_step / step_norm
-
                 q_arm = np.clip(q_arm + dq, lower_limit, upper_limit)
 
-        # 超时未完全收敛：返回无碰撞最佳解（若无则安全回退至就绪位）
+                # ── 停滞检测：连续 8 步无改善则换种子 ──
+                if delta_mm < 0.05:
+                    stall_count += 1
+                    if stall_count >= 8:
+                        break
+                else:
+                    stall_count = 0
+
         if best_q is None:
             best_q = ready_q.copy()
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         return False, best_q, {
-            "iters": total_iters,
-            "time_ms": elapsed_ms,
+            "iters": total_iters, "time_ms": elapsed_ms,
             "pos_err_mm": best_err * 1000.0 if best_err != float("inf") else 999.0,
-            "rot_err_deg": 0.0,
-            "seed_used": -1,
-            "seed_name": "None (Failed)",
-            "seed_names": seed_names,
-            "seed_switches": seed_switches,
-            "convergence_trace": convergence_trace,
-            "is_colliding": False,
+            "rot_err_deg": float(np.degrees(best_rot_norm)),
+            "seed_used": -1, "seed_name": "None (Failed)",
+            "seed_names": seed_names, "seed_switches": seed_switches,
+            "convergence_trace": convergence_trace, "step_details": step_details,
+            "pipeline_stages": IK_PIPELINE_STAGES, "is_colliding": False,
         }
 
-    # --------------------------------------------------------------------------
-    # 10-DoF 躯干-手臂协同加权逆运动学求解 (solve_10dof_ik)
+
+    # 10-DoF 协同逆运动学 (solve_10dof_ik) — Stack-of-Tasks 工业标准
     # --------------------------------------------------------------------------
 
     def solve_10dof_ik(
@@ -281,207 +405,301 @@ class G1HybridIKSolver:
         arm: str,
         target_pos: np.ndarray,
         target_rot: Optional[np.ndarray] = None,
+        target_rpy: Optional[np.ndarray] = None,
         seed_waist: Optional[np.ndarray] = None,
         seed_arm: Optional[np.ndarray] = None,
         q_full_base: Optional[np.ndarray] = None,
-        pos_tol: float = 2e-3,        # 位置容差: 2mm
-        rot_tol: float = 3e-2,        # 姿态容差: ~1.7 度
-        max_iters: int = 50,
-        waist_weight: float = 8.0,    # 腰部相对手臂的阻尼惩罚倍率 (手臂优先)
-        max_step: float = 0.15,
+        pos_tol: float = 1e-3,       # 位置收敛容差: 1.0 mm
+        rot_tol: float = 2.0e-2,     # 姿态收敛容差: ~1.15°
+        max_iters: int = 200,        # 全局最大迭代步数
+        waist_weight: float = 8.0,   # 腰部惩罚倍率（手臂优先）
+        max_step: float = 0.18,      # 单步最大关节位移 (rad)
         check_collision: bool = True,
-    ) -> Tuple[bool, np.ndarray, np.ndarray, Dict[str, float]]:
+        damping: Optional[float] = None,
+        **kwargs,
+    ) -> Tuple[bool, np.ndarray, np.ndarray, Dict[str, Any]]:
         """
-        求解 10-DoF (3-DoF 腰部 + 7-DoF 手臂) 躯干-手臂加权协同逆运动学
-        采用非对称加权自适应阻尼最小二乘 (Weighted DLS) 与自碰撞安全闭环
-        :param arm: "left_arm" 或 "right_arm"
-        :param target_pos: (3,) 空间目标位置 [x, y, z]
-        :param target_rot: (3, 3) 目标旋转矩阵 (可选)
-        :param seed_waist: (3,) 初始腰部角度 (用于热启动)
-        :param seed_arm: (7,) 初始手臂角度 (用于热启动)
-        :param waist_weight: 腰部惩罚权重 (默认 8.0，实现“近处不动腰，远处才弯腰”)
-        :param check_collision: 是否激活机身防穿透安全保护 (默认 True)
-        :return: (success: bool, waist_q: np.ndarray(3,), arm_q: np.ndarray(7,), info: dict)
+        10-DoF (3腰 + 7臂) 躯干-手臂协同逆运动学 — Stack-of-Tasks 工业标准架构
+        ─────────────────────────────────────────────────────────────────────────
+        优先级层级:
+          P1: 末端位置  (3D, 最高优先级) — SVD-DLS 自适应阻尼伪逆
+          P2: 末端姿态  (3D, 在P1零空间) — 严格分层，位置已收敛后才修正姿态
+          P3: 关节限位 + CoM平衡 + 碰撞排斥 (最低优先级, 在P1∩P2零空间)
+        积分方式: pin.integrate (Riemannian流形积分，10-DoF裁剪子模型 4.1x加速)
+        参考文献: Mansard & Chaumette (2009), Nakamura & Hanafusa (1986)
         """
         start_time = time.perf_counter()
         target_pos = np.asarray(target_pos, dtype=np.float64)
+
+        # 支持欧拉角输入
+        if target_rot is None and target_rpy is not None:
+            rpy = np.asarray(target_rpy, dtype=np.float64)
+            target_rot = pin.rpy.rpyToMatrix(float(rpy[0]), float(rpy[1]), float(rpy[2]))
         has_rot = target_rot is not None
         if has_rot:
             target_rot = np.asarray(target_rot, dtype=np.float64)
 
+        # ── 运动学约束 ──
         lower_limit, upper_limit = self.limits_10dof[arm]
-        ready_arm = G1_READY_POSE[arm]
-        ready_waist = np.zeros(3, dtype=np.float64)
-        ready_10dof = np.concatenate([ready_waist, ready_arm])
+        ready_arm  = G1_READY_POSE[arm]
+        ready_10dof = np.concatenate([np.zeros(3), ready_arm])
+        n = 10  # 关节数
+        I_n = np.eye(n)
 
-        # ── 1. 构建 10-DoF 多级精选种子链 ──
+        # 加权伪逆权重矩阵 W^{-1} (腰部高惩罚 → 手臂优先)
+        w = np.ones(n)
+        w[:3] = waist_weight          # 腰部 3 关节权重放大
+        W_inv = np.diag(1.0 / w)     # W^{-1}: 各关节运动代价倒数
+        W_inv_sqrt = np.diag(1.0 / np.sqrt(w))  # W^{-1/2}: 用于加权 SVD
+
+        # ── 裁剪子模型 (4.1x 加速) ──
+        model_r  = self.kin.model_10dof[arm]
+        data_r   = self.kin.data_10dof[arm]
+        ee_r_id  = self.kin.ee_frame_ids_10dof[arm]
+
+        # ── 种子链 ──
         seed_chain: List[np.ndarray] = []
         seed_names: List[str] = []
+
+        # 1. 热启动种子
         if seed_waist is not None and seed_arm is not None:
             sw = np.clip(np.asarray(seed_waist, dtype=np.float64), self.waist_limits[0], self.waist_limits[1])
-            sa = np.clip(np.asarray(seed_arm, dtype=np.float64), self.limits[arm][0], self.limits[arm][1])
+            sa = np.clip(np.asarray(seed_arm,   dtype=np.float64), self.limits[arm][0], self.limits[arm][1])
             seed_chain.append(np.concatenate([sw, sa]))
             seed_names.append("Warm Start")
-        elif seed_arm is not None:
-            sa = np.clip(np.asarray(seed_arm, dtype=np.float64), self.limits[arm][0], self.limits[arm][1])
-            seed_chain.append(np.concatenate([ready_waist, sa]))
-            seed_names.append("Warm Arm")
 
+        # 2. 就绪姿态
         seed_chain.append(ready_10dof.copy())
         seed_names.append("Ready Pose")
 
-        # 腰部前倾俯仰种子 (前倾 ~14 度)
-        bend_waist = ready_10dof.copy()
-        bend_waist[2] = 0.25
-        seed_chain.append(bend_waist)
+        # 3. 腰部前倾种子（高前伸目标）
+        fwd_seed = ready_10dof.copy()
+        dx = float(target_pos[0]) - 0.25
+        fwd_seed[2] = float(np.clip(dx * 0.6, self.waist_limits[0][2], self.waist_limits[1][2]))
+        seed_chain.append(fwd_seed)
         seed_names.append("Waist Pitch")
 
-        # 目标方位角偏航转向预估种子
-        yaw_angle = np.arctan2(target_pos[1], max(1e-3, target_pos[0]))
-        yaw_angle = np.clip(yaw_angle, lower_limit[0], upper_limit[0])
-        turn_waist = ready_10dof.copy()
-        turn_waist[0] = yaw_angle * 0.5
-        seed_chain.append(turn_waist)
-        seed_names.append("Target Yaw")
+        # 4. 目标偏航预估种子
+        yaw_seed = ready_10dof.copy()
+        yaw_est = float(np.arctan2(target_pos[1], target_pos[0] + 1e-6))
+        yaw_seed[0] = float(np.clip(yaw_est * 0.5, self.waist_limits[0][0], self.waist_limits[1][0]))
+        seed_chain.append(yaw_seed)
+        seed_names.append("Yaw Estimate")
 
-        # 3 组伪随机种子
-        for idx in range(3):
-            rnd = lower_limit + np.random.rand(10) * (upper_limit - lower_limit)
+        # 5. 随机保底种子 × 3
+        for ri in range(3):
+            rnd = lower_limit + np.random.rand(n) * (upper_limit - lower_limit)
+            rnd[:3] *= 0.35   # 腰部种子缩小范围，避免奇异姿态
             seed_chain.append(rnd)
-            seed_names.append(f"Random #{idx+1}")
+            seed_names.append(f"Random #{ri+1}")
 
-        # ── 2. 构造非对称加权度量矩阵 W (腰部惩罚大，手臂惩罚小) ──
-        weights = np.array([
-            waist_weight * 0.8,   # waist_yaw
-            waist_weight * 1.5,   # waist_roll
-            waist_weight * 1.0,   # waist_pitch
-            1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0  # 7个手臂关节
-        ], dtype=np.float64)
-        W_inv = np.diag(1.0 / weights)
-
-        best_q: Optional[np.ndarray] = None
-        best_err = float("inf")
-        total_iters = 0
+        # ── 全局最优追踪 ──
+        best_q:        Optional[np.ndarray] = None
+        best_err:      float = float("inf")
+        best_rot_norm: float = 0.0
+        total_iters:   int   = 0
         convergence_trace: List[float] = []
-        seed_switches: List[int] = []
+        seed_switches:     List[int]   = []
+        step_details:      List[Dict[str, Any]] = []
 
+        # ── 全身 q_full（用于碰撞检查 / CoM）──
         if q_full_base is None:
             q_full = pin.neutral(self.model)
         else:
             q_full = q_full_base.copy()
-
         indices = self.chain_10dof_indices[arm]
-        ee_frame_id = self.ee_frame_ids[arm]
-        iters_per_seed = 30
 
-        # ── 3. 协同优化主循环 ──
-        for seed_idx, current_seed in enumerate(seed_chain):
-            q_10dof = current_seed.copy()
+        # ── 主循环：多种子 Stack-of-Tasks ──
+        for seed_idx, seed in enumerate(seed_chain):
+            if total_iters >= max_iters:
+                break
+            q = np.clip(seed.copy(), lower_limit, upper_limit)
             seed_switches.append(total_iters)
+            prev_err_mm: Optional[float] = None
+            stall_count: int = 0
+            per_seed_budget = min(40, max_iters - total_iters)
 
-            for it in range(iters_per_seed):
+            for it in range(per_seed_budget):
                 total_iters += 1
-                for i, idx in enumerate(indices):
-                    q_full[idx] = q_10dof[i]
 
-                pin.forwardKinematics(self.model, self.data, q_full)
-                pin.updateFramePlacements(self.model, self.data)
-
-                oMf = self.data.oMf[ee_frame_id]
+                # ── 2. FK (裁剪子模型，4.1x 加速) ──
+                pin.forwardKinematics(model_r, data_r, q)
+                pin.updateFramePlacements(model_r, data_r)
+                oMf    = data_r.oMf[ee_r_id]
                 cur_pos = oMf.translation
                 cur_rot = oMf.rotation
 
-                pos_err = target_pos - cur_pos
-                pos_norm = np.linalg.norm(pos_err)
+                # ── 误差计算 ──
+                e_pos    = target_pos - cur_pos
+                pos_norm = float(np.linalg.norm(e_pos))
+                cur_err_mm = pos_norm * 1000.0
+                delta_mm   = round(float(prev_err_mm - cur_err_mm), 3) if prev_err_mm is not None else 0.0
+                prev_err_mm = cur_err_mm
 
+                rot_norm = 0.0
+                e_rot    = np.zeros(3)
                 if has_rot:
-                    R_err = target_rot @ cur_rot.T
-                    rot_err = pin.log3(R_err)
-                    rot_norm = np.linalg.norm(rot_err)
-                    err_vec = np.hstack([pos_err, rot_err * 0.5])
-                    err_val = pos_norm + rot_norm * 0.1
-                else:
-                    rot_norm = 0.0
-                    err_vec = pos_err
-                    err_val = pos_norm
+                    R_err    = target_rot @ cur_rot.T
+                    e_rot    = pin.log3(R_err)              # SO(3) 李代数误差
+                    rot_norm = float(np.linalg.norm(e_rot))
 
-                convergence_trace.append(round(float(pos_norm * 1000.0), 2))
+                convergence_trace.append(round(cur_err_mm, 2))
+                err_val = pos_norm + rot_norm * 0.1
 
+                # ── 碰撞检查 ──
                 is_col = False
                 if check_collision and self.collision is not None:
-                    is_col = self.collision.is_colliding(arm, q_full, update_fk=False)
+                    for i, idx in enumerate(indices):
+                        q_full[idx] = q[i]
+                    is_col = self.collision.is_colliding(arm, q_full, update_fk=True)
 
                 if err_val < best_err and not is_col:
-                    best_err = err_val
-                    best_q = q_10dof.copy()
+                    best_err      = err_val
+                    best_q        = q.copy()
+                    best_rot_norm = rot_norm
 
-                # 收敛判据
-                if pos_norm < pos_tol and (not has_rot or rot_norm < rot_tol):
-                    if not is_col:
-                        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-                        return True, q_10dof[:3].copy(), q_10dof[3:].copy(), {
-                            "iters": total_iters,
-                            "time_ms": elapsed_ms,
-                            "pos_err_mm": pos_norm * 1000.0,
-                            "rot_err_deg": np.degrees(rot_norm),
-                            "seed_used": seed_idx,
-                            "seed_name": seed_names[seed_idx] if seed_idx < len(seed_names) else f"Seed #{seed_idx}",
-                            "seed_names": seed_names,
-                            "seed_switches": seed_switches,
-                            "convergence_trace": convergence_trace,
-                            "is_colliding": False,
-                        }
-                    else:
-                        if arm == "left_arm":
-                            q_10dof[4] += 0.08
-                        else:
-                            q_10dof[4] -= 0.08
+                # ── 收敛判据 ──
+                if pos_norm < pos_tol and (not has_rot or rot_norm < rot_tol) and not is_col:
+                    step_details.append({
+                        "step": total_iters, "iter": it + 1,
+                        "seed_idx": seed_idx, "seed_name": seed_names[seed_idx],
+                        "pos_err_mm": round(cur_err_mm, 2),
+                        "rot_err_deg": round(float(np.degrees(rot_norm)), 2),
+                        "delta_mm": delta_mm, "damping": 0.0,
+                        "is_colliding": False, "status": "CONVERGED",
+                        "action": "Target Reached",
+                    })
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                    telemetry  = self._extract_solution_telemetry(arm, q[:3], q[3:], target_rot=target_rot)
+                    return True, q[:3].copy(), q[3:].copy(), {
+                        "iters": total_iters, "time_ms": elapsed_ms,
+                        "pos_err_mm": pos_norm * 1000.0,
+                        "rot_err_deg": float(np.degrees(rot_norm)),
+                        "seed_used": seed_idx, "seed_name": seed_names[seed_idx],
+                        "seed_names": seed_names, "seed_switches": seed_switches,
+                        "convergence_trace": convergence_trace,
+                        "step_details": step_details,
+                        "pipeline_stages": IK_PIPELINE_STAGES,
+                        "is_colliding": False,
+                        "mode": "10DOF_6DOF_POSE" if has_rot else "10DOF_3DOF_POS",
+                        **telemetry,
+                    }
 
-                cur_damping = max(1e-3, min(0.03, pos_norm * 0.05))
+                # ── 碰撞排斥脉冲 ──
+                if is_col:
+                    q[4] += 0.08 if arm == "left_arm" else -0.08
+                    step_details.append({
+                        "step": total_iters, "iter": it + 1,
+                        "seed_idx": seed_idx, "seed_name": seed_names[seed_idx],
+                        "pos_err_mm": round(cur_err_mm, 2),
+                        "rot_err_deg": round(float(np.degrees(rot_norm)), 2),
+                        "delta_mm": delta_mm, "damping": 0.0,
+                        "is_colliding": True, "status": "COLLISION_PULSE",
+                        "action": "Repulsion Pulse",
+                    })
+                    continue
 
-                J_full = pin.computeFrameJacobian(
-                    self.model, self.data, q_full, ee_frame_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
-                )
-                J = J_full[:, indices] if has_rot else J_full[:3, indices]
+                step_details.append({
+                    "step": total_iters, "iter": it + 1,
+                    "seed_idx": seed_idx, "seed_name": seed_names[seed_idx],
+                    "pos_err_mm": round(cur_err_mm, 2),
+                    "rot_err_deg": round(float(np.degrees(rot_norm)), 2),
+                    "delta_mm": delta_mm, "damping": 0.0,
+                    "is_colliding": False,
+                    "status": "SEED_INIT" if it == 0 else "SoT_DESCENT",
+                    "action": f"Seed ({seed_names[seed_idx]})" if it == 0 else "SoT P1+P2+P3",
+                })
 
-                m = J.shape[0]
-                A = J @ W_inv @ J.T + (cur_damping ** 2) * np.eye(m)
-                dq_main = W_inv @ J.T @ np.linalg.solve(A, err_vec)
+                # ── 3. 雅可比 (裁剪子模型) ──
+                J_red = pin.computeFrameJacobian(
+                    model_r, data_r, q, ee_r_id,
+                    pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)  # 6×10
+                J_pos_r = J_red[:3, :]   # 3×10
+                J_rot_r = J_red[3:, :]   # 3×10
 
-                # 零空间次级任务：腰部回正 + 就绪姿态 + 限位 + 防穿透排斥
-                grad_waist = -0.6 * q_10dof[:3]
-                grad_arm = -0.2 * (q_10dof[3:] - ready_arm)
-                q_mid = (lower_limit + upper_limit) / 2.0
-                q_range = upper_limit - lower_limit
-                grad_limits = -0.1 * (q_10dof - q_mid) / (q_range ** 2 + 1e-4)
+                # ── 4. Stack-of-Tasks (P1: 位置) — 加权 SVD-DLS ──
+                # 加权形式: J_w = J @ W^{-1/2}, J^#_W = W^{-1/2} (J_w)^#
+                J1_w      = J_pos_r @ W_inv_sqrt           # 3×10 (列缩放)
+                J1_w_pinv = self._svd_dls(J1_w)            # 10×3
+                J1_pinv   = W_inv_sqrt @ J1_w_pinv         # 10×3 加权伪逆
+                dq        = J1_pinv @ e_pos                 # P1 主任务步
+                N1        = I_n - J1_pinv @ J_pos_r        # P1 零空间投影子 (10×10)
 
-                grad_repulse = np.zeros(10)
+                if has_rot:
+                    # ── 5. SoT P2: 姿态在P1零空间 — 不破坏已收敛的位置 ──
+                    J2_aug      = J_rot_r @ N1              # 3×10 (投影到P1零空间)
+                    J2_aug_pinv = self._svd_dls(J2_aug)     # 10×3
+                    dq         += N1 @ (J2_aug_pinv @ e_rot)
+                    N12         = N1 @ (I_n - J2_aug_pinv @ J2_aug)  # P1∩P2 联合零空间
+                else:
+                    N12 = N1
+
+                # ── 6. P3: 关节限位势场 + CoM 平衡 + 碰撞排斥 (最低优先级) ──
+                # 关节限位排斥
+                grad_limits  = self._joint_limit_gradient(q, lower_limit, upper_limit)
+
+                # 关节舒适姿态引力（腰部归零，手臂回到 ready 姿态）
+                grad_posture = np.zeros(n)
+                grad_posture[:3] = -0.20 * q[:3]              # 腰部归中心
+                grad_posture[3:] = -0.12 * (q[3:] - ready_arm) # 手臂回 ready
+
+                # CoM 平衡梯度（全身质心保持在支撑多边形内）
+                grad_com = np.zeros(n)
+                try:
+                    for i, idx in enumerate(indices):
+                        q_full[idx] = q[i]
+                    com_cur  = pin.centerOfMass(self.model, self.data, q_full)[:2]
+                    com_ref  = np.array([0.02, 0.0])
+                    J_com    = self.kin.compute_com_jacobian(q_full, arm=arm, is_10dof=True)
+                    grad_com = -0.30 * (J_com[:2, :].T @ (com_cur - com_ref))
+                except Exception:
+                    pass
+
+                # 碰撞排斥梯度
+                grad_repulse = np.zeros(n)
                 if check_collision and self.collision is not None:
-                    grad_repulse = self.collision.get_repulsion_gradient_10dof(arm, q_10dof)
+                    try:
+                        grad_repulse = self.collision.get_repulsion_gradient_10dof(arm, q)
+                    except Exception:
+                        pass
 
-                N_proj = np.eye(10) - W_inv @ J.T @ np.linalg.solve(A, J)
-                dq_null = N_proj @ (np.concatenate([grad_waist, grad_arm]) + grad_limits + grad_repulse)
+                dq += N12 @ (grad_posture + grad_limits + grad_com + grad_repulse)
 
-                dq = dq_main + dq_null
-
+                # ── 7. Riemannian 流形积分 + 限位截断 ──
                 step_norm = np.linalg.norm(dq)
                 if step_norm > max_step:
                     dq *= max_step / step_norm
 
-                q_10dof = np.clip(q_10dof + dq, lower_limit, upper_limit)
+                q = np.clip(
+                    pin.integrate(model_r, q, dq),
+                    lower_limit, upper_limit
+                )
 
+                # 停滞检测：连续 8 步无改善则换种子
+                if delta_mm < 0.05:
+                    stall_count += 1
+                    if stall_count >= 8:
+                        break
+                else:
+                    stall_count = 0
+
+        # ── 失败兜底：返回全程最佳解 ──
         if best_q is None:
-            best_q = np.concatenate([np.zeros(3), ready_arm])
+            best_q = ready_10dof.copy()
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        telemetry  = self._extract_solution_telemetry(
+            arm, best_q[:3], best_q[3:], target_rot=target_rot if has_rot else None)
         return False, best_q[:3].copy(), best_q[3:].copy(), {
-            "iters": total_iters,
-            "time_ms": elapsed_ms,
+            "iters": total_iters, "time_ms": elapsed_ms,
             "pos_err_mm": best_err * 1000.0 if best_err != float("inf") else 999.0,
-            "rot_err_deg": 0.0,
-            "seed_used": -1,
-            "seed_name": "None (Failed)",
-            "seed_names": seed_names,
-            "seed_switches": seed_switches,
+            "rot_err_deg": float(np.degrees(best_rot_norm)) if has_rot else 0.0,
+            "seed_used": -1, "seed_name": "None (Failed)",
+            "seed_names": seed_names, "seed_switches": seed_switches,
             "convergence_trace": convergence_trace,
+            "step_details": step_details,
+            "pipeline_stages": IK_PIPELINE_STAGES,
             "is_colliding": False,
+            "mode": "10DOF_6DOF_POSE" if has_rot else "10DOF_3DOF_POS",
+            **telemetry,
         }
+

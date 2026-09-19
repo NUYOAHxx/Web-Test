@@ -1,108 +1,99 @@
-# 宇树科技 G1 机器人控制学习研究
+# 宇树科技 G1 人形机器人控制与运动学系统
 
 ## 项目概述
 
-本项目是基于宇树科技（Unitree）G1人形机器人的控制系统实现，使用MuJoCo物理引擎进行仿真。该系统支持G1机器人的全身控制，包括双足行走、蹲起、手臂与手指的精确控制等功能。
+本项目是基于宇树科技（Unitree）G1 人形机器人的控制与运动学全栈工程实现。系统涵盖 53 自由度 MuJoCo 物理仿真、10-DoF 躯干-手臂协同加权逆运动学（Weighted DLS IK）、28 对全机身自碰撞检测引擎、RRT* 三维空间路径规划，以及算展解耦的 ROS 2 与 Web 实时高精度数字孪生遥测监控大屏。
 
 ![01](resources%2Fg1%2Fimages%2F01_mujoco_g1_53dof.png)
 ![02](resources%2Fg1%2Fimages%2F02_mujoco_g1_53dof.png)
 
-## 系统特点
+## 系统核心特性
 
-- **53自由度全身控制**：支持G1机器人的全部53个自由度联合控制
-- **双足步态控制**：实现稳定行走、转向和位置控制
-- **手臂运动学控制**：支持逆运动学控制机械臂到达目标位置
-- **手指精细控制**：支持手指的抓取和释放动作
-- **基于MuJoCo的物理仿真**：提供高精度的物理特性模拟
+- **10-DoF 躯干-手臂加权协同逆解**：支持 3-DoF 腰部与 7-DoF 手臂协同优化，优先动臂、按需弯腰转身，毫秒级收敛与动态收敛残差跟踪。
+- **28 对几何自碰撞检测雷达**：基于 Pinocchio 与胶囊体/凸包几何构建 28 对安全碰撞对，实时预警与零空间避障约束。
+- **Web 数字孪生实时遥测监控**：现代化工业级深色监控看板，实时展示 3D 骨骼位姿、收敛衰减曲线、关节角度仪表与自碰撞雷达。
+- **53 自由度全身物理仿真**：支持双足行走、蹲起动作以及灵巧手精细开闭控制。
+- **三维运动规划**：内置 3D RRT* 空间路径规划与五次多项式关节轨迹生成。
 
-## 项目结构
+## 项目文件架构
 
 ```
-.
-├── deploy/             # 部署和运行脚本
-│   ├── config/         # 配置文件
-│   └── deploy_mujoco53.py  # 主部署脚本
-├── resources/          # 资源文件
-│   └── g1/             # G1机器人模型和场景定义
-│       ├── meshes/     # 3D模型网格文件
-│       ├── g1_53dof.xml  # 机器人MuJoCo模型定义
-│       └── scene53.xml   # 仿真场景定义
-└── pre_train/          # 预训练模型
-    └── g1/             # G1机器人预训练模型
+UNITREE-G1-ROBOT-MODEL/
+├── deploy/                     # 核心算法与业务实现模块
+│   ├── collision/              # 28 对全机身几何自碰撞检测引擎 (g1_collision.py)
+│   ├── config/                 # 机器人控制与关节配置 (g1_53.yaml)
+│   ├── kinematics/             # 正运动学模型与关节常量 (g1_model.py)
+│   ├── launch/                 # ROS 2 节点调度启动文件 (g1_telemetry_system.launch.py)
+│   ├── planning/               # 空间路径规划算法 (rrt_star.py)
+│   ├── simulation/             # MuJoCo 53-DoF 物理仿真与强化学习部署 (deploy_mujoco53.py)
+│   ├── solver/                 # 10-DoF 逆解算法 (g1_hybrid_ik.py) 与 Headless 服务节点 (g1_ik_node.py)
+│   └── visualizer/             # RViz 桌面可视化与 Web 遥测监控大屏 (web/)
+├── output/                     # 诊断报表、轨迹对比图与测试输出
+├── pre_train/                  # 预训练策略权重文件
+│   └── g1/policy.pt
+├── resources/                  # 机器人 URDF / MJCF 模型描述与 3D 网格资源
+├── scripts/                    # 统一操作与服务启动脚本
+│   ├── run_10dof_rviz.sh       # 启动 10-DoF RViz 3D 监控
+│   ├── run_mujoco.sh           # 启动 MuJoCo 53-DoF 全身仿真
+│   ├── run_telemetry_system.sh # 启动 ROS 2 Headless IK + Web 遥测系统
+│   └── run_web_dashboard.sh    # 启动 Web 数字孪生仪表盘 (默认端口 8080)
+├── tests/                      # 自动化单元测试、基准压力测试与 PTP 诊断工具
+│   ├── test_10dof_ik.py        # 10-DoF 协同逆解验证套件
+│   ├── test_ik_benchmark.py    # 大规模压力与位移距离基准评测
+│   └── test_ptp_planning.py    # 点对点轨迹规划与奇异点敏感度分析
+├── LICENSE                     # Apache 2.0 开源许可
+├── README.md                   # 工程文档
+├── pyproject.toml              # 项目依赖与包配置
+└── requirements.txt            # Python 依赖清单
 ```
 
-## 主要功能
+## 快速上手与运行指南
 
-### 1. 双足行走控制
-- 支持前进/后退、侧向移动和转向控制
-- 通过命令行交互实时调整运动参数
-- 支持目标位置寻路功能
+### 1. 环境准备
+- Ubuntu Linux 22.04 / 24.04
+- Python 3.10+ (推荐使用 `uv` 或虚拟环境)
+- ROS 2 Jazzy / Humble (可选，用于完整 ROS 2 话题联动)
 
-### 2. 手臂控制
-- 基于阻尼最小二乘法的逆运动学求解
-- 支持左右手臂独立控制
-- PD控制器实现关节位置精确控制
+### 2. 核心系统启动
 
-### 3. 手指控制
-- 支持手指抓取和释放动作
-- 可以实现对物体的交互操作
+#### 方式一：启动 Web 实时高精度遥测监控仪表盘 (推荐)
+```bash
+bash scripts/run_web_dashboard.sh
+# 浏览器访问 http://localhost:8080 即可进入数字孪生控制台
+```
 
-### 4. 蹲起控制
-- 可调节高度的蹲起动作
-- 平稳的过渡动作保证稳定性
+#### 方式二：ROS 2 完整调度启动 (Headless IK + Web 大屏 + TF 广播)
+```bash
+bash scripts/run_telemetry_system.sh
+```
 
-## 使用方法
+#### 方式三：启动 RViz 3D 桌面端交互监控
+```bash
+bash scripts/run_10dof_rviz.sh
+```
 
-### 环境要求
-- Python 3.8+
-- MuJoCo 2.3.0+
-- PyTorch 1.9+
-- NumPy, YAML
+#### 方式四：运行 MuJoCo 53-DoF 全身物理仿真
+```bash
+bash scripts/run_mujoco.sh
+```
 
-### 运行仿真
+*(注：根目录下的 `run.sh`、`run_web_dashboard.sh` 等脚本提供便捷转发，可直接在根目录执行。)*
+
+## 测试与诊断工具
+
+项目中提供完备的算法测试与压力评估工具：
 
 ```bash
-python deploy/deploy_mujoco53.py
+# 运行 10-DoF 协同逆解功能测试
+python3 tests/test_10dof_ik.py
+
+# 运行大规模随机逆解性能与收敛基准评测
+python3 tests/test_ik_benchmark.py --samples 500
+
+# 运行点对点 (PTP) 轨迹规划与 Z 轴扫描分析
+python3 tests/test_ptp_planning.py --sweep-z
 ```
-
-### 交互控制指令
-
-在运行仿真后，可以使用以下命令行指令进行交互控制：
-
-- `left_pos x y z`: 设置左臂目标位置，例如: `left_pos 1.2 -1.5 1.0`
-- `right_pos x y z`: 设置右臂目标位置，例如: `right_pos 1.2 -1.5 1.0`
-- `left_toggle`: 切换左手抓取/释放状态
-- `right_toggle`: 切换右手抓取/释放状态
-- `left_wrist_roll angle`: 设置左手腕roll角度，例如: `left_wrist_roll 1.57`
-- `right_wrist_roll angle`: 设置右手腕roll角度，例如: `right_wrist_roll 1.57`
-- `squat`: 开始/停止下蹲动作
-- `walk`: 开始/停止走路模式
-- `goto x y`: 设置行走目标位置，例如: `goto 2.0 3.0`
-- `help`: 显示帮助信息
-
-## 配置文件
-
-`deploy/config/g1_53.yaml` 包含了关节控制参数、默认姿态和控制增益等配置：
-
-- `kps/kds`: PD控制器的比例/微分增益
-- `default_angles`: 默认关节角度
-- `simulation_dt`: 仿真时间步
-- `control_decimation`: 控制抽取率
-- `height_cmd`: 默认站立高度
-
-## 贡献与开发
-
-如需扩展或修改模型，可关注以下文件：
-
-- `resources/g1/g1_53dof.xml`: 机器人模型定义
-- `deploy/deploy_mujoco53.py`: 控制器逻辑实现
 
 ## 许可证
 
-本项目遵循 LICENSE 文件中指定的许可条款。
-
-## 感谢🙏
-- [legged\_gym](https://github.com/leggedrobotics/legged_gym): 构建训练与运行代码的基础。
-- [rsl\_rl](https://github.com/leggedrobotics/rsl_rl.git): 强化学习算法实现。
-- [mujoco](https://github.com/google-deepmind/mujoco.git): 提供强大仿真功能。
-- [unitree](https://github.com/unitreerobotics/unitree_rl_gym): 提供g1-mjcf和代码示例等。
+本项目遵循 [LICENSE](file:///home/parallels/Documents/myproj/UNITREE-G1-ROBOT-MODEL/LICENSE) 文件中指定的 Apache 2.0 许可条款。

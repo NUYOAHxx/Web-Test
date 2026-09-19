@@ -41,6 +41,10 @@
                 <span class="chip-label">SAFETY:</span>
                 <span class="chip-val" id="globalCollisionText">SECURE (0 Collisions)</span>
             </div>
+            <div class="status-chip chip-cyan" id="comBalanceChip">
+                <span class="chip-label">CoM:</span>
+                <span class="chip-val" id="comBalanceText">STABLE (102.4mm)</span>
+            </div>
         </div>
 
         <div class="header-actions">
@@ -82,7 +86,7 @@
                         </div>
                     </div>
 
-                    <!-- 3 轴笛卡尔空间坐标滑块调节 (X, Y, Z) -->
+                    <!-- 6 轴笛卡尔空间位姿滑块调节 (位置 X, Y, Z + 朝向 Roll, Pitch, Yaw) -->
                     <div class="coord-stepper-grid">
                         <div class="stepper-item">
                             <div class="stepper-header">
@@ -105,7 +109,31 @@
                                 <span class="axis-badge z">Z</span>
                                 <span class="stepper-val" id="valInputZ">0.850 m</span>
                             </div>
-                            <input type="range" id="sliderZ" min="0.45" max="1.25" step="0.005" value="0.85">
+                            <input type="range" id="sliderZ" min="0.65" max="1.40" step="0.005" value="0.85">
+                        </div>
+
+                        <div class="stepper-item">
+                            <div class="stepper-header">
+                                <span class="axis-badge r">Roll</span>
+                                <span class="stepper-val" id="valInputRoll">0.0°</span>
+                            </div>
+                            <input type="range" id="sliderRoll" min="-180" max="180" step="1" value="0">
+                        </div>
+
+                        <div class="stepper-item">
+                            <div class="stepper-header">
+                                <span class="axis-badge p">Pitch</span>
+                                <span class="stepper-val" id="valInputPitch">0.0°</span>
+                            </div>
+                            <input type="range" id="sliderPitch" min="-180" max="180" step="1" value="0">
+                        </div>
+
+                        <div class="stepper-item">
+                            <div class="stepper-header">
+                                <span class="axis-badge yaw">Yaw</span>
+                                <span class="stepper-val" id="valInputYaw">0.0°</span>
+                            </div>
+                            <input type="range" id="sliderYaw" min="-180" max="180" step="1" value="0">
                         </div>
                     </div>
 
@@ -113,28 +141,28 @@
                     <div class="presets-section">
                         <span class="presets-title">Presets:</span>
                         <div class="presets-grid-simple">
-                            <button class="preset-btn" onclick="applyPreset(0.111, 0.212, 0.751, 'Standby')">Standby</button>
-                            <button class="preset-btn" onclick="applyPreset(0.35, 0.22, 0.85, 'Table Reach')">Table Reach</button>
-                            <button class="preset-btn" onclick="applyPreset(0.55, 0.20, 0.80, 'Long Reach')">Long Reach</button>
-                            <button class="preset-btn" onclick="applyPreset(0.38, 0.18, 0.55, 'Low Pick')">Low Pick</button>
-                            <button class="preset-btn" onclick="applyPreset(0.25, 0.42, 0.82, 'Side Reach')">Side Reach</button>
-                            <button class="preset-btn" onclick="applyPreset(0.28, -0.15, 0.88, 'Chest Cross')">Chest Cross</button>
+                            <button class="preset-btn" onclick="applyPreset(0.111, 0.212, 0.751, 'Standby', [0, 0, 0])">Standby</button>
+                            <button class="preset-btn" onclick="applyPreset(0.35, 0.22, 0.85, 'Table Reach', [0, 20, 0])">Table Reach</button>
+                            <button class="preset-btn" onclick="applyPreset(0.55, 0.20, 0.80, 'Long Reach', [0, 0, 0])">Long Reach</button>
+                            <button class="preset-btn" onclick="applyPreset(0.38, 0.18, 0.55, 'Low Pick', [0, 45, 0])">Low Pick</button>
+                            <button class="preset-btn" onclick="applyPreset(0.25, 0.42, 0.82, 'Side Reach', [15, 0, 30])">Side Reach</button>
+                            <button class="preset-btn" onclick="applyPreset(0.28, -0.15, 0.88, 'Chest Cross', [-20, 10, -15])">Chest Cross</button>
                         </div>
                     </div>
 
                     <!-- 立即下发按钮 -->
                     <button class="btn-dispatch-solid" id="btnDispatchTarget">
-                        Dispatch Target Pose
+                        Dispatch 6-DoF Target Pose
                     </button>
                 </div>
             </section>
 
-            <!-- 模块 2: 笛卡尔空间位姿遥测 (整洁紧凑表格) -->
+            <!-- 模块 2: 笛卡尔空间位姿遥测 (6-DoF 空间位姿表格) -->
             <section class="card glass-card">
                 <div class="card-header">
                     <div class="card-title-group">
                         <span class="card-tag">TELEMETRY</span>
-                        <h2 class="card-title">Spatial Pose (World Frame)</h2>
+                        <h2 class="card-title">Spatial Pose (6-DoF World Frame)</h2>
                     </div>
                 </div>
 
@@ -167,32 +195,91 @@
                                 <td class="num" id="actZ">+0.751</td>
                                 <td class="num delta" id="deltaZ">0.0 mm</td>
                             </tr>
+                            <tr>
+                                <td><span class="axis-pill r">Roll</span></td>
+                                <td class="num" id="tgtRoll">0.0°</td>
+                                <td class="num" id="actRoll">0.0°</td>
+                                <td class="num delta" id="deltaRoll">0.0°</td>
+                            </tr>
+                            <tr>
+                                <td><span class="axis-pill p">Pitch</span></td>
+                                <td class="num" id="tgtPitch">0.0°</td>
+                                <td class="num" id="actPitch">0.0°</td>
+                                <td class="num delta" id="deltaPitch">0.0°</td>
+                            </tr>
+                            <tr>
+                                <td><span class="axis-pill yaw">Yaw</span></td>
+                                <td class="num" id="tgtYaw">0.0°</td>
+                                <td class="num" id="actYaw">0.0°</td>
+                                <td class="num delta" id="deltaYaw">0.0°</td>
+                            </tr>
                         </tbody>
                     </table>
                 </div>
 
                 <div class="pose-summary-row">
                     <div class="summary-metric">
-                        <span class="metric-lbl">Tracking Error ||e||:</span>
+                        <span class="metric-lbl">Pos Error ||e_p||:</span>
                         <span class="metric-val val-green" id="posErrNum">0.00</span>
                         <span class="metric-unit">mm</span>
                     </div>
                     <div class="summary-metric">
+                        <span class="metric-lbl">Rot Error ||e_R||:</span>
+                        <span class="metric-val val-cyan" id="rotErrNum">0.00</span>
+                        <span class="metric-unit">°</span>
+                    </div>
+                    <div class="summary-metric">
                         <span class="metric-lbl">Rate:</span>
-                        <span class="metric-val val-cyan" id="streamHzNum">50.0</span>
+                        <span class="metric-val val-muted" id="streamHzNum">50.0</span>
                         <span class="metric-unit">Hz</span>
                     </div>
                 </div>
             </section>
 
-            <!-- 模块 3: IK 求解收敛动力学曲线 (Convergence Trace) -->
+            <!-- 模块 3: IK 求解收敛动力学曲线与微观计算步骤 (Convergence Trace & Steps) -->
             <section class="card glass-card" id="cardConvergenceTrace">
                 <div class="card-header">
                     <div class="card-title-group">
                         <span class="card-tag">IK CONVERGENCE</span>
                         <h2 class="card-title">Convergence Trace</h2>
                     </div>
-                    <span class="badge-axis-count" id="convergenceModeBadge">10-DoF DLS</span>
+                    <div class="trace-header-actions">
+                        <div class="trace-view-toggle">
+                            <button class="trace-toggle-btn active" id="btnTraceCurve" title="Residual Loss Convergence Curve">📈 Curve</button>
+                            <button class="trace-toggle-btn" id="btnTraceSteps" title="Step-by-step Computational Breakdown">
+                                📋 Steps <span class="badge-step-count" id="traceStepsBadge">0</span>
+                            </button>
+                        </div>
+                        <span class="badge-axis-count" id="convergenceModeBadge">10-DoF DLS</span>
+                    </div>
+                </div>
+
+                <!-- 算法五大数学计算流水线状态指示器 -->
+                <div class="pipeline-stepper" id="pipelineStepper">
+                    <div class="pipeline-step-item active" data-stage="1" title="Seed Sampling & Warm Start">
+                        <span class="step-num">1</span>
+                        <span class="step-name">Seed</span>
+                    </div>
+                    <span class="step-arrow">➔</span>
+                    <div class="pipeline-step-item" data-stage="2" title="Rigid-body Forward Kinematics">
+                        <span class="step-num">2</span>
+                        <span class="step-name">FK</span>
+                    </div>
+                    <span class="step-arrow">➔</span>
+                    <div class="pipeline-step-item" data-stage="3" title="Weighted Damped Least-Squares">
+                        <span class="step-num">3</span>
+                        <span class="step-name">W-DLS</span>
+                    </div>
+                    <span class="step-arrow">➔</span>
+                    <div class="pipeline-step-item" data-stage="4" title="Null-Space APF Barrier Projection">
+                        <span class="step-num">4</span>
+                        <span class="step-name">APF</span>
+                    </div>
+                    <span class="step-arrow">➔</span>
+                    <div class="pipeline-step-item" data-stage="5" title="Step Clamping & Collision Gate">
+                        <span class="step-num">5</span>
+                        <span class="step-name">Gate</span>
+                    </div>
                 </div>
 
                 <!-- 求解性能指标摘要行 -->
@@ -215,23 +302,52 @@
                     </div>
                 </div>
 
-                <!-- 曲线绘制容器 -->
-                <div class="trace-canvas-wrap">
-                    <canvas id="convergenceCanvas" width="320" height="110"></canvas>
-                    <div class="trace-tooltip" id="traceTooltip" style="display: none;"></div>
+                <!-- 视图 1: 曲线折线容器 -->
+                <div class="trace-view-panel active" id="traceCurveView">
+                    <div class="trace-canvas-wrap">
+                        <canvas id="convergenceCanvas" width="320" height="110"></canvas>
+                        <div class="trace-tooltip" id="traceTooltip" style="display: none;"></div>
+                    </div>
+
+                    <!-- 曲线底部图例与门限说明 -->
+                    <div class="trace-footer">
+                        <div class="trace-legend-item">
+                            <span class="trace-line-sample"></span>
+                            <span class="legend-text">Residual ||e||</span>
+                        </div>
+                        <div class="trace-legend-item">
+                            <span class="tol-line-sample"></span>
+                            <span class="legend-text">Tol (2.0 mm)</span>
+                        </div>
+                        <div class="trace-status-tag safe" id="traceStatusTag">STANDBY</div>
+                    </div>
                 </div>
 
-                <!-- 曲线底部图例与门限说明 -->
-                <div class="trace-footer">
-                    <div class="trace-legend-item">
-                        <span class="trace-line-sample"></span>
-                        <span class="legend-text">Residual ||e||</span>
+                <!-- 视图 2: 微观计算步骤表格 -->
+                <div class="trace-view-panel" id="traceStepsView" style="display: none;">
+                    <div class="trace-steps-table-container">
+                        <table class="trace-steps-table" id="traceStepsTable">
+                            <thead>
+                                <tr>
+                                    <th>#</th>
+                                    <th>Seed</th>
+                                    <th>||e|| (mm)</th>
+                                    <th>Δ ||e||</th>
+                                    <th>Clearance</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="traceStepsBody">
+                                <tr>
+                                    <td colspan="6" class="steps-empty-placeholder">Standby (Ready for IK dispatch)</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
-                    <div class="trace-legend-item">
-                        <span class="tol-line-sample"></span>
-                        <span class="legend-text">Tol (2.0 mm)</span>
+                    <div class="trace-steps-footer">
+                        <span class="steps-summary-info" id="stepsSummaryInfo">Total: 0 steps</span>
+                        <div class="trace-status-tag safe" id="traceStepsStatusTag">STANDBY</div>
                     </div>
-                    <div class="trace-status-tag safe" id="traceStatusTag">STANDBY</div>
                 </div>
             </section>
 
@@ -276,6 +392,8 @@
                         <div class="legend-item"><span class="orb-legend green"></span> Target Pose (p_cmd)</div>
                         <div class="legend-item"><span class="orb-legend gold"></span> Gripper Actual (p_act FK)</div>
                         <div class="legend-item"><span class="orb-legend red"></span> Residual Vector (Δe)</div>
+                        <div class="legend-item"><span class="orb-legend cyan"></span> CoM (35.1kg · Pinocchio)</div>
+                        <div class="legend-item"><span class="orb-legend blue"></span> Support Polygon (Feet)</div>
                     </div>
                 </div>
             </div>
@@ -321,6 +439,72 @@
                 </div>
                 <div class="joints-list" id="armJointsList">
                     <!-- 动态注入手臂 7 轴双向仪表 -->
+                </div>
+            </section>
+
+            <!-- 模块：Pinocchio 刚体动力学与双足平衡安全评估 -->
+            <section class="card glass-card" id="cardDynamicsBalance">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <span class="card-tag">PINOCCHIO DYNAMICS</span>
+                        <h2 class="card-title">CoM & Balance Safety</h2>
+                    </div>
+                    <div class="balance-badge safe" id="balanceBadge">STABLE</div>
+                </div>
+
+                <div class="dynamics-body">
+                    <!-- 全身质心坐标与双足裕度 -->
+                    <div class="dynamics-metric-row">
+                        <div class="dyn-item">
+                            <span class="dyn-lbl">CoM Position [X, Y, Z]</span>
+                            <span class="dyn-val font-mono" id="comPosText">+0.012, +0.000, +0.686 m</span>
+                        </div>
+                        <div class="dyn-item">
+                            <span class="dyn-lbl">Support Margin (d_min)</span>
+                            <div class="dyn-num-unit">
+                                <span class="dyn-val-highlight font-mono val-green" id="comMarginText">102.4</span>
+                                <span class="dyn-unit">mm</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 动态平衡裕度刻度条 (0mm Tipping, 30mm Leaning, >60mm Stable) -->
+                    <div class="balance-margin-wrap">
+                        <div class="balance-track">
+                            <div class="balance-fill" id="balanceFill" style="width: 85%;"></div>
+                            <div class="balance-indicator" id="balanceIndicator" style="left: 85%;"></div>
+                        </div>
+                        <div class="balance-labels">
+                            <span class="lbl-tip">Tipping (0mm)</span>
+                            <span class="lbl-lean">Leaning (30mm)</span>
+                            <span class="lbl-stable">Stable (>60mm)</span>
+                        </div>
+                    </div>
+
+                    <!-- 可操作度与最大重力补偿电机 -->
+                    <div class="dynamics-subgrid">
+                        <div class="dyn-subcard">
+                            <span class="dyn-sublbl">Manipulability (w)</span>
+                            <span class="dyn-subval font-mono" id="manipulabilityVal">0.0651</span>
+                            <span class="dyn-subdesc" id="singularityStatus">Singularity Safe (σ_min: 0.17)</span>
+                        </div>
+                        <div class="dyn-subcard">
+                            <span class="dyn-sublbl">Peak Gravity Motor</span>
+                            <span class="dyn-subval font-mono" id="peakTorqueVal">-9.08 N·m</span>
+                            <span class="dyn-subdesc" id="peakTorqueJoint">waist_pitch_joint</span>
+                        </div>
+                    </div>
+
+                    <!-- 10-DoF 关节静态重力补偿力矩折叠面板 -->
+                    <div class="torques-drawer" id="torquesDrawer">
+                        <div class="torques-toggle" id="btnToggleTorques">
+                            <span>⚡ Gravity Torques (10-DoF)</span>
+                            <span class="toggle-arrow" id="arrowTorques">▼</span>
+                        </div>
+                        <div class="torques-list" id="torquesList">
+                            <!-- 动态注入 10 轴重力矩 -->
+                        </div>
+                    </div>
                 </div>
             </section>
 

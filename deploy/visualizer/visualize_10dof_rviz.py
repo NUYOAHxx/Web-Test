@@ -22,52 +22,24 @@ import pinocchio as pin
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from visualization_msgs.msg import Marker, MarkerArray
-from geometry_msgs.msg import Point, PoseStamped
+from visualization_msgs.msg import MarkerArray
+from geometry_msgs.msg import PoseStamped
 
 dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
-from deploy.g1_hybrid_ik import G1HybridIKSolver, G1_READY_POSE
+from deploy.solver.g1_hybrid_ik import G1HybridIKSolver
+from deploy.kinematics.g1_model import G1_READY_POSE, G1_DEFAULT_STAND_JOINTS
+from deploy.visualizer.markers import create_pose_stamped, create_ik_markers
 
-# 宇树 G1 基础站姿关节字典
-DEFAULT_JOINTS = {
-    "waist_yaw_joint": 0.0,
-    "waist_roll_joint": 0.0,
-    "waist_pitch_joint": 0.0,
-    "left_shoulder_pitch_joint": 0.2,
-    "left_shoulder_roll_joint": 0.2,
-    "left_shoulder_yaw_joint": 0.0,
-    "left_elbow_joint": 0.5,
-    "left_wrist_roll_joint": 0.0,
-    "left_wrist_pitch_joint": 0.0,
-    "left_wrist_yaw_joint": 0.0,
-    "right_shoulder_pitch_joint": 0.2,
-    "right_shoulder_roll_joint": -0.2,
-    "right_shoulder_yaw_joint": 0.0,
-    "right_elbow_joint": 0.5,
-    "right_wrist_roll_joint": 0.0,
-    "right_wrist_pitch_joint": 0.0,
-    "right_wrist_yaw_joint": 0.0,
-    "left_hip_pitch_joint": -0.1,
-    "left_hip_roll_joint": 0.0,
-    "left_hip_yaw_joint": 0.0,
-    "left_knee_joint": 0.3,
-    "left_ankle_pitch_joint": -0.2,
-    "left_ankle_roll_joint": 0.0,
-    "right_hip_pitch_joint": -0.1,
-    "right_hip_roll_joint": 0.0,
-    "right_hip_yaw_joint": 0.0,
-    "right_knee_joint": 0.3,
-    "right_ankle_pitch_joint": -0.2,
-    "right_ankle_roll_joint": 0.0,
-}
+# 宇树 G1 基础站姿关节字典 (复用单一定义源)
+DEFAULT_JOINTS = G1_DEFAULT_STAND_JOINTS
 
 
-class G1_10DoF_VisualizerNode(Node):
+class G1RvizViewer(Node):
     def __init__(self):
-        super().__init__("g1_10dof_visualizer")
+        super().__init__("g1_rviz_viewer")
         self.solver = G1HybridIKSolver()
         self.current_arm = "left_arm"
 
@@ -86,20 +58,15 @@ class G1_10DoF_VisualizerNode(Node):
         self.last_info = {"time_ms": 0.0, "pos_err_mm": 0.0, "iters": 0}
         self.lock = threading.Lock()
 
-        # ROS 2 Publishers
-        self.js_pub = self.create_publisher(JointState, "/joint_states", 10)
-        self.marker_pub = self.create_publisher(MarkerArray, "/visualization_marker_array", 10)
-        self.marker_pub_standard = self.create_publisher(MarkerArray, "/g1/visualization/markers", 10)
-        self.target_pose_pub = self.create_publisher(PoseStamped, "/ik/target_pose", 10)
-        self.actual_pose_pub = self.create_publisher(PoseStamped, "/ik/actual_pose", 10)
-        self.actual_pose_pub_standard = self.create_publisher(PoseStamped, "/g1/kinematics/actual_pose", 10)
+        # ROS 2 发布者 (标准专业分层话题，零冗余兼容)
+        self.pub_joint_states = self.create_publisher(JointState, "/joint_states", 10)
+        self.pub_markers = self.create_publisher(MarkerArray, "/g1/visualization/markers", 10)
+        self.pub_target_pose = self.create_publisher(PoseStamped, "/g1/kinematics/target_pose", 10)
+        self.pub_actual_pose = self.create_publisher(PoseStamped, "/g1/kinematics/actual_pose", 10)
 
-        # ROS 2 Subscribers for remote target commands from Web
+        # ROS 2 订阅者 (监听外部 Web 或算法下发的目标)
         self.sub_target_pose = self.create_subscription(
             PoseStamped, "/g1/kinematics/target_pose", self.on_remote_target_pose, 10
-        )
-        self.sub_target_pose_compat = self.create_subscription(
-            PoseStamped, "/ik/target_pose", self.on_remote_target_pose, 10
         )
 
         # 50Hz 广播定时器
@@ -118,32 +85,19 @@ class G1_10DoF_VisualizerNode(Node):
         fk_p, _ = self.solver.forward_kinematics_10dof(self.current_arm, w_q, a_q)
         self.set_target_configuration(w_q, a_q, tgt, fk_p, ok, inf)
 
-
-    def build_full_q(self, arm: str, waist_q: np.ndarray, arm_q: np.ndarray) -> np.ndarray:
-        q = pin.neutral(self.solver.model)
-        for i, idx in enumerate(self.solver.waist_q_indices):
-            q[idx] = float(waist_q[i])
-        for i, idx in enumerate(self.solver.arm_q_indices[arm]):
-            q[idx] = float(arm_q[i])
-        opp = "right_arm" if arm == "left_arm" else "left_arm"
-        for i, idx in enumerate(self.solver.arm_q_indices[opp]):
-            q[idx] = float(G1_READY_POSE[opp][i])
-        return q
-
     def set_target_configuration(self, waist_q: np.ndarray, arm_q: np.ndarray, target_pos: np.ndarray, fk_pos: np.ndarray, success: bool, info: dict):
         with self.lock:
             self.start_joints = dict(self.current_joints)
             self.target_joints = dict(self.current_joints)
 
-            # 更新腰部
+            # 更新腰部 3 自由度
             self.target_joints["waist_yaw_joint"] = float(waist_q[0])
             self.target_joints["waist_roll_joint"] = float(waist_q[1])
             self.target_joints["waist_pitch_joint"] = float(waist_q[2])
 
-            # 更新手臂
-            jnames = self.solver.left_arm_joint_names if self.current_arm == "left_arm" else self.solver.right_arm_joint_names
-            for i, name in enumerate(jnames):
-                self.target_joints[name] = float(arm_q[i])
+            # 更新手臂 7 自由度 (复用 arm_joint_names 映射)
+            for name, val in zip(self.solver.arm_joint_names[self.current_arm], arm_q):
+                self.target_joints[name] = float(val)
 
             self.interp_start_time = time.time()
             self.is_interpolating = True
@@ -168,120 +122,23 @@ class G1_10DoF_VisualizerNode(Node):
                         q1 = self.target_joints[k]
                         self.current_joints[k] = q0 + alpha * (q1 - q0)
 
-            # 1. 发布 JointState
+            stamp = self.get_clock().now().to_msg()
+
+            # 1. 发布全局标准关节状态总线
             js_msg = JointState()
-            js_msg.header.stamp = self.get_clock().now().to_msg()
+            js_msg.header.stamp = stamp
             js_msg.name = list(self.current_joints.keys())
             js_msg.position = [self.current_joints[k] for k in js_msg.name]
-            self.js_pub.publish(js_msg)
+            self.pub_joint_states.publish(js_msg)
 
-            # 2. 发布 RViz MarkerArray
-            self.publish_markers()
+            # 2. 复用统一图元生成器发布 3D Marker
+            self.pub_markers.publish(
+                create_ik_markers(self.last_target_pos, self.last_fk_pos, stamp, success=self.last_success)
+            )
 
-            # 3. 发布位姿标准话题 (方便终端 ros2 topic echo 监听)
-            stamp = self.get_clock().now().to_msg()
-            p_tgt = PoseStamped()
-            p_tgt.header.frame_id = "world"
-            p_tgt.header.stamp = stamp
-            p_tgt.pose.position.x = float(self.last_target_pos[0])
-            p_tgt.pose.position.y = float(self.last_target_pos[1])
-            p_tgt.pose.position.z = float(self.last_target_pos[2])
-            p_tgt.pose.orientation.w = 1.0
-            self.target_pose_pub.publish(p_tgt)
-
-            p_act = PoseStamped()
-            p_act.header.frame_id = "world"
-            p_act.header.stamp = stamp
-            p_act.pose.position.x = float(self.last_fk_pos[0])
-            p_act.pose.position.y = float(self.last_fk_pos[1])
-            p_act.pose.position.z = float(self.last_fk_pos[2])
-            p_act.pose.orientation.w = 1.0
-            self.actual_pose_pub.publish(p_act)
-
-    def publish_markers(self):
-        markers = MarkerArray()
-        stamp = self.get_clock().now().to_msg()
-
-        # Marker 0: 目标球 (Target Position)
-        m_target = Marker()
-        m_target.header.frame_id = "world"
-        m_target.header.stamp = stamp
-        m_target.ns = "ik_target"
-        m_target.id = 0
-        m_target.type = Marker.SPHERE
-        m_target.action = Marker.ADD
-        m_target.pose.position.x = float(self.last_target_pos[0])
-        m_target.pose.position.y = float(self.last_target_pos[1])
-        m_target.pose.position.z = float(self.last_target_pos[2])
-        m_target.pose.orientation.w = 1.0
-        m_target.scale.x = 0.045
-        m_target.scale.y = 0.045
-        m_target.scale.z = 0.045
-        if self.last_success:
-            m_target.color.r = 0.1
-            m_target.color.g = 0.95
-            m_target.color.b = 0.2
-            m_target.color.a = 0.85
-        else:
-            m_target.color.r = 0.95
-            m_target.color.g = 0.15
-            m_target.color.b = 0.15
-            m_target.color.a = 0.85
-        markers.markers.append(m_target)
-
-        # Marker 1: 实际达到的手腕位置 (FK Actual Position)
-        m_fk = Marker()
-        m_fk.header.frame_id = "world"
-        m_fk.header.stamp = stamp
-        m_fk.ns = "ik_actual"
-        m_fk.id = 1
-        m_fk.type = Marker.SPHERE
-        m_fk.action = Marker.ADD
-        m_fk.pose.position.x = float(self.last_fk_pos[0])
-        m_fk.pose.position.y = float(self.last_fk_pos[1])
-        m_fk.pose.position.z = float(self.last_fk_pos[2])
-        m_fk.pose.orientation.w = 1.0
-        m_fk.scale.x = 0.035
-        m_fk.scale.y = 0.035
-        m_fk.scale.z = 0.035
-        m_fk.color.r = 1.0
-        m_fk.color.g = 0.84
-        m_fk.color.b = 0.0
-        m_fk.color.a = 0.9
-        markers.markers.append(m_fk)
-
-        # Marker 2: 目标与实际手腕连线 (Error Line)
-        m_line = Marker()
-        m_line.header.frame_id = "world"
-        m_line.header.stamp = stamp
-        m_line.ns = "ik_error_line"
-        m_line.id = 2
-        m_line.type = Marker.LINE_STRIP
-        m_line.action = Marker.ADD
-        m_line.scale.x = 0.005
-        m_line.color.r = 1.0
-        m_line.color.g = 0.2
-        m_line.color.b = 0.2
-        m_line.color.a = 0.8
-        p1 = Point()
-        p1.x, p1.y, p1.z = float(self.last_target_pos[0]), float(self.last_target_pos[1]), float(self.last_target_pos[2])
-        p2 = Point()
-        p2.x, p2.y, p2.z = float(self.last_fk_pos[0]), float(self.last_fk_pos[1]), float(self.last_fk_pos[2])
-        m_line.points.append(p1)
-        m_line.points.append(p2)
-        markers.markers.append(m_line)
-
-        # 清除/禁用头部 3D 文字数据看板
-        m_del = Marker()
-        m_del.header.frame_id = "world"
-        m_del.header.stamp = stamp
-        m_del.ns = "ik_status_board"
-        m_del.id = 3
-        m_del.action = Marker.DELETE
-        markers.markers.append(m_del)
-
-        self.marker_pub.publish(markers)
-        self.marker_pub_standard.publish(markers)
+            # 3. 复用统一位姿生成器发布目标与反馈位姿
+            self.pub_target_pose.publish(create_pose_stamped(self.last_target_pos, stamp))
+            self.pub_actual_pose.publish(create_pose_stamped(self.last_fk_pos, stamp))
 
 
 
@@ -374,7 +231,7 @@ def print_formatted_report(
 
 def main():
     rclpy.init()
-    node = G1_10DoF_VisualizerNode()
+    node = G1RvizViewer()
 
     # 在后台守护线程中运行 ROS 2 spin
     def spin_loop():
@@ -425,16 +282,16 @@ def main():
         # 3. 正向运动学验算
         fk_p, _ = node.solver.forward_kinematics_10dof(arm, w_q, a_q)
 
-        # 4. 全身姿态与碰撞检测
-        q_full = node.build_full_q(arm, w_q, a_q)
+        # 4. 全身姿态与碰撞检测 (直接复用求解器内置的 build_q_10dof)
+        q_full = node.solver.build_q_10dof(arm, w_q, a_q)
         col_pairs = node.solver.collision.get_colliding_pairs(q_full, arm=arm)
         min_dist_mm = node.solver.collision.compute_min_distance(q_full, arm=arm) * 1000.0
 
         # 5. 更新到 RViz 动画
         node.set_target_configuration(w_q, a_q, target_p, fk_p, ok_10, info_10)
 
-        # 6. 终端打印详尽报表
-        jnames = node.solver.left_arm_joint_names if arm == "left_arm" else node.solver.right_arm_joint_names
+        # 6. 终端打印详尽报表 (复用 arm_joint_names 统一映射)
+        jnames = node.solver.arm_joint_names[arm]
         print_formatted_report(
             arm, target_p, shoulder, ok_7, info_7, ok_10, w_q, a_q, fk_p, info_10, jnames, col_pairs, min_dist_mm
         )

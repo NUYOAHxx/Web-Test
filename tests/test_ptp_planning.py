@@ -25,7 +25,8 @@ root_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from deploy.g1_hybrid_ik import G1HybridIKSolver, G1_JOINT_LIMITS, G1_READY_POSE
+from deploy.solver.g1_hybrid_ik import G1HybridIKSolver
+from deploy.kinematics.g1_model import G1_JOINT_LIMITS, G1_READY_POSE
 
 # G1 机械臂物理几何常数 (单位: 米)
 G1_UPPER_ARM_LEN = 0.193   # 大臂长 (肩到肘)

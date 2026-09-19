@@ -34,8 +34,15 @@ if DIR_ROOT not in sys.path:
 import numpy as np
 import pinocchio as pin
 
-from deploy.kinematics.g1_model import G1KinematicsModel, G1_JOINT_LIMITS, G1_WAIST_LIMITS, G1_READY_POSE
+from deploy.kinematics.g1_model import (
+    G1KinematicsModel,
+    G1_JOINT_LIMITS,
+    G1_WAIST_LIMITS,
+    G1_READY_POSE,
+    G1_DEFAULT_STAND_JOINTS,
+)
 from deploy.collision.g1_collision import G1CollisionChecker
+from deploy.solver.g1_hybrid_ik import IK_PIPELINE_STAGES
 
 # 检查 ROS 2 是否可用
 HAS_ROS2 = False
@@ -48,40 +55,6 @@ try:
     HAS_ROS2 = True
 except ImportError:
     HAS_ROS2 = False
-
-
-# 官方对称直立预备就绪姿态
-DEFAULT_STAND_JOINTS: Dict[str, float] = {
-    "waist_yaw_joint": 0.0,
-    "waist_roll_joint": 0.0,
-    "waist_pitch_joint": 0.0,
-    "left_shoulder_pitch_joint": 0.2,
-    "left_shoulder_roll_joint": 0.2,
-    "left_shoulder_yaw_joint": 0.0,
-    "left_elbow_joint": 0.5,
-    "left_wrist_roll_joint": 0.0,
-    "left_wrist_pitch_joint": 0.0,
-    "left_wrist_yaw_joint": 0.0,
-    "right_shoulder_pitch_joint": 0.2,
-    "right_shoulder_roll_joint": -0.2,
-    "right_shoulder_yaw_joint": 0.0,
-    "right_elbow_joint": 0.5,
-    "right_wrist_roll_joint": 0.0,
-    "right_wrist_pitch_joint": 0.0,
-    "right_wrist_yaw_joint": 0.0,
-    "left_hip_pitch_joint": 0.0,
-    "left_hip_roll_joint": 0.0,
-    "left_hip_yaw_joint": 0.0,
-    "left_knee_joint": 0.0,
-    "left_ankle_pitch_joint": 0.0,
-    "left_ankle_roll_joint": 0.0,
-    "right_hip_pitch_joint": 0.0,
-    "right_hip_roll_joint": 0.0,
-    "right_hip_yaw_joint": 0.0,
-    "right_knee_joint": 0.0,
-    "right_ankle_pitch_joint": 0.0,
-    "right_ankle_roll_joint": 0.0,
-}
 
 
 class RobotTelemetryManager:
@@ -108,25 +81,30 @@ class RobotTelemetryManager:
 
         # 计算就绪姿态下末端手爪初始世界坐标
         q_init = pin.neutral(self.kin.model)
-        for k, v in DEFAULT_STAND_JOINTS.items():
+        for k, v in G1_DEFAULT_STAND_JOINTS.items():
             if self.kin.model.existJointName(k):
                 q_init[self.kin.model.joints[self.kin.model.getJointId(k)].idx_q] = v
         pin.forwardKinematics(self.kin.model, self.kin.data, q_init)
         pin.updateFramePlacements(self.kin.model, self.kin.data)
         fid_left = self.kin.model.getFrameId("left_wrist_yaw_link")
         init_hand_p = self.kin.data.oMf[fid_left].translation.copy()
+        init_hand_rot = self.kin.data.oMf[fid_left].rotation.copy()
 
-        # 遥测数据缓存 (初始目标与手爪精准贴合，初始误差 0.0mm)
+        # 遥测数据缓存 (初始目标与手爪精准贴合，初始误差 0.0mm，姿态 0.0°)
         self.active_arm = "left_arm"
-        self.joint_positions = dict(DEFAULT_STAND_JOINTS)
+        self.joint_positions = dict(G1_DEFAULT_STAND_JOINTS)
         self.target_pos = init_hand_p.copy()
         self.actual_pos = None  # None 时由 Pinocchio 前向运动学实时算出手爪真实位置
+        self.target_rot = init_hand_rot.copy()
+        self.actual_rot = None
 
         # 算法诊断与度量指标缓存
+        init_rpy_deg = [round(float(np.degrees(v)), 2) for v in pin.rpy.matrixToRpy(init_hand_rot)]
         self.solver_metrics = {
             "success": True,
             "time_ms": 0.0,
             "pos_err_mm": 0.0,
+            "rot_err_deg": 0.0,
             "iters": 0,
             "arm": self.active_arm,
             "mode": "INITIAL_STANDBY",
@@ -134,7 +112,11 @@ class RobotTelemetryManager:
             "seed_name": "Standby",
             "seed_switches": [0],
             "convergence_trace": [],
+            "step_details": [],
+            "pipeline_stages": IK_PIPELINE_STAGES,
             "algorithm": "10-DoF Weighted DLS (W_waist=8.0) + 28-Pair Barrier",
+            "actual_rpy_deg": init_rpy_deg,
+            "target_rpy_deg": init_rpy_deg,
         }
 
         # 频率统计与连接状态
@@ -158,19 +140,16 @@ class RobotTelemetryManager:
             try:
                 if not rclpy.ok():
                     rclpy.init()
-                self.ros_node = rclpy.create_node("g1_web_telemetry_hub")
+                self.ros_node = rclpy.create_node("g1_telemetry_hub")
 
-                # 订阅标准遥测话题
+                # 订阅标准遥测话题 (标准话题，不作冗余兼容)
                 self.ros_node.create_subscription(JointState, "/joint_states", self._on_joint_state, 10)
                 self.ros_node.create_subscription(PoseStamped, "/g1/kinematics/target_pose", self._on_target_pose, 10)
-                self.ros_node.create_subscription(PoseStamped, "/ik/target_pose", self._on_target_pose, 10)
                 self.ros_node.create_subscription(PoseStamped, "/g1/kinematics/actual_pose", self._on_actual_pose, 10)
-                self.ros_node.create_subscription(PoseStamped, "/ik/actual_pose", self._on_actual_pose, 10)
                 self.ros_node.create_subscription(String, "/g1/kinematics/solver_metrics", self._on_solver_metrics, 10)
 
                 # 发布目标控制指令话题
                 self.pub_target_pose = self.ros_node.create_publisher(PoseStamped, "/g1/kinematics/target_pose", 10)
-                self.pub_target_pose_compat = self.ros_node.create_publisher(PoseStamped, "/ik/target_pose", 10)
                 self.pub_command = self.ros_node.create_publisher(String, "/g1/kinematics/target_command", 10)
 
                 print("[Web 纯遥测后端] ✔️ 成功建立 ROS 2 数据总线：监听 /joint_states & 分发 /g1/kinematics/target_pose！")
@@ -179,6 +158,47 @@ class RobotTelemetryManager:
                 self.ros_spin_thread.start()
             except Exception as e:
                 print(f"[Web 纯遥测后端] ROS 2 节点启动警告: {e}")
+
+        # 运动学与碰撞检测按需计算缓存 (Pose Dirty Checking, 杜绝待机时重复 FK 与 28 对 FCL 计算)
+        self._fk_dirty = True
+        self._cached_kinematics_payload: Optional[Dict[str, Any]] = None
+
+        # 高性能遥测状态缓存与集中广播引擎 (杜绝多客户端重复 Pinocchio & 碰撞计算与锁争用)
+        self._state_cache_lock = threading.Lock()
+        self._cached_state_dict: Dict[str, Any] = {}
+        self._cached_state_json: str = ""
+        self._compute_and_cache_state()
+
+        self._state_thread = threading.Thread(target=self._state_worker_loop, daemon=True)
+        self._state_thread.start()
+
+    def _state_worker_loop(self):
+        """以 30Hz 频率集中计算并缓存遥测状态，所有 Web 客户端共享同一计算结果"""
+        interval = 1.0 / 30.0
+        while self.running:
+            t0 = time.time()
+            try:
+                self._compute_and_cache_state()
+            except Exception:
+                pass
+            elapsed = time.time() - t0
+            sleep_time = max(0.001, interval - elapsed)
+            time.sleep(sleep_time)
+
+    def _compute_and_cache_state(self):
+        state = self.get_state_dict()
+        state_json = json.dumps(state, ensure_ascii=False)
+        with self._state_cache_lock:
+            self._cached_state_dict = state
+            self._cached_state_json = state_json
+
+    def get_cached_state_json(self) -> str:
+        with self._state_cache_lock:
+            return self._cached_state_json
+
+    def get_cached_state_dict(self) -> Dict[str, Any]:
+        with self._state_cache_lock:
+            return dict(self._cached_state_dict)
 
     def _ros_spin_loop(self):
         while self.running and rclpy.ok():
@@ -206,17 +226,43 @@ class RobotTelemetryManager:
             self.msg_count += 1
             self._update_freq_counter()
 
+            changed = False
             for name, pos in zip(msg.name, msg.position):
-                self.joint_positions[name] = float(pos)
-
+                old_val = self.joint_positions.get(name, None)
+                val_f = float(pos)
+                if old_val is None or abs(old_val - val_f) > 1e-4:
+                    changed = True
+                self.joint_positions[name] = val_f
+            if changed:
+                self._fk_dirty = True
 
     def _on_target_pose(self, msg: PoseStamped):
         with self.lock:
-            self.target_pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z], dtype=np.float64)
+            new_pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z], dtype=np.float64)
+            qx = float(msg.pose.orientation.x)
+            qy = float(msg.pose.orientation.y)
+            qz = float(msg.pose.orientation.z)
+            qw = float(msg.pose.orientation.w)
+            if qx**2 + qy**2 + qz**2 + qw**2 > 1e-4:
+                new_rot = pin.Quaternion(qw, qx, qy, qz).normalized().toRotationMatrix()
+                self.target_rot = new_rot
+            if self.target_pos is None or not np.allclose(new_pos, self.target_pos, atol=1e-4):
+                self._fk_dirty = True
+            self.target_pos = new_pos
 
     def _on_actual_pose(self, msg: PoseStamped):
         with self.lock:
-            self.actual_pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z], dtype=np.float64)
+            new_pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z], dtype=np.float64)
+            qx = float(msg.pose.orientation.x)
+            qy = float(msg.pose.orientation.y)
+            qz = float(msg.pose.orientation.z)
+            qw = float(msg.pose.orientation.w)
+            if qx**2 + qy**2 + qz**2 + qw**2 > 1e-4:
+                new_rot = pin.Quaternion(qw, qx, qy, qz).normalized().toRotationMatrix()
+                self.actual_rot = new_rot
+            if self.actual_pos is None or not np.allclose(new_pos, self.actual_pos, atol=1e-4):
+                self._fk_dirty = True
+            self.actual_pos = new_pos
 
     def _on_solver_metrics(self, msg: String):
         try:
@@ -225,10 +271,11 @@ class RobotTelemetryManager:
                 self.solver_metrics.update(data)
                 seed_info = data.get("seed_name") or f"Seed #{data.get('seed_used', 0)}"
                 seed_desc = f" ({seed_info})" if data.get("seed_used", 0) > 0 else ""
+                rot_str = f" | 姿态角差: {data.get('rot_err_deg', 0):.1f}°" if "rot_err_deg" in data else ""
                 self.add_event_log(
                     "IK_SOLVER",
                     f"IK 解算收敛 ({data.get('time_ms', 0):.1f}ms)",
-                    f"残差: {data.get('pos_err_mm', 0):.2f}mm | 步数: {data.get('iters', 0)}{seed_desc} | 模式: {data.get('mode', '10-DoF')}"
+                    f"位置残差: {data.get('pos_err_mm', 0):.2f}mm{rot_str} | 步数: {data.get('iters', 0)}{seed_desc} | 模式: {data.get('mode', '10-DoF')}"
                 )
         except Exception:
             pass
@@ -247,25 +294,41 @@ class RobotTelemetryManager:
     # ─────────────────────────────────────────────────────────────
     # Web 目标指令下发中枢 (只下发，不解算，交由后台 IK 求解节点)
     # ─────────────────────────────────────────────────────────────
-    def dispatch_target_command(self, x: float, y: float, z: float, arm: str = "left_arm", preset_name: str = "自定义目标"):
-        """向 ROS 2 广播目标位姿指令，交由 IK 求解器计算"""
+    def dispatch_target_command(self, x: float, y: float, z: float, rpy: Optional[List[float]] = None, arm: str = "left_arm", preset_name: str = "自定义目标"):
+        """向 ROS 2 广播 6-DoF 目标位姿指令，交由 IK 求解器计算"""
+        target_rot = None
+        target_quat = [0.0, 0.0, 0.0, 1.0]
+        if rpy is not None and len(rpy) == 3:
+            rpy_rad = np.radians([float(v) for v in rpy])
+            target_rot = pin.rpy.rpyToMatrix(float(rpy_rad[0]), float(rpy_rad[1]), float(rpy_rad[2]))
+            q_pin = pin.Quaternion(target_rot)
+            target_quat = [float(q_pin.x), float(q_pin.y), float(q_pin.z), float(q_pin.w)]
+
         with self.lock:
             self.active_arm = arm
             self.target_pos = np.array([float(x), float(y), float(z)], dtype=np.float64)
+            if target_rot is not None:
+                self.target_rot = target_rot.copy()
+            self._fk_dirty = True
+            rpy_str = f", RPY: [{rpy[0]:.1f}°, {rpy[1]:.1f}°, {rpy[2]:.1f}°]" if rpy else ""
             self.add_event_log(
                 "COMMAND",
                 f"下达目标指令: {preset_name}",
-                f"[{self.active_arm}] 目标坐标 X: {x:+.3f}m, Y: {y:+.3f}m, Z: {z:+.3f}m"
+                f"[{self.active_arm}] 目标坐标 X: {x:+.3f}m, Y: {y:+.3f}m, Z: {z:+.3f}m{rpy_str}"
             )
 
         if self.pub_command is not None:
-            cmd_msg = String()
-            cmd_msg.data = json.dumps({
+            cmd_data = {
                 "action": "SET_TARGET",
                 "arm": arm,
                 "target": [float(x), float(y), float(z)],
                 "preset": preset_name,
-            }, ensure_ascii=False)
+            }
+            if rpy is not None:
+                cmd_data["rpy"] = [float(v) for v in rpy]
+                cmd_data["quat"] = target_quat
+            cmd_msg = String()
+            cmd_msg.data = json.dumps(cmd_data, ensure_ascii=False)
             self.pub_command.publish(cmd_msg)
 
         if self.pub_target_pose is not None:
@@ -275,19 +338,19 @@ class RobotTelemetryManager:
             p_msg.pose.position.x = float(x)
             p_msg.pose.position.y = float(y)
             p_msg.pose.position.z = float(z)
-            p_msg.pose.orientation.w = 1.0
-
+            p_msg.pose.orientation.x = float(target_quat[0])
+            p_msg.pose.orientation.y = float(target_quat[1])
+            p_msg.pose.orientation.z = float(target_quat[2])
+            p_msg.pose.orientation.w = float(target_quat[3])
             self.pub_target_pose.publish(p_msg)
-            if self.pub_target_pose_compat is not None:
-                self.pub_target_pose_compat.publish(p_msg)
 
-        print(f"[Web 目标中枢] 🚀 成功向 ROS 2 发布目标指令: [{x:.3f}, {y:.3f}, {z:.3f}] (执行臂: {arm})")
+        print(f"[Web 目标中枢] 🚀 成功向 ROS 2 发布 6D 目标指令: [{x:.3f}, {y:.3f}, {z:.3f}] (执行臂: {arm}, RPY: {rpy})")
 
     def dispatch_set_arm(self, arm: str):
         """切换当前监控与控制的手臂 (left_arm / right_arm)"""
         with self.lock:
             self.active_arm = arm
-            # 同步更新目标位置为该臂当前手爪真实位置，保持零残差
+            # 同步更新目标位置为该臂当前手爪真实位置与姿态，保持零残差
             q_full = pin.neutral(self.kin.model)
             for jname, val in self.joint_positions.items():
                 if self.kin.model.existJointName(jname):
@@ -298,7 +361,10 @@ class RobotTelemetryManager:
             ee_frame = "left_wrist_yaw_link" if arm == "left_arm" else "right_wrist_yaw_link"
             fid = self.kin.model.getFrameId(ee_frame)
             self.target_pos = self.kin.data.oMf[fid].translation.copy()
+            self.target_rot = self.kin.data.oMf[fid].rotation.copy()
             self.actual_pos = None
+            self.actual_rot = None
+            self._fk_dirty = True
             self.add_event_log("CONFIG", f"切换操作臂: {arm}", f"已切换至 {'左臂 (Left Arm)' if arm == 'left_arm' else '右臂 (Right Arm)'}")
 
         if self.pub_command is not None:
@@ -310,9 +376,9 @@ class RobotTelemetryManager:
         """下达恢复标准直立就绪指令"""
         with self.lock:
             self.add_event_log("COMMAND", "下达复位指令", "恢复官方对称微屈直立就绪姿态")
-            # 重新计算就绪姿态下手爪真实位置并重置目标
+            # 重新计算就绪姿态下手爪真实位置与姿态并重置目标
             q_tmp = pin.neutral(self.kin.model)
-            for k, v in DEFAULT_STAND_JOINTS.items():
+            for k, v in G1_DEFAULT_STAND_JOINTS.items():
                 if self.kin.model.existJointName(k):
                     q_tmp[self.kin.model.joints[self.kin.model.getJointId(k)].idx_q] = v
             pin.forwardKinematics(self.kin.model, self.kin.data, q_tmp)
@@ -320,8 +386,12 @@ class RobotTelemetryManager:
             ee_frame = "left_wrist_yaw_link" if self.active_arm == "left_arm" else "right_wrist_yaw_link"
             fid = self.kin.model.getFrameId(ee_frame)
             self.target_pos = self.kin.data.oMf[fid].translation.copy()
+            self.target_rot = self.kin.data.oMf[fid].rotation.copy()
             self.actual_pos = None
+            self.actual_rot = None
+            self._fk_dirty = True
 
+        stand_quat = pin.Quaternion(self.target_rot)
         if self.pub_target_pose is not None:
             p_msg = PoseStamped()
             p_msg.header.frame_id = "world"
@@ -329,7 +399,10 @@ class RobotTelemetryManager:
             p_msg.pose.position.x = float(self.target_pos[0])
             p_msg.pose.position.y = float(self.target_pos[1])
             p_msg.pose.position.z = float(self.target_pos[2])
-            p_msg.pose.orientation.w = 1.0
+            p_msg.pose.orientation.x = float(stand_quat.x)
+            p_msg.pose.orientation.y = float(stand_quat.y)
+            p_msg.pose.orientation.z = float(stand_quat.z)
+            p_msg.pose.orientation.w = float(stand_quat.w)
             self.pub_target_pose.publish(p_msg)
 
         if self.pub_command is not None:
@@ -352,9 +425,9 @@ class RobotTelemetryManager:
 
     def reset_to_stand_local(self):
         with self.lock:
-            self.joint_positions = dict(DEFAULT_STAND_JOINTS)
+            self.joint_positions = dict(G1_DEFAULT_STAND_JOINTS)
             q_tmp = pin.neutral(self.kin.model)
-            for k, v in DEFAULT_STAND_JOINTS.items():
+            for k, v in G1_DEFAULT_STAND_JOINTS.items():
                 if self.kin.model.existJointName(k):
                     q_tmp[self.kin.model.joints[self.kin.model.getJointId(k)].idx_q] = v
             pin.forwardKinematics(self.kin.model, self.kin.data, q_tmp)
@@ -362,34 +435,68 @@ class RobotTelemetryManager:
             fid = self.kin.model.getFrameId("left_wrist_yaw_link" if self.active_arm == "left_arm" else "right_wrist_yaw_link")
             self.target_pos = self.kin.data.oMf[fid].translation.copy()
             self.actual_pos = None
+            self._fk_dirty = True
 
     # ─────────────────────────────────────────────────────────────
     # 纯前向运动学 (FK) 与遥测字典组装 (零 IK 计算，耗时 < 0.05ms)
     # ─────────────────────────────────────────────────────────────
     def get_state_dict(self) -> Dict[str, Any]:
         with self.lock:
-            # 1. 组装全模型 q 向量
+            now = time.time()
+            is_connected = (now - self.last_msg_time) < 2.5 if self.last_msg_time > 0 else False
+
+            # 1. 运动学脏检查：若机器人未发生关节位移且目标未变，直接复用静态几何与碰撞计算结果
+            if not self._fk_dirty and self._cached_kinematics_payload is not None:
+                state = dict(self._cached_kinematics_payload)
+                state["solver_diagnostics"] = self.solver_metrics
+                state["telemetry_link"] = {
+                    "is_connected": is_connected,
+                    "dds_rate_hz": round(self.current_hz, 1),
+                    "ingress_packets": self.msg_count,
+                    "topic_target": "/g1/kinematics/target_pose",
+                    "topic_joints": "/joint_states",
+                    "transport": "ROS 2 DDS + 30Hz SSE",
+                    "mode": "PURE_TELEMETRY_AND_DISPATCH",
+                }
+                state["activity_logs"] = list(self.event_logs)
+                return state
+
+            # 2. 组装全模型 q 向量
             q_full = pin.neutral(self.kin.model)
             for jname, val in self.joint_positions.items():
                 if self.kin.model.existJointName(jname):
                     jid = self.kin.model.getJointId(jname)
                     q_full[self.kin.model.joints[jid].idx_q] = val
 
-            # 2. Pinocchio 前向运动学 (FK)
+            # 3. Pinocchio 前向运动学 (FK)
             pin.forwardKinematics(self.kin.model, self.kin.data, q_full)
             pin.updateFramePlacements(self.kin.model, self.kin.data)
 
-            # 计算末端执行器真实空间坐标
+            # 计算末端执行器真实空间坐标与朝向
             ee_frame = "left_wrist_yaw_link" if self.active_arm == "left_arm" else "right_wrist_yaw_link"
             fid = self.kin.model.getFrameId(ee_frame)
-            fk_actual = self.kin.data.oMf[fid].translation.copy()
-            display_actual = fk_actual if self.actual_pos is None else self.actual_pos
+            fk_actual_pos = self.kin.data.oMf[fid].translation.copy()
+            fk_actual_rot = self.kin.data.oMf[fid].rotation.copy()
+            display_actual_pos = fk_actual_pos if self.actual_pos is None else self.actual_pos
+            display_actual_rot = fk_actual_rot if self.actual_rot is None else self.actual_rot
 
             # 空间轴向偏差向量与欧氏残差范数 (毫米级)
-            delta_xyz = (display_actual - self.target_pos) * 1000.0
+            delta_xyz = (display_actual_pos - self.target_pos) * 1000.0
             err_norm_mm = float(np.linalg.norm(delta_xyz))
 
-            # 3. 计算 36 个官方 STL 视觉网格的实时世界坐标与四元数
+            # 空间 3D 朝向欧拉角与姿态残差
+            cmd_rpy_deg = [round(float(np.degrees(v)), 2) for v in pin.rpy.matrixToRpy(self.target_rot)] if self.target_rot is not None else [0.0, 0.0, 0.0]
+            act_rpy_deg = [round(float(np.degrees(v)), 2) for v in pin.rpy.matrixToRpy(display_actual_rot)]
+            delta_rpy_deg = [round(float(act_rpy_deg[i] - cmd_rpy_deg[i]), 2) for i in range(3)]
+            rot_err_norm_deg = 0.0
+            if self.target_rot is not None:
+                R_err = self.target_rot @ display_actual_rot.T
+                rot_err_norm_deg = round(float(np.degrees(np.linalg.norm(pin.log3(R_err)))), 2)
+
+            cmd_quat = pin.Quaternion(self.target_rot) if self.target_rot is not None else pin.Quaternion(np.eye(3))
+            act_quat = pin.Quaternion(display_actual_rot)
+
+            # 4. 计算 36 个官方 STL 视觉网格的实时世界坐标与四元数
             visual_poses = {}
             if self.visual_model is not None and self.visual_data is not None:
                 pin.updateGeometryPlacements(self.kin.model, self.kin.data, self.visual_model, self.visual_data)
@@ -403,14 +510,31 @@ class RobotTelemetryManager:
                         "quat": [round(float(v), 5) for v in [q_rot.x, q_rot.y, q_rot.z, q_rot.w]],
                     }
 
-            # 4. 全域 28 对碰撞干涉检测与物理安全净空
+            # 5. 全域 28 对碰撞干涉检测与物理安全净空
             col_pairs = self.collision.get_colliding_pairs(q_full, arm=self.active_arm)
             min_dist_m = self.collision.compute_min_distance(q_full, arm=self.active_arm)
             min_clearance_mm = float(min_dist_m * 1000.0)
             zone_clearances = self.collision.compute_zone_distances(q_full, arm=self.active_arm)
 
+            # 5.1 Pinocchio 全身刚体动力学计算 (CoM 双足平衡安全、广义重力补偿力矩与可操作度)
+            bal_metrics = self.kin.evaluate_balance(q_full)
+            tau_g = self.kin.compute_gravity_torques(q_full, arm=self.active_arm, is_10dof=True)
+            active_10dof_jnames = self.kin.chain_10dof_joint_names[self.active_arm]
+            q_10 = np.array([self.joint_positions.get(jn, 0.0) for jn in active_10dof_jnames], dtype=np.float64)
+            manip_metrics = self.kin.compute_manipulability(self.active_arm, q_10, has_rot=True)
 
-            # 5. 腰部 3 自由度关节遥测数据 (直接使用官方关节名与符号)
+            gravity_torques_data = []
+            for idx, jname in enumerate(active_10dof_jnames):
+                val_nm = float(tau_g[idx])
+                clean_lbl = jname.replace("left_", "").replace("right_", "").replace("_joint", "")
+                gravity_torques_data.append({
+                    "name": jname,
+                    "label": clean_lbl,
+                    "torque_nm": round(val_nm, 2),
+                    "abs_nm": round(abs(val_nm), 2),
+                })
+
+            # 6. 腰部 3 自由度关节遥测数据 (直接使用官方关节名与符号)
             waist_metadata = {
                 "waist_yaw_joint":   {"label": "waist_yaw",   "symbol": "q_w0"},
                 "waist_roll_joint":  {"label": "waist_roll",  "symbol": "q_w1"},
@@ -438,7 +562,7 @@ class RobotTelemetryManager:
                     "offset_pct": round(offset_pct, 1),
                 })
 
-            # 6. 机械臂 7 自由度关节遥测数据 (使用官方 URDF 原始关节名与符号)
+            # 7. 机械臂 7 自由度关节遥测数据 (使用官方 URDF 原始关节名与符号)
             arm_metadata = {
                 "shoulder_pitch": {"label": "shoulder_pitch", "symbol": "q_a0"},
                 "shoulder_roll":  {"label": "shoulder_roll",  "symbol": "q_a1"},
@@ -472,59 +596,49 @@ class RobotTelemetryManager:
                     "offset_pct": round(offset_pct, 1),
                 })
 
-            now = time.time()
-            is_connected = (now - self.last_msg_time) < 2.5 if self.last_msg_time > 0 else False
-
-            # 组装专业命名主报文
-            return {
+            # 缓存静态几何与碰撞计算结果 (规范命名，零兼容冗余)
+            self._cached_kinematics_payload = {
                 "arm": self.active_arm,
-                # 笛卡尔空间位姿专业术语
                 "cartesian_cmd_pose": [round(float(v), 4) for v in self.target_pos],
-                "cartesian_actual_pose": [round(float(v), 4) for v in display_actual],
+                "cartesian_actual_pose": [round(float(v), 4) for v in display_actual_pos],
+                "cartesian_cmd_rpy_deg": cmd_rpy_deg,
+                "cartesian_actual_rpy_deg": act_rpy_deg,
+                "cartesian_cmd_quat": [round(float(v), 5) for v in [cmd_quat.x, cmd_quat.y, cmd_quat.z, cmd_quat.w]],
+                "cartesian_actual_quat": [round(float(v), 5) for v in [act_quat.x, act_quat.y, act_quat.z, act_quat.w]],
                 "spatial_delta_mm": [round(float(v), 2) for v in delta_xyz],
+                "spatial_delta_rpy_deg": delta_rpy_deg,
                 "euclidean_error_norm_mm": round(err_norm_mm, 2),
-                # 兼容原有键名
-                "target": [round(float(v), 4) for v in self.target_pos],
-                "actual": [round(float(v), 4) for v in display_actual],
-                "delta_mm": [round(float(v), 2) for v in delta_xyz],
-                "pos_err_mm": round(err_norm_mm, 2),
-                # 安全雷达与净空
-                "global_min_clearance_mm": round(min_clearance_mm, 1),
+                "rot_error_norm_deg": rot_err_norm_deg,
                 "min_clearance_mm": round(min_clearance_mm, 1),
                 "zone_clearances": zone_clearances,
-                "zone_clearance_mm": zone_clearances,
                 "is_colliding": len(col_pairs) > 0,
                 "colliding_pairs": col_pairs,
-
-                # 关节遥测明细
                 "waist_telemetry": waist_data,
                 "arm_telemetry": arm_data,
-                "waist_joints": waist_data,
-                "arm_joints": arm_data,
-                # 3D 视觉连杆位姿
+                "dynamics_telemetry": {
+                    "com_balance": bal_metrics,
+                    "gravity_torques": gravity_torques_data,
+                    "manipulability": manip_metrics,
+                    "max_torque_joint": max(gravity_torques_data, key=lambda x: x["abs_nm"]) if gravity_torques_data else {},
+                },
                 "visuals": visual_poses,
-                # 求解器诊断指标
-                "solver_diagnostics": self.solver_metrics,
-                # 通信链路度量
-                "telemetry_link": {
-                    "is_connected": is_connected,
-                    "dds_rate_hz": round(self.current_hz, 1),
-                    "hz": round(self.current_hz, 1),
-                    "ingress_packets": self.msg_count,
-                    "topic_target": "/g1/kinematics/target_pose",
-                    "topic_joints": "/joint_states",
-                    "transport": "ROS 2 DDS + 30Hz SSE",
-                    "mode": "PURE_TELEMETRY_AND_DISPATCH",
-                },
-                "source": {
-                    "is_connected": is_connected,
-                    "hz": round(self.current_hz, 1),
-                    "msg_count": self.msg_count,
-                    "topic": "/joint_states",
-                },
-                "activity_logs": self.event_logs,
-                "logs": self.event_logs,
             }
+            self._fk_dirty = False
+
+            # 组装完整返回报文
+            state = dict(self._cached_kinematics_payload)
+            state["solver_diagnostics"] = self.solver_metrics
+            state["telemetry_link"] = {
+                "is_connected": is_connected,
+                "dds_rate_hz": round(self.current_hz, 1),
+                "ingress_packets": self.msg_count,
+                "topic_target": "/g1/kinematics/target_pose",
+                "topic_joints": "/joint_states",
+                "transport": "ROS 2 DDS + 30Hz SSE",
+                "mode": "PURE_TELEMETRY_AND_DISPATCH",
+            }
+            state["activity_logs"] = list(self.event_logs)
+            return state
 
 
 MANAGER: Optional[RobotTelemetryManager] = None
@@ -543,36 +657,48 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            data = MANAGER.get_state_dict() if MANAGER else {}
-            self.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+            data_json = MANAGER.get_cached_state_json() if MANAGER else "{}"
+            self.wfile.write(data_json.encode("utf-8"))
             return
 
         elif self.path == "/api/stream":
-            # 30Hz Server-Sent Events (SSE) 高频遥测推送流
+            # 30Hz Server-Sent Events (SSE) 高频遥测推送流 (共享统一计算缓存，零锁争用)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
+            self.send_header("X-Accel-Buffering", "no")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
             print(f"[Web 推送流] ✔️ 客户端已接入 SSE 遥测实时推流通道 ({self.client_address[0]})")
+            interval = 1.0 / 60.0  # 60Hz 数据帧
+            keepalive_interval = 15.0  # 每 15 秒发送一次 SSE 心跳注释行
+            last_keepalive = time.time()
             try:
                 while True:
+                    now = time.time()
                     if MANAGER:
-                        state = MANAGER.get_state_dict()
-                        payload = f"data: {json.dumps(state, ensure_ascii=False)}\n\n"
-                        self.wfile.write(payload.encode("utf-8"))
+                        cached_json = MANAGER.get_cached_state_json()
+                        if cached_json:
+                            payload = f"data: {cached_json}\n\n"
+                            self.wfile.write(payload.encode("utf-8"))
+                            self.wfile.flush()
+                            last_keepalive = now  # 数据帧本身也算保活
+                    # SSE 标准心跳：注释行 ": keepalive\n\n" 被浏览器忽略但保持 TCP 连接
+                    if now - last_keepalive >= keepalive_interval:
+                        self.wfile.write(b": keepalive\n\n")
                         self.wfile.flush()
-                    time.sleep(1.0 / 30.0)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+                        last_keepalive = now
+                    time.sleep(interval)
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, EOFError, IOError, OSError):
+                print(f"[Web 推送流] 客户端断开连接 ({self.client_address[0]})")
             return
 
         super().do_GET()
 
     def do_POST(self):
-        # 目标指令下发 API (交由 IK 节点求解)
+        # 目标指令下发 API (严格防御性数值与安全包络校验，交由 IK 节点求解)
         if self.path == "/api/send_target":
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length).decode("utf-8")
@@ -584,8 +710,39 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                 arm = str(data.get("arm", "left_arm"))
                 preset = str(data.get("preset_name", "空间目标"))
 
+                # 1. 非法浮点数防御校验 (NaN / Infinity)
+                if math.isnan(x) or math.isnan(y) or math.isnan(z) or math.isinf(x) or math.isinf(y) or math.isinf(z):
+                    raise ValueError("Target coordinates cannot contain NaN or Infinity")
+
+                # 2. 机械臂执行空间物理安全包络防御校验 (Safe Reach Envelope)
+                # G1 左/右臂 10-DoF 工作空间实测边界 (5000点蒙特卡洛采样验证):
+                #   X: [0.0, 1.0]  Y: [-0.8, 0.8]  Z: [0.64, 1.5]
+                # Z < 0.64m 超出关节极限，任何 IK 解算器均无法收敛！
+                z_min = 0.64
+                if not (0.0 <= x <= 1.0 and -0.8 <= y <= 0.8 and z_min <= z <= 1.5):
+                    raise ValueError(
+                        f"目标 [{x:.3f}, {y:.3f}, {z:.3f}] 超出 G1 物理工作空间: "
+                        f"X:[0.0, 1.0]m, Y:[-0.8, 0.8]m, Z:[{z_min}, 1.5]m. "
+                        f"G1 左臂最低可达高度约 0.64m，Z={z:.3f}m 不可达！"
+                    )
+
+                # 3. 操作臂合法性校验
+                if arm not in ("left_arm", "right_arm"):
+                    raise ValueError(f"Invalid arm '{arm}', must be 'left_arm' or 'right_arm'")
+
+                # 4. 6-DoF 空间朝向欧拉角解析 (Roll, Pitch, Yaw 单位: 度)
+                rpy_raw = data.get("rpy", None)
+                if rpy_raw is None and any(k in data for k in ("roll", "pitch", "yaw")):
+                    rpy_raw = [float(data.get("roll", 0.0)), float(data.get("pitch", 0.0)), float(data.get("yaw", 0.0))]
+                rpy = None
+                if rpy_raw is not None and isinstance(rpy_raw, (list, tuple)) and len(rpy_raw) == 3:
+                    rpy = [float(rpy_raw[0]), float(rpy_raw[1]), float(rpy_raw[2])]
+                    for angle in rpy:
+                        if math.isnan(angle) or math.isinf(angle):
+                            raise ValueError("RPY angles cannot contain NaN or Infinity")
+
                 if MANAGER:
-                    MANAGER.dispatch_target_command(x, y, z, arm, preset)
+                    MANAGER.dispatch_target_command(x, y, z, rpy=rpy, arm=arm, preset_name=preset)
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -594,13 +751,15 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(json.dumps({
                     "status": "DISPATCHED",
                     "target": [x, y, z],
+                    "rpy": rpy,
                     "arm": arm,
                     "preset": preset,
-                    "message": f"目标指令已发布至 ROS 2 话题 /g1/kinematics/target_pose，由 IK 引擎解算",
+                    "message": f"6D 目标指令已发布至 ROS 2 话题 /g1/kinematics/target_pose，由 IK 引擎解算",
                 }, ensure_ascii=False).encode("utf-8"))
             except Exception as e:
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
             return
@@ -611,6 +770,9 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
             try:
                 data = json.loads(body)
                 arm = str(data.get("arm", "left_arm"))
+                if arm not in ("left_arm", "right_arm"):
+                    raise ValueError(f"Invalid arm '{arm}', must be 'left_arm' or 'right_arm'")
+
                 if MANAGER:
                     MANAGER.dispatch_set_arm(arm)
                 self.send_response(200)

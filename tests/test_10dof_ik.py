@@ -18,7 +18,7 @@ dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
-from deploy.g1_hybrid_ik import G1HybridIKSolver
+from deploy.solver.g1_hybrid_ik import G1HybridIKSolver
 
 G1_MAX_REACH = 0.377  # 37.7 cm (大臂 19.3cm + 小臂 18.4cm)
 

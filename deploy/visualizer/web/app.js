@@ -7,15 +7,19 @@
 
 // ── 全局 Three.js 与场景变量 ──
 let scene, camera, renderer, controls;
-let targetOrb, actualOrb, errorLine;
+let targetOrb, targetRing, actualOrb, errorLine;
+let comOrb, comDropLine, comFloorDisc, supportPolygonBox;
 let robotCADGroup;
 let currentArm = "left_arm";
 
-// 当前选定的笛卡尔目标点缓存
+// 当前选定的笛卡尔空间 6-DoF 目标位姿缓存
 const currentCmdCoord = {
     x: 0.35,
     y: 0.22,
     z: 0.85,
+    roll: 0.0,
+    pitch: 0.0,
+    yaw: 0.0,
 };
 
 // ── DOM 元素缓存 ──
@@ -36,9 +40,15 @@ const dom = {
     sliderX: document.getElementById("sliderX"),
     sliderY: document.getElementById("sliderY"),
     sliderZ: document.getElementById("sliderZ"),
+    sliderRoll: document.getElementById("sliderRoll"),
+    sliderPitch: document.getElementById("sliderPitch"),
+    sliderYaw: document.getElementById("sliderYaw"),
     valInputX: document.getElementById("valInputX"),
     valInputY: document.getElementById("valInputY"),
     valInputZ: document.getElementById("valInputZ"),
+    valInputRoll: document.getElementById("valInputRoll"),
+    valInputPitch: document.getElementById("valInputPitch"),
+    valInputYaw: document.getElementById("valInputYaw"),
     btnDispatchTarget: document.getElementById("btnDispatchTarget"),
 
     // 空间位姿遥测
@@ -51,7 +61,17 @@ const dom = {
     deltaX: document.getElementById("deltaX"),
     deltaY: document.getElementById("deltaY"),
     deltaZ: document.getElementById("deltaZ"),
+    tgtRoll: document.getElementById("tgtRoll"),
+    tgtPitch: document.getElementById("tgtPitch"),
+    tgtYaw: document.getElementById("tgtYaw"),
+    actRoll: document.getElementById("actRoll"),
+    actPitch: document.getElementById("actPitch"),
+    actYaw: document.getElementById("actYaw"),
+    deltaRoll: document.getElementById("deltaRoll"),
+    deltaPitch: document.getElementById("deltaPitch"),
+    deltaYaw: document.getElementById("deltaYaw"),
     posErrNum: document.getElementById("posErrNum"),
+    rotErrNum: document.getElementById("rotErrNum"),
     posErrBar: document.getElementById("posErrBar"),
     streamHzNum: document.getElementById("streamHzNum"),
     packetCountText: document.getElementById("packetCountText"),
@@ -74,16 +94,43 @@ const dom = {
     btnResetCamera: document.getElementById("btnResetCamera"),
     btnToggleGrid: document.getElementById("btnToggleGrid"),
 
-    // IK 收敛动力学曲线
+    // IK 收敛动力学曲线与步骤
     cardConvergenceTrace: document.getElementById("cardConvergenceTrace"),
+    btnTraceCurve: document.getElementById("btnTraceCurve"),
+    btnTraceSteps: document.getElementById("btnTraceSteps"),
+    traceStepsBadge: document.getElementById("traceStepsBadge"),
+    pipelineStepper: document.getElementById("pipelineStepper"),
     convergenceModeBadge: document.getElementById("convergenceModeBadge"),
     traceTimeVal: document.getElementById("traceTimeVal"),
     traceItersVal: document.getElementById("traceItersVal"),
     traceSeedVal: document.getElementById("traceSeedVal"),
     traceResidueVal: document.getElementById("traceResidueVal"),
+    traceCurveView: document.getElementById("traceCurveView"),
+    traceStepsView: document.getElementById("traceStepsView"),
     convergenceCanvas: document.getElementById("convergenceCanvas"),
     traceTooltip: document.getElementById("traceTooltip"),
     traceStatusTag: document.getElementById("traceStatusTag"),
+    traceStepsTable: document.getElementById("traceStepsTable"),
+    traceStepsBody: document.getElementById("traceStepsBody"),
+    stepsSummaryInfo: document.getElementById("stepsSummaryInfo"),
+    traceStepsStatusTag: document.getElementById("traceStepsStatusTag"),
+
+    // Pinocchio 刚体动力学与双足平衡安全
+    comBalanceChip: document.getElementById("comBalanceChip"),
+    comBalanceText: document.getElementById("comBalanceText"),
+    balanceBadge: document.getElementById("balanceBadge"),
+    comPosText: document.getElementById("comPosText"),
+    comMarginText: document.getElementById("comMarginText"),
+    balanceFill: document.getElementById("balanceFill"),
+    balanceIndicator: document.getElementById("balanceIndicator"),
+    manipulabilityVal: document.getElementById("manipulabilityVal"),
+    singularityStatus: document.getElementById("singularityStatus"),
+    peakTorqueVal: document.getElementById("peakTorqueVal"),
+    peakTorqueJoint: document.getElementById("peakTorqueJoint"),
+    torquesDrawer: document.getElementById("torquesDrawer"),
+    btnToggleTorques: document.getElementById("btnToggleTorques"),
+    arrowTorques: document.getElementById("arrowTorques"),
+    torquesList: document.getElementById("torquesList"),
 };
 
 // ── 初始化启动入口 ──
@@ -92,6 +139,7 @@ window.addEventListener("DOMContentLoaded", () => {
     initCommandPanel();
     initEventListeners();
     initConvergenceCanvasEvents();
+    initTraceTabEvents();
     connectSSE();
 });
 
@@ -178,8 +226,13 @@ function initThreeScene() {
 
     const ringGeo = new THREE.RingGeometry(0.024, 0.030, 32);
     const ringMat = new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, transparent: true, opacity: 0.75 });
-    const targetRing = new THREE.Mesh(ringGeo, ringMat);
+    targetRing = new THREE.Mesh(ringGeo, ringMat);
     targetOrb.add(targetRing);
+
+    // 目标姿态 RGB 空间坐标三轴 (AxesHelper: 50mm, X:红, Y:绿, Z:蓝)
+    const targetAxes = new THREE.AxesHelper(0.05);
+    targetAxes.renderOrder = 999;
+    targetOrb.add(targetAxes);
 
     // 实际末端手爪实测光球 (Actual FK Orb: 钛金金黄)
     const actualGeo = new THREE.SphereGeometry(0.014, 24, 24);
@@ -192,11 +245,70 @@ function initThreeScene() {
     actualOrb = new THREE.Mesh(actualGeo, actualMat);
     scene.add(actualOrb);
 
+    // 实际手爪姿态 RGB 空间坐标三轴 (AxesHelper: 45mm)
+    const actualAxes = new THREE.AxesHelper(0.045);
+    actualAxes.renderOrder = 999;
+    actualOrb.add(actualAxes);
+
     // 空间跟踪残差连线 (Error Line: 激光红)
     const lineMat = new THREE.LineBasicMaterial({ color: 0xff3366, linewidth: 2, transparent: true, opacity: 0.85 });
     const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
     errorLine = new THREE.Line(lineGeo, lineMat);
     scene.add(errorLine);
+
+    // ── Pinocchio 全身质心光球 (CoM Orb: 荧光青蓝) ──
+    const comGeo = new THREE.SphereGeometry(0.024, 24, 24);
+    const comMat = new THREE.MeshStandardMaterial({
+        color: 0x00f0ff,
+        emissive: 0x00f0ff,
+        emissiveIntensity: 0.9,
+        roughness: 0.2,
+    });
+    comOrb = new THREE.Mesh(comGeo, comMat);
+    comOrb.position.set(0.012, 0.0, 0.686);
+    scene.add(comOrb);
+
+    // 垂直地面垂准虚线 (CoM Drop Line)
+    const comLineMat = new THREE.LineDashedMaterial({
+        color: 0x00f0ff,
+        dashSize: 0.02,
+        gapSize: 0.015,
+        linewidth: 2,
+        transparent: true,
+        opacity: 0.75,
+    });
+    const comLineGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0.012, 0.0, 0.686),
+        new THREE.Vector3(0.012, 0.0, 0.002)
+    ]);
+    comDropLine = new THREE.Line(comLineGeo, comLineMat);
+    comDropLine.computeLineDistances();
+    scene.add(comDropLine);
+
+    // 地面投影光斑 (Floor Projection Disc)
+    const discGeo = new THREE.RingGeometry(0.012, 0.032, 32);
+    const discMat = new THREE.MeshBasicMaterial({
+        color: 0x00f0ff,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.65,
+    });
+    comFloorDisc = new THREE.Mesh(discGeo, discMat);
+    comFloorDisc.position.set(0.012, 0.0, 0.002);
+    scene.add(comFloorDisc);
+
+    // G1 双足地面支撑多边形线框 (Dual-Foot Support Polygon: [-0.09, 0.13] x [-0.17, 0.17])
+    const polyPoints = [
+        new THREE.Vector3(-0.09, -0.17, 0.002),
+        new THREE.Vector3( 0.13, -0.17, 0.002),
+        new THREE.Vector3( 0.13,  0.17, 0.002),
+        new THREE.Vector3(-0.09,  0.17, 0.002),
+        new THREE.Vector3(-0.09, -0.17, 0.002),
+    ];
+    const polyGeo = new THREE.BufferGeometry().setFromPoints(polyPoints);
+    const polyMat = new THREE.LineBasicMaterial({ color: 0x00ff88, linewidth: 2, transparent: true, opacity: 0.85 });
+    supportPolygonBox = new THREE.Line(polyGeo, polyMat);
+    scene.add(supportPolygonBox);
 
     window.addEventListener("resize", onWindowResize);
     animate();
@@ -331,7 +443,7 @@ function updateRobotCADModel(visuals) {
 function animate() {
     requestAnimationFrame(animate);
     controls.update();
-    if (targetOrb) targetOrb.rotation.y += 0.015;
+    if (targetRing) targetRing.rotation.z += 0.02;
     renderer.render(scene, camera);
 }
 
@@ -343,14 +455,23 @@ function initCommandPanel() {
     dom.btnSelectLeftArm.addEventListener("click", () => setArmSelection("left_arm"));
     dom.btnSelectRightArm.addEventListener("click", () => setArmSelection("right_arm"));
 
-    // 坐标滑块同步
+    // 坐标与姿态滑块同步
     dom.sliderX.addEventListener("input", (e) => updateCoordFromSlider("x", parseFloat(e.target.value)));
     dom.sliderY.addEventListener("input", (e) => updateCoordFromSlider("y", parseFloat(e.target.value)));
     dom.sliderZ.addEventListener("input", (e) => updateCoordFromSlider("z", parseFloat(e.target.value)));
+    dom.sliderRoll.addEventListener("input", (e) => updateCoordFromSlider("roll", parseFloat(e.target.value)));
+    dom.sliderPitch.addEventListener("input", (e) => updateCoordFromSlider("pitch", parseFloat(e.target.value)));
+    dom.sliderYaw.addEventListener("input", (e) => updateCoordFromSlider("yaw", parseFloat(e.target.value)));
 
     // 立即下达目标指令主按钮
     dom.btnDispatchTarget.addEventListener("click", () => {
-        dispatchTargetCommand(currentCmdCoord.x, currentCmdCoord.y, currentCmdCoord.z, "自定义目标指令");
+        dispatchTargetCommand(
+            currentCmdCoord.x,
+            currentCmdCoord.y,
+            currentCmdCoord.z,
+            [currentCmdCoord.roll, currentCmdCoord.pitch, currentCmdCoord.yaw],
+            "自定义 6-DoF 目标"
+        );
     });
 }
 
@@ -395,12 +516,16 @@ function updateCoordFromSlider(axis, val) {
     if (axis === "x") dom.valInputX.textContent = `${val.toFixed(3)} m`;
     if (axis === "y") dom.valInputY.textContent = `${val.toFixed(3)} m`;
     if (axis === "z") dom.valInputZ.textContent = `${val.toFixed(3)} m`;
+    if (axis === "roll") dom.valInputRoll.textContent = `${val.toFixed(1)}°`;
+    if (axis === "pitch") dom.valInputPitch.textContent = `${val.toFixed(1)}°`;
+    if (axis === "yaw") dom.valInputYaw.textContent = `${val.toFixed(1)}°`;
 }
 
 // 供界面按钮快捷步进调动 (±1cm, ±5cm)
 window.stepCoord = function(axis, delta) {
     let cur = currentCmdCoord[axis] + delta;
     const slider = dom[`slider${axis.toUpperCase()}`];
+    if (!slider) return;
     const min = parseFloat(slider.min);
     const max = parseFloat(slider.max);
     cur = Math.max(min, Math.min(max, cur));
@@ -409,44 +534,62 @@ window.stepCoord = function(axis, delta) {
     updateCoordFromSlider(axis, cur);
 };
 
-// 供工况预设矩阵一键选用 (自动根据执行臂镜像 Y 轴)
-window.applyPreset = function(x, y, z, presetName) {
+// 供工况预设矩阵一键选用 (自动根据执行臂镜像 Y 轴与 Roll/Yaw)
+window.applyPreset = function(x, y, z, presetName, rpy = [0, 0, 0]) {
     let targetY = y;
+    let targetRpy = [...rpy];
     if (currentArm === "right_arm") {
         targetY = -y;
+        targetRpy[0] = -targetRpy[0];
+        targetRpy[2] = -targetRpy[2];
     }
     dom.sliderX.value = x;
     dom.sliderY.value = targetY;
     dom.sliderZ.value = z;
+    dom.sliderRoll.value = targetRpy[0];
+    dom.sliderPitch.value = targetRpy[1];
+    dom.sliderYaw.value = targetRpy[2];
     updateCoordFromSlider("x", x);
     updateCoordFromSlider("y", targetY);
     updateCoordFromSlider("z", z);
+    updateCoordFromSlider("roll", targetRpy[0]);
+    updateCoordFromSlider("pitch", targetRpy[1]);
+    updateCoordFromSlider("yaw", targetRpy[2]);
     // 立即向后端下发该工况
-    dispatchTargetCommand(x, targetY, z, presetName);
+    dispatchTargetCommand(x, targetY, z, targetRpy, presetName);
 };
 
-async function dispatchTargetCommand(x, y, z, presetName) {
+async function dispatchTargetCommand(x, y, z, rpy = null, presetName = "空间目标") {
     try {
         dom.btnDispatchTarget.style.opacity = "0.7";
         dom.btnDispatchTarget.style.pointerEvents = "none";
 
+        const payload = {
+            x: x,
+            y: y,
+            z: z,
+            arm: currentArm,
+            preset_name: presetName,
+        };
+        if (rpy && rpy.length === 3) {
+            payload.rpy = rpy;
+        }
+
         const resp = await fetch("/api/send_target", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                x: x,
-                y: y,
-                z: z,
-                arm: currentArm,
-                preset_name: presetName,
-            })
+            body: JSON.stringify(payload)
         });
         const res = await resp.json();
-        if (res.status === "DISPATCHED") {
-            addLocalEventLog("COMMAND", `下达目标指令: ${presetName}`, `[${currentArm}] X: ${x.toFixed(3)}m, Y: ${y.toFixed(3)}m, Z: ${z.toFixed(3)}m (交由 IK 引擎求解)`);
+        const rpyInfo = rpy ? ` | RPY: [${rpy[0]}°, ${rpy[1]}°, ${rpy[2]}°]` : "";
+        if (resp.ok && res.status === "DISPATCHED") {
+            addLocalEventLog("COMMAND", `下达 6D 目标: ${presetName}`, `[${currentArm}] X: ${x.toFixed(3)}m, Y: ${y.toFixed(3)}m, Z: ${z.toFixed(3)}m${rpyInfo}`);
+        } else {
+            addLocalEventLog("ERROR", `指令下发被拦截: ${presetName}`, res.error || `HTTP 错误 ${resp.status}`);
         }
     } catch (e) {
         console.error("目标下发异常", e);
+        addLocalEventLog("ERROR", `指令下发通信失败`, e.message || "无法连接到遥测控制中枢");
     } finally {
         dom.btnDispatchTarget.style.opacity = "1";
         dom.btnDispatchTarget.style.pointerEvents = "auto";
@@ -475,12 +618,21 @@ function initEventListeners() {
             currentCmdCoord.x = 0.111;
             currentCmdCoord.y = readyY;
             currentCmdCoord.z = 0.751;
+            currentCmdCoord.roll = 0.0;
+            currentCmdCoord.pitch = 0.0;
+            currentCmdCoord.yaw = 0.0;
             dom.sliderX.value = 0.111;
             dom.sliderY.value = readyY;
             dom.sliderZ.value = 0.751;
+            dom.sliderRoll.value = 0.0;
+            dom.sliderPitch.value = 0.0;
+            dom.sliderYaw.value = 0.0;
             updateCoordFromSlider("x", 0.111);
             updateCoordFromSlider("y", readyY);
             updateCoordFromSlider("z", 0.751);
+            updateCoordFromSlider("roll", 0.0);
+            updateCoordFromSlider("pitch", 0.0);
+            updateCoordFromSlider("yaw", 0.0);
             addLocalEventLog("COMMAND", "下达复位指令", "已发布标准对称微屈直立预备就绪指令");
         } catch (e) {
             console.error("复位失败", e);
@@ -495,6 +647,12 @@ function initEventListeners() {
             console.error("演示失败", e);
         }
     });
+
+    if (dom.btnToggleTorques && dom.torquesDrawer) {
+        dom.btnToggleTorques.addEventListener("click", () => {
+            dom.torquesDrawer.classList.toggle("collapsed");
+        });
+    }
 }
 
 function addLocalEventLog(type, title, desc) {
@@ -518,8 +676,22 @@ function addLocalEventLog(type, title, desc) {
 // ─────────────────────────────────────────────────────────────
 // 5. SSE 高频遥测推送流与仪表盘数据绑定
 // ─────────────────────────────────────────────────────────────
+let _sseInstance = null;
+let _sseReconnectTimer = null;
+
 function connectSSE() {
+    // 清理旧连接（防止重连时出现多个并行连接）
+    if (_sseInstance) {
+        _sseInstance.close();
+        _sseInstance = null;
+    }
+    if (_sseReconnectTimer) {
+        clearTimeout(_sseReconnectTimer);
+        _sseReconnectTimer = null;
+    }
+
     const sse = new EventSource("/api/stream");
+    _sseInstance = sse;
 
     sse.onopen = () => {
         dom.connectionStatus.textContent = "DDS LINK: LIVE";
@@ -544,15 +716,30 @@ function connectSSE() {
         if (dom.footerStatusText) {
             dom.footerStatusText.textContent = "Passive Telemetry: Reconnecting to ROS 2 Telemetry Stream...";
         }
+        // 关闭断开的连接，避免浏览器默认的快速重试风暴
+        sse.close();
+        _sseInstance = null;
+        // 2 秒后重新建立连接
+        _sseReconnectTimer = setTimeout(() => {
+            console.log("[SSE] 正在重新连接遥测推流...");
+            connectSSE();
+        }, 2000);
     };
 }
 
 function updateDashboardUI(data) {
-    // 1. 笛卡尔空间位姿坐标渲染
-    const target = data.cartesian_cmd_pose || data.target || [0.111, 0.212, 0.751];
-    const actual = data.cartesian_actual_pose || data.actual || [0.111, 0.212, 0.751];
-    const delta = data.spatial_delta_mm || data.delta_mm || [0.0, 0.0, 0.0];
-    const errNorm = data.euclidean_error_norm_mm !== undefined ? data.euclidean_error_norm_mm : (data.pos_err_mm || 0.0);
+    if (!data) return;
+
+    // 1. 笛卡尔空间 6-DoF 位姿坐标与姿态角渲染 (统一规范接口)
+    const target = data.cartesian_cmd_pose || [0.111, 0.212, 0.751];
+    const actual = data.cartesian_actual_pose || [0.111, 0.212, 0.751];
+    const delta = data.spatial_delta_mm || [0.0, 0.0, 0.0];
+    const errNorm = data.euclidean_error_norm_mm !== undefined ? data.euclidean_error_norm_mm : 0.0;
+
+    const cmdRpy = data.cartesian_cmd_rpy_deg || [0.0, 0.0, 0.0];
+    const actRpy = data.cartesian_actual_rpy_deg || [0.0, 0.0, 0.0];
+    const deltaRpy = data.spatial_delta_rpy_deg || [0.0, 0.0, 0.0];
+    const rotErrNorm = data.rot_error_norm_deg !== undefined ? data.rot_error_norm_deg : 0.0;
 
     dom.tgtX.textContent = (target[0] >= 0 ? "+" : "") + target[0].toFixed(3);
     dom.tgtY.textContent = (target[1] >= 0 ? "+" : "") + target[1].toFixed(3);
@@ -562,12 +749,25 @@ function updateDashboardUI(data) {
     dom.actY.textContent = (actual[1] >= 0 ? "+" : "") + actual[1].toFixed(3);
     dom.actZ.textContent = (actual[2] >= 0 ? "+" : "") + actual[2].toFixed(3);
 
-    // 空间 3 轴增量残差
+    // 空间 3 轴增量残差 (mm)
     dom.deltaX.textContent = `${(delta[0] >= 0 ? "+" : "") + delta[0].toFixed(1)} mm`;
     dom.deltaY.textContent = `${(delta[1] >= 0 ? "+" : "") + delta[1].toFixed(1)} mm`;
     dom.deltaZ.textContent = `${(delta[2] >= 0 ? "+" : "") + delta[2].toFixed(1)} mm`;
 
-    // 跟踪残差范数与状态指标
+    // 空间 3 轴朝向欧拉角 (度)
+    if (dom.tgtRoll) dom.tgtRoll.textContent = `${cmdRpy[0].toFixed(1)}°`;
+    if (dom.tgtPitch) dom.tgtPitch.textContent = `${cmdRpy[1].toFixed(1)}°`;
+    if (dom.tgtYaw) dom.tgtYaw.textContent = `${cmdRpy[2].toFixed(1)}°`;
+
+    if (dom.actRoll) dom.actRoll.textContent = `${actRpy[0].toFixed(1)}°`;
+    if (dom.actPitch) dom.actPitch.textContent = `${actRpy[1].toFixed(1)}°`;
+    if (dom.actYaw) dom.actYaw.textContent = `${actRpy[2].toFixed(1)}°`;
+
+    if (dom.deltaRoll) dom.deltaRoll.textContent = `${(deltaRpy[0] >= 0 ? "+" : "") + deltaRpy[0].toFixed(1)}°`;
+    if (dom.deltaPitch) dom.deltaPitch.textContent = `${(deltaRpy[1] >= 0 ? "+" : "") + deltaRpy[1].toFixed(1)}°`;
+    if (dom.deltaYaw) dom.deltaYaw.textContent = `${(deltaRpy[2] >= 0 ? "+" : "") + deltaRpy[2].toFixed(1)}°`;
+
+    // 跟踪位置残差范数与状态指标
     if (dom.posErrNum) {
         dom.posErrNum.textContent = errNorm.toFixed(2);
         if (errNorm < 2.0) {
@@ -578,6 +778,19 @@ function updateDashboardUI(data) {
             dom.posErrNum.className = "metric-val val-red";
         }
     }
+
+    // 姿态角误差指标
+    if (dom.rotErrNum) {
+        dom.rotErrNum.textContent = rotErrNorm.toFixed(2);
+        if (rotErrNorm < 1.5) {
+            dom.rotErrNum.className = "metric-val val-green";
+        } else if (rotErrNorm < 5.0) {
+            dom.rotErrNum.className = "metric-val val-gold";
+        } else {
+            dom.rotErrNum.className = "metric-val val-red";
+        }
+    }
+
     if (dom.posErrBar) {
         const errBarPct = Math.min(100, (errNorm / 20.0) * 100);
         dom.posErrBar.style.width = `${errBarPct}%`;
@@ -591,13 +804,33 @@ function updateDashboardUI(data) {
     }
 
     // 2. 遥测 DDS 链路频率与报文数
-    const link = data.telemetry_link || data.source || {};
-    if (dom.streamHzNum) dom.streamHzNum.textContent = (link.dds_rate_hz || link.hz || 0).toFixed(1);
-    if (dom.packetCountText) dom.packetCountText.textContent = `报文吞吐: ${link.ingress_packets || link.msg_count || 0} pkts`;
+    const link = data.telemetry_link || {};
+    if (dom.streamHzNum) dom.streamHzNum.textContent = (link.dds_rate_hz || 0).toFixed(1);
+    if (dom.packetCountText) dom.packetCountText.textContent = `报文吞吐: ${link.ingress_packets || 0} pkts`;
 
-    // 3. 3D 光球与连线实时更新
-    if (targetOrb) targetOrb.position.set(target[0], target[1], target[2]);
-    if (actualOrb) actualOrb.position.set(actual[0], actual[1], actual[2]);
+    // 3. 3D 光球、朝向坐标轴与连线实时更新
+    if (targetOrb) {
+        targetOrb.position.set(target[0], target[1], target[2]);
+        if (data.cartesian_cmd_quat && data.cartesian_cmd_quat.length === 4) {
+            targetOrb.quaternion.set(
+                data.cartesian_cmd_quat[0],
+                data.cartesian_cmd_quat[1],
+                data.cartesian_cmd_quat[2],
+                data.cartesian_cmd_quat[3]
+            );
+        }
+    }
+    if (actualOrb) {
+        actualOrb.position.set(actual[0], actual[1], actual[2]);
+        if (data.cartesian_actual_quat && data.cartesian_actual_quat.length === 4) {
+            actualOrb.quaternion.set(
+                data.cartesian_actual_quat[0],
+                data.cartesian_actual_quat[1],
+                data.cartesian_actual_quat[2],
+                data.cartesian_actual_quat[3]
+            );
+        }
+    }
 
     if (errorLine) {
         if (errNorm < 3.0) {
@@ -617,7 +850,7 @@ function updateDashboardUI(data) {
     }
 
     // 5. 全域 28 对安全碰撞雷达
-    const minClearance = data.global_min_clearance_mm !== undefined ? data.global_min_clearance_mm : (data.min_clearance_mm || 35.0);
+    const minClearance = data.min_clearance_mm !== undefined ? data.min_clearance_mm : 35.0;
     dom.minClearanceVal.textContent = minClearance.toFixed(1);
 
     // 动态安全告警颜色
@@ -678,8 +911,8 @@ function updateDashboardUI(data) {
         dom.collisionAlertBox.style.display = "none";
     }
 
-    // 4 大关键区域切片动态更新 (直接使用 arm_torso 等标准分类键)
-    const zDists = data.zone_clearances || data.zone_clearance_mm || {};
+    // 4 大关键区域切片动态更新
+    const zDists = data.zone_clearances || {};
     const dTorso = zDists.arm_torso !== undefined ? zDists.arm_torso : (zDists.torso_arm !== undefined ? zDists.torso_arm : 50.0);
     const dArm = zDists.arm_arm !== undefined ? zDists.arm_arm : 50.0;
     const dHead = zDists.arm_head !== undefined ? zDists.arm_head : (zDists.head_arm !== undefined ? zDists.head_arm : 50.0);
@@ -690,9 +923,12 @@ function updateDashboardUI(data) {
     updateZoneCard("zoneHead", dHead, "Arm - Head", "4 pairs");
     updateZoneCard("zoneLeg", dLeg, "Arm - Legs", "8 pairs");
 
-    // 6. 航天级 10-DOF 双向中心对称关节遥测仪表渲染 (直接呈现原始关节名)
-    renderAerospaceJoints(dom.waistJointsList, data.waist_joints || data.waist_telemetry || []);
-    renderAerospaceJoints(dom.armJointsList, data.arm_joints || data.arm_telemetry || []);
+    // 6. 航天级 10-DOF 双向中心对称关节遥测仪表渲染
+    renderAerospaceJoints(dom.waistJointsList, data.waist_telemetry || []);
+    renderAerospaceJoints(dom.armJointsList, data.arm_telemetry || []);
+
+    // 6.1 Pinocchio 全身刚体动力学与双足平衡安全渲染
+    updateDynamicsAndBalance(data);
 
     // 7. 测控日志流同步
     if (data.activity_logs && data.activity_logs.length > 0) {
@@ -703,6 +939,142 @@ function updateDashboardUI(data) {
     if (data.solver_diagnostics) {
         renderConvergenceTrace(data.solver_diagnostics);
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Pinocchio 全身刚体动力学与双足平衡安全实时渲染
+// ─────────────────────────────────────────────────────────────
+function updateDynamicsAndBalance(data) {
+    const dyn = data.dynamics_telemetry || {};
+    const comBal = dyn.com_balance || (data.solver_diagnostics ? {
+        com_pos: data.solver_diagnostics.com_pos,
+        com_proj: data.solver_diagnostics.com_proj,
+        margin_mm: data.solver_diagnostics.balance_margin_mm,
+        status: data.solver_diagnostics.balance_status,
+        support_polygon: data.solver_diagnostics.support_polygon,
+    } : {});
+
+    const gravTorques = dyn.gravity_torques || [];
+    const manip = dyn.manipulability || (data.solver_diagnostics ? data.solver_diagnostics.manipulability : {});
+
+    if (comBal && comBal.com_pos) {
+        const com = comBal.com_pos;
+        const marginMm = comBal.margin_mm !== undefined ? comBal.margin_mm : 100.0;
+        const status = comBal.status || "STABLE";
+
+        // 更新顶部 HUD Chip
+        if (dom.comBalanceText) {
+            dom.comBalanceText.textContent = `${status} (${marginMm.toFixed(1)}mm)`;
+            if (dom.comBalanceChip) {
+                if (status === "STABLE") {
+                    dom.comBalanceChip.className = "status-chip chip-safe";
+                } else if (status === "LEANING") {
+                    dom.comBalanceChip.className = "status-chip chip-gold";
+                } else {
+                    dom.comBalanceChip.className = "status-chip chip-alert";
+                }
+            }
+        }
+
+        // 更新卡片指标
+        if (dom.comPosText) {
+            dom.comPosText.textContent = `${com[0] >= 0 ? "+" : ""}${com[0].toFixed(3)}, ${com[1] >= 0 ? "+" : ""}${com[1].toFixed(3)}, ${com[2] >= 0 ? "+" : ""}${com[2].toFixed(3)} m`;
+        }
+        if (dom.comMarginText) {
+            dom.comMarginText.textContent = marginMm.toFixed(1);
+            if (status === "STABLE") {
+                dom.comMarginText.className = "dyn-val-highlight font-mono val-green";
+            } else if (status === "LEANING") {
+                dom.comMarginText.className = "dyn-val-highlight font-mono val-gold";
+            } else {
+                dom.comMarginText.className = "dyn-val-highlight font-mono val-red";
+            }
+        }
+        if (dom.balanceBadge) {
+            dom.balanceBadge.textContent = status;
+            dom.balanceBadge.className = `balance-badge ${status === "STABLE" ? "safe" : (status === "LEANING" ? "warning" : "danger")}`;
+        }
+
+        // 平衡刻度条 (0-120mm 映射到 0-100%)
+        const fillPct = Math.max(0, Math.min(100, (marginMm / 120.0) * 100));
+        if (dom.balanceFill) dom.balanceFill.style.width = `${fillPct}%`;
+        if (dom.balanceIndicator) dom.balanceIndicator.style.left = `${fillPct}%`;
+
+        // 更新 3D CoM 光球、垂准线与地面投影
+        if (comOrb) {
+            comOrb.position.set(com[0], com[1], com[2]);
+            const colorHex = status === "STABLE" ? 0x00f0ff : (status === "LEANING" ? 0xffb800 : 0xff3366);
+            comOrb.material.color.setHex(colorHex);
+            comOrb.material.emissive.setHex(colorHex);
+        }
+        if (comDropLine) {
+            const pos = comDropLine.geometry.attributes.position.array;
+            pos[0] = com[0]; pos[1] = com[1]; pos[2] = com[2];
+            pos[3] = com[0]; pos[4] = com[1]; pos[5] = 0.002;
+            comDropLine.geometry.attributes.position.needsUpdate = true;
+            comDropLine.computeLineDistances();
+            const colorHex = status === "STABLE" ? 0x00f0ff : (status === "LEANING" ? 0xffb800 : 0xff3366);
+            comDropLine.material.color.setHex(colorHex);
+        }
+        if (comFloorDisc) {
+            comFloorDisc.position.set(com[0], com[1], 0.002);
+            const colorHex = status === "STABLE" ? 0x00f0ff : (status === "LEANING" ? 0xffb800 : 0xff3366);
+            comFloorDisc.material.color.setHex(colorHex);
+        }
+        if (supportPolygonBox) {
+            const polyColor = status === "STABLE" ? 0x00ff88 : (status === "LEANING" ? 0xffb800 : 0xff3366);
+            supportPolygonBox.material.color.setHex(polyColor);
+        }
+    }
+
+    // 可操作度与奇异点
+    if (manip && manip.yoshikawa !== undefined) {
+        if (dom.manipulabilityVal) dom.manipulabilityVal.textContent = manip.yoshikawa.toFixed(4);
+        if (dom.singularityStatus) {
+            if (manip.is_singular) {
+                dom.singularityStatus.textContent = "⚠️ Singular Point Deadlock!";
+                dom.singularityStatus.style.color = "var(--alert-red)";
+            } else {
+                dom.singularityStatus.textContent = `Singularity Safe (σ_min: ${(manip.min_singular_value || 0).toFixed(2)})`;
+                dom.singularityStatus.style.color = "var(--laser-green)";
+            }
+        }
+    }
+
+    // 峰值重力补偿力矩
+    if (dyn.max_torque_joint && dom.peakTorqueVal && dom.peakTorqueJoint) {
+        const peak = dyn.max_torque_joint;
+        dom.peakTorqueVal.textContent = `${peak.torque_nm >= 0 ? "+" : ""}${peak.torque_nm} N·m`;
+        dom.peakTorqueJoint.textContent = `${peak.name || "waist_pitch_joint"}`;
+    }
+
+    if (gravTorques && gravTorques.length > 0 && dom.torquesList) {
+        renderTorquesList(gravTorques);
+    }
+}
+
+function renderTorquesList(torques) {
+    if (!dom.torquesList) return;
+    const maxAbs = Math.max(1.0, ...torques.map(t => Math.abs(t.torque_nm || 0)));
+    const html = torques.map(t => {
+        const val = t.torque_nm || 0;
+        const absVal = Math.abs(val);
+        const pct = Math.min(100, Math.round((absVal / maxAbs) * 100));
+        let barClass = "torque-bar-fill";
+        if (absVal > 8.0) barClass += " critical";
+        else if (absVal > 4.0) barClass += " heavy";
+
+        return `
+            <div class="torque-item-row" title="${t.name}: ${val >= 0 ? '+' : ''}${val.toFixed(2)} N·m">
+                <span class="torque-label">${t.label || t.name}</span>
+                <div class="torque-bar-container">
+                    <div class="${barClass}" style="width: ${pct}%;"></div>
+                </div>
+                <span class="torque-val-text">${val >= 0 ? '+' : ''}${val.toFixed(1)} N·m</span>
+            </div>
+        `;
+    }).join("");
+    dom.torquesList.innerHTML = html;
 }
 
 function updateZoneCard(elemId, distMm, titleName, defaultCount) {
@@ -730,7 +1102,7 @@ function updateZoneCard(elemId, distMm, titleName, defaultCount) {
 }
 
 
-// 航天级双向中心对称仪表渲染器 (突出显示物理限位与余量告警)
+// 航天级双向中心对称仪表渲染器 (高性能 DOM 复用，彻底消除 30Hz innerHTML 重排抖动)
 function renderAerospaceJoints(container, joints) {
     if (!container || !joints) return;
 
@@ -739,6 +1111,44 @@ function renderAerospaceJoints(container, joints) {
         if (!card) {
             card = document.createElement("div");
             card.className = "joint-card";
+            card.innerHTML = `
+                <div class="joint-head">
+                    <div class="joint-title-wrap">
+                        <span class="joint-label-title"></span>
+                        <span class="joint-symbol"></span>
+                        <span class="joint-limit-badge"></span>
+                    </div>
+                    <div class="joint-num-group">
+                        <span class="joint-num-deg"></span>
+                        <span class="joint-num-rad"></span>
+                    </div>
+                </div>
+                <div class="joint-track-container">
+                    <div class="bidi-bar-track">
+                        <div class="hard-stop-tick left"></div>
+                        <div class="hard-stop-tick right"></div>
+                        <div class="bidi-center-marker"></div>
+                        <div class="bidi-bar-fill"></div>
+                    </div>
+                </div>
+                <div class="joint-foot">
+                    <span class="limit-bound min"></span>
+                    <span class="margin-text"></span>
+                    <span class="limit-bound max"></span>
+                </div>
+            `;
+            // 缓存所有子元素句柄，杜绝后续重写 innerHTML
+            card._labelTitle = card.querySelector(".joint-label-title");
+            card._symbol = card.querySelector(".joint-symbol");
+            card._badge = card.querySelector(".joint-limit-badge");
+            card._deg = card.querySelector(".joint-num-deg");
+            card._rad = card.querySelector(".joint-num-rad");
+            card._tickLeft = card.querySelector(".hard-stop-tick.left");
+            card._tickRight = card.querySelector(".hard-stop-tick.right");
+            card._barFill = card.querySelector(".bidi-bar-fill");
+            card._minBound = card.querySelector(".limit-bound.min");
+            card._margin = card.querySelector(".margin-text");
+            card._maxBound = card.querySelector(".limit-bound.max");
             container.appendChild(card);
         }
 
@@ -758,50 +1168,57 @@ function renderAerospaceJoints(container, joints) {
         const isAlert = margin < 6.0;
         const isWarn = !isAlert && margin < 15.0;
 
-        card.className = "joint-card" + (isAlert ? " limit-alert" : isWarn ? " limit-warn" : "");
+        const cardCls = "joint-card" + (isAlert ? " limit-alert" : isWarn ? " limit-warn" : "");
+        if (card.className !== cardCls) card.className = cardCls;
 
-        const limitBadgeHtml = isAlert 
-            ? `<span class="limit-status-badge alert">LIMIT ALERT</span>`
-            : isWarn 
-            ? `<span class="limit-status-badge warn">NEAR LIMIT</span>`
-            : `<span class="joint-limit-tag">LIM [${j.min_deg.toFixed(0)}° ~ ${j.max_deg.toFixed(0)}°]</span>`;
+        if (card._labelTitle.textContent !== labelName) card._labelTitle.textContent = labelName;
+        if (card._symbol.textContent !== symbol) card._symbol.textContent = symbol;
 
-        card.innerHTML = `
-            <div class="joint-head">
-                <div class="joint-title-wrap">
-                    <span class="joint-label-title">${labelName}</span>
-                    <span class="joint-symbol">${symbol}</span>
-                    ${limitBadgeHtml}
-                </div>
-                <div class="joint-num-group">
-                    <span class="joint-num-deg ${isAlert ? 'text-alert' : isWarn ? 'text-warn' : ''}">${degStr}</span>
-                    <span class="joint-num-rad">${radStr}</span>
-                </div>
-            </div>
-            <div class="joint-track-container">
-                <div class="bidi-bar-track">
-                    <div class="hard-stop-tick left" title="Hard limit min: ${j.min_deg}°"></div>
-                    <div class="hard-stop-tick right" title="Hard limit max: ${j.max_deg}°"></div>
-                    <div class="bidi-center-marker"></div>
-                    <div class="bidi-bar-fill ${isPositive ? 'positive' : 'negative'} ${isAlert ? 'bar-limit-alert' : isWarn ? 'bar-limit-warn' : ''}" 
-                         style="${isPositive ? `left: 50%; width: ${barWidth}%;` : `left: ${50 - barWidth}%; width: ${barWidth}%;`}">
-                    </div>
-                </div>
-            </div>
-            <div class="joint-foot">
-                <span class="limit-bound min">MIN ${j.min_deg > 0 ? '+' : ''}${j.min_deg.toFixed(0)}°</span>
-                <span class="margin-text ${isAlert ? 'text-alert' : isWarn ? 'text-warn' : ''}">
-                    ${isAlert ? '🚨 MARGIN' : isWarn ? '⚠️ MARGIN' : 'MARGIN'}: ${margin.toFixed(1)}° (${(j.offset_pct >= 0 ? '+' : '') + j.offset_pct.toFixed(0)}%)
-                </span>
-                <span class="limit-bound max">MAX ${j.max_deg > 0 ? '+' : ''}${j.max_deg.toFixed(0)}°</span>
-            </div>
-        `;
+        if (isAlert) {
+            card._badge.className = "limit-status-badge alert";
+            card._badge.textContent = "LIMIT ALERT";
+        } else if (isWarn) {
+            card._badge.className = "limit-status-badge warn";
+            card._badge.textContent = "NEAR LIMIT";
+        } else {
+            card._badge.className = "joint-limit-tag";
+            card._badge.textContent = `LIM [${j.min_deg.toFixed(0)}° ~ ${j.max_deg.toFixed(0)}°]`;
+        }
+
+        const numCls = isAlert ? "text-alert" : isWarn ? "text-warn" : "";
+        card._deg.className = `joint-num-deg ${numCls}`.trim();
+        card._deg.textContent = degStr;
+        card._rad.textContent = radStr;
+
+        const fillCls = `bidi-bar-fill ${isPositive ? 'positive' : 'negative'} ${isAlert ? 'bar-limit-alert' : isWarn ? 'bar-limit-warn' : ''}`.trim();
+        card._barFill.className = fillCls;
+        card._barFill.style.left = isPositive ? '50%' : `${50 - barWidth}%`;
+        card._barFill.style.width = `${barWidth}%`;
+
+        card._minBound.textContent = `MIN ${j.min_deg > 0 ? '+' : ''}${j.min_deg.toFixed(0)}°`;
+        card._margin.className = `margin-text ${isAlert ? 'text-alert' : isWarn ? 'text-warn' : ''}`.trim();
+        card._margin.textContent = `${isAlert ? '🚨 MARGIN' : isWarn ? '⚠️ MARGIN' : 'MARGIN'}: ${margin.toFixed(1)}° (${(j.offset_pct >= 0 ? '+' : '') + j.offset_pct.toFixed(0)}%)`;
+        card._maxBound.textContent = `MAX ${j.max_deg > 0 ? '+' : ''}${j.max_deg.toFixed(0)}°`;
     });
 }
 
+// 增量日志流渲染 (带时间戳脏检查，避免无效 DOM 暴力刷新)
+let lastRenderedLogCount = 0;
+let lastRenderedLogTimestamp = "";
+
 function renderActivityLogs(logs) {
     const stream = dom.logStream;
-    if (!stream) return;
+    if (!stream || !logs || logs.length === 0) return;
+
+    const latest = logs[logs.length - 1];
+    const latestTime = latest ? `${latest.time}_${latest.title}` : "";
+    if (logs.length === lastRenderedLogCount && latestTime === lastRenderedLogTimestamp) {
+        return; // 日志未发生变更，跳过 DOM 重构
+    }
+
+    lastRenderedLogCount = logs.length;
+    lastRenderedLogTimestamp = latestTime;
+
     stream.innerHTML = logs.slice().reverse().slice(0, 25).map(item => `
         <div class="log-item">
             <span class="log-time">${item.time}</span>
@@ -819,6 +1236,27 @@ function renderActivityLogs(logs) {
 // ─────────────────────────────────────────────────────────────
 let currentTraceData = null;
 let hoverTraceIndex = -1;
+let lastRenderedTraceKey = "";
+
+function initTraceTabEvents() {
+    if (dom.btnTraceCurve && dom.btnTraceSteps) {
+        dom.btnTraceCurve.addEventListener("click", () => {
+            dom.btnTraceCurve.classList.add("active");
+            dom.btnTraceSteps.classList.remove("active");
+            if (dom.traceCurveView) dom.traceCurveView.style.display = "flex";
+            if (dom.traceStepsView) dom.traceStepsView.style.display = "none";
+            if (currentTraceData) drawTraceCanvas(currentTraceData);
+        });
+
+        dom.btnTraceSteps.addEventListener("click", () => {
+            dom.btnTraceSteps.classList.add("active");
+            dom.btnTraceCurve.classList.remove("active");
+            if (dom.traceCurveView) dom.traceCurveView.style.display = "none";
+            if (dom.traceStepsView) dom.traceStepsView.style.display = "flex";
+            if (hoverTraceIndex >= 0) highlightTableRow(hoverTraceIndex);
+        });
+    }
+}
 
 function initConvergenceCanvasEvents() {
     const canvas = dom.convergenceCanvas;
@@ -837,6 +1275,7 @@ function initConvergenceCanvasEvents() {
 
         if (mouseX < padLeft || mouseX > padLeft + plotW) {
             hoverTraceIndex = -1;
+            highlightTableRow(-1);
             if (dom.traceTooltip) dom.traceTooltip.style.display = "none";
             drawTraceCanvas(currentTraceData);
             return;
@@ -863,17 +1302,157 @@ function initConvergenceCanvasEvents() {
             dom.traceTooltip.innerHTML = `Step ${hoverTraceIndex + 1}: <strong>${errVal.toFixed(1)}mm</strong> <span style="opacity:0.7">(${sName})</span>`;
         }
 
+        highlightTableRow(hoverTraceIndex);
         drawTraceCanvas(currentTraceData);
     });
 
     canvas.addEventListener("mouseleave", () => {
         hoverTraceIndex = -1;
+        highlightTableRow(-1);
         if (dom.traceTooltip) dom.traceTooltip.style.display = "none";
         if (currentTraceData) drawTraceCanvas(currentTraceData);
     });
 
     window.addEventListener("resize", () => {
         if (currentTraceData) drawTraceCanvas(currentTraceData);
+    });
+}
+
+function updatePipelineStepper(diagnostics) {
+    if (!dom.pipelineStepper) return;
+    const iters = diagnostics.iters || 0;
+    const posErr = diagnostics.pos_err_mm !== undefined ? diagnostics.pos_err_mm : 999.0;
+    const items = dom.pipelineStepper.querySelectorAll(".pipeline-step-item");
+    if (!items || items.length === 0) return;
+
+    if (iters === 0) {
+        items.forEach((it, idx) => {
+            it.className = idx === 0 ? "pipeline-step-item active" : "pipeline-step-item";
+        });
+    } else if (posErr < 2.5) {
+        items.forEach((it) => {
+            it.className = "pipeline-step-item converged";
+        });
+    } else {
+        items.forEach((it, idx) => {
+            it.className = idx < 4 ? "pipeline-step-item active" : "pipeline-step-item";
+        });
+    }
+}
+
+function renderCalculationSteps(diagnostics) {
+    if (!dom.traceStepsBody) return;
+    const stepDetails = diagnostics.step_details || [];
+    const count = stepDetails.length;
+
+    if (dom.traceStepsBadge) {
+        dom.traceStepsBadge.textContent = count;
+    }
+
+    if (dom.stepsSummaryInfo) {
+        dom.stepsSummaryInfo.textContent = count > 0
+            ? `Total: ${count} steps | Residue: ${(diagnostics.pos_err_mm || 0).toFixed(2)} mm`
+            : "Standby: 0 steps";
+    }
+
+    if (dom.traceStepsStatusTag) {
+        const iters = diagnostics.iters || 0;
+        const posErr = diagnostics.pos_err_mm !== undefined ? diagnostics.pos_err_mm : 0.0;
+        if (iters === 0) {
+            dom.traceStepsStatusTag.textContent = "STANDBY";
+            dom.traceStepsStatusTag.className = "trace-status-tag safe";
+        } else if (posErr < 2.5) {
+            dom.traceStepsStatusTag.textContent = "CONVERGED";
+            dom.traceStepsStatusTag.className = "trace-status-tag safe";
+        } else if (posErr < 15.0) {
+            dom.traceStepsStatusTag.textContent = "APPROXIMATE";
+            dom.traceStepsStatusTag.className = "trace-status-tag warn";
+        } else {
+            dom.traceStepsStatusTag.textContent = "LOCAL MIN";
+            dom.traceStepsStatusTag.className = "trace-status-tag alert";
+        }
+    }
+
+    if (count === 0) {
+        dom.traceStepsBody.innerHTML = `<tr><td colspan="6" class="steps-empty-placeholder">Standby (Ready for IK dispatch)</td></tr>`;
+        return;
+    }
+
+    let html = "";
+    for (let i = 0; i < count; i++) {
+        const item = stepDetails[i];
+        const stepNum = item.step || (i + 1);
+        const seedName = item.seed_name || `Seed #${item.seed_idx || 0}`;
+        const posErr = (item.pos_err_mm !== undefined ? item.pos_err_mm : 0.0).toFixed(2);
+
+        let deltaHtml = `<span class="step-delta-neutral">-</span>`;
+        if (item.delta_mm > 0.01) {
+            deltaHtml = `<span class="step-delta-good">↓${item.delta_mm.toFixed(1)}</span>`;
+        } else if (item.delta_mm < -0.01) {
+            deltaHtml = `<span class="step-delta-bad">↑${Math.abs(item.delta_mm).toFixed(1)}</span>`;
+        }
+
+        let safetyHtml = `<span class="step-delta-good">Safe</span>`;
+        if (item.is_colliding) {
+            safetyHtml = `<span class="step-delta-bad">COLLIDE</span>`;
+        }
+
+        let chipClass = "descent";
+        let chipText = "DLS";
+        if (item.status === "CONVERGED") {
+            chipClass = "converged";
+            chipText = "DONE";
+        } else if (item.status === "SEED_INIT") {
+            chipClass = "seed";
+            chipText = "SEED";
+        } else if (item.status === "COLLISION_PULSE") {
+            chipClass = "repulse";
+            chipText = "APF";
+        }
+
+        const isRowActive = hoverTraceIndex === i ? " step-row-highlight" : "";
+
+        html += `<tr class="step-table-row${isRowActive}" data-index="${i}" title="${item.action || ''}">
+            <td><span class="step-idx">#${stepNum}</span></td>
+            <td><span class="step-seed-name" title="${seedName}">${seedName}</span></td>
+            <td>${posErr}</td>
+            <td>${deltaHtml}</td>
+            <td>${safetyHtml}</td>
+            <td><span class="chip-step-badge ${chipClass}">${chipText}</span></td>
+        </tr>`;
+    }
+
+    dom.traceStepsBody.innerHTML = html;
+
+    // 绑定行鼠标悬停联动
+    const rows = dom.traceStepsBody.querySelectorAll(".step-table-row");
+    rows.forEach((row) => {
+        row.addEventListener("mouseenter", () => {
+            const idx = parseInt(row.getAttribute("data-index"), 10);
+            if (!isNaN(idx)) {
+                hoverTraceIndex = idx;
+                highlightTableRow(idx);
+                if (currentTraceData) drawTraceCanvas(currentTraceData);
+            }
+        });
+        row.addEventListener("mouseleave", () => {
+            hoverTraceIndex = -1;
+            highlightTableRow(-1);
+            if (currentTraceData) drawTraceCanvas(currentTraceData);
+        });
+    });
+}
+
+function highlightTableRow(idx) {
+    if (!dom.traceStepsBody) return;
+    const rows = dom.traceStepsBody.querySelectorAll(".step-table-row");
+    rows.forEach((r, i) => {
+        if (i === idx) {
+            r.classList.add("step-row-highlight");
+            r.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        } else {
+            r.classList.remove("step-row-highlight");
+        }
     });
 }
 
@@ -885,6 +1464,11 @@ function renderConvergenceTrace(diagnostics) {
     const seedUsed = diagnostics.seed_used !== undefined ? diagnostics.seed_used : 0;
     const seedName = diagnostics.seed_name || (seedUsed >= 0 ? `Seed #${seedUsed}` : "None");
     const mode = diagnostics.mode || "10DOF_WEIGHTED_DLS";
+    const traceLen = diagnostics.convergence_trace ? diagnostics.convergence_trace.length : 0;
+    const stepCount = diagnostics.step_details ? diagnostics.step_details.length : 0;
+
+    const traceKey = `${iters}_${timeMs.toFixed(1)}_${posErr.toFixed(2)}_${seedUsed}_${traceLen}_${stepCount}`;
+    const traceChanged = traceKey !== lastRenderedTraceKey;
 
     if (dom.convergenceModeBadge) dom.convergenceModeBadge.textContent = mode.replace(/_/g, " ");
     if (dom.traceTimeVal) dom.traceTimeVal.textContent = `${timeMs.toFixed(1)} ms`;
@@ -910,7 +1494,14 @@ function renderConvergenceTrace(diagnostics) {
         }
     }
 
-    drawTraceCanvas(diagnostics);
+    // 更新算法五大流水线状态与计算步骤表格
+    updatePipelineStepper(diagnostics);
+    renderCalculationSteps(diagnostics);
+
+    if (traceChanged || hoverTraceIndex >= 0) {
+        lastRenderedTraceKey = traceKey;
+        drawTraceCanvas(diagnostics);
+    }
 }
 
 function drawTraceCanvas(diag) {

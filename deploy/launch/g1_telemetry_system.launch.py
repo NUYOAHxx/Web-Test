@@ -6,9 +6,9 @@ Unitree G1 10-DoF 逆运动学与 Web 遥测监控系统标准 ROS 2 调度启�
 ================================================================================
 
 调度组件：
-1. g1_ik_solver_node: 核心 10-DoF 躯干-手臂协同加权逆解与 28 对碰撞避免无头服务节点；
+1. g1_ik_solver: 核心 10-DoF 躯干-手臂协同加权逆解与 28 对碰撞避免无头服务节点；
 2. robot_state_publisher: 广播全机身 TF 坐标树与模型描述；
-3. web_telemetry_hub: Web 纯被动遥测监控与目标指令分发服务端 (默认端口 8080)；
+3. g1_telemetry_hub: Web 纯被动遥测监控与目标指令分发服务端 (默认端口 8080)；
 4. [可选] rviz2: 桌面端 3D 交互式可视化与 Marker 监控。
 """
 
@@ -53,7 +53,7 @@ def generate_launch_description():
     ik_solver_process = ExecuteProcess(
         cmd=[sys.executable, os.path.join(dir_root, "deploy/solver/g1_ik_node.py")],
         output="screen",
-        name="g1_ik_solver_node"
+        name="g1_ik_solver"
     )
 
     # 2. 机器人状态发布者 (发布 TF 坐标树)
@@ -69,7 +69,7 @@ def generate_launch_description():
     web_server_process = ExecuteProcess(
         cmd=[sys.executable, os.path.join(dir_root, "deploy/visualizer/web/server.py"), "--port", LaunchConfiguration("port")],
         output="screen",
-        name="g1_web_telemetry_hub"
+        name="g1_telemetry_hub"
     )
 
     # 4. 可选桌面端 RViz2
