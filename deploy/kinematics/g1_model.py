@@ -92,11 +92,11 @@ class G1KinematicsModel:
     Unitree G1 运动学引擎：封装 Pinocchio 模型与动力学计算图
     """
 
-    def __init__(self, urdf_path: Optional[str] = None):
+    def __init__(self, urdf_path: Optional[str] = None, srdf_path: Optional[str] = None):
         if urdf_path is None:
             default_paths = [
-                "/home/parallels/ws_moveit/src/g1_description/urdf/g1_29dof.urdf",
                 os.path.join(os.path.dirname(__file__), "../../resources/g1/g1_29dof.urdf"),
+                "/home/parallels/ws_moveit/src/g1_description/urdf/g1_29dof.urdf",
             ]
             for p in default_paths:
                 if os.path.exists(p):
@@ -109,6 +109,25 @@ class G1KinematicsModel:
         self.urdf_path: str = urdf_path
         self.model: pin.Model = pin.buildModelFromUrdf(self.urdf_path)
         self.data: pin.Data = self.model.createData()
+
+        # ── 0. 载入与解析 MoveIt SRDF 碰撞矩阵 (ACM) ──
+        if srdf_path is None:
+            default_srdf_paths = [
+                os.path.join(os.path.dirname(__file__), "../../resources/g1/g1_29dof.srdf"),
+                "/home/parallels/ws_moveit/src/g1_moveit_config/config/g1_29dof.srdf",
+            ]
+            for p in default_srdf_paths:
+                if os.path.exists(p):
+                    srdf_path = os.path.abspath(p)
+                    break
+        self.srdf_path: Optional[str] = srdf_path
+
+        # 构建工业级几何碰撞模型与几何数据
+        self.coll_model: pin.GeometryModel = pin.buildGeomFromUrdf(self.model, self.urdf_path, pin.GeometryType.COLLISION)
+        self.coll_model.addAllCollisionPairs()
+        if self.srdf_path and os.path.exists(self.srdf_path):
+            pin.removeCollisionPairs(self.model, self.coll_model, self.srdf_path)
+        self.coll_data: pin.GeometryData = pin.GeometryData(self.coll_model)
 
         # ── 1. 关节定义与末端 Frame ──
         self.left_arm_joint_names: List[str] = [
@@ -192,27 +211,68 @@ class G1KinematicsModel:
             "y_max":  0.170,
         }
 
-        # ── 4. 10-DoF 轻量裁剪子模型缓存 (pin.buildReducedModel 提速 4.1x) ──
+        # ── 4. 10-DoF & 7-DoF 轻量裁剪子模型缓存 (pin.buildReducedModel 提速 4.1x) ──
         self.model_10dof: Dict[str, pin.Model] = {}
         self.data_10dof: Dict[str, pin.Data] = {}
+        self.coll_model_10dof: Dict[str, pin.GeometryModel] = {}
+        self.coll_data_10dof: Dict[str, pin.GeometryData] = {}
         self.ee_frame_ids_10dof: Dict[str, int] = {}
+
+        self.model_7dof: Dict[str, pin.Model] = {}
+        self.data_7dof: Dict[str, pin.Data] = {}
+        self.coll_model_7dof: Dict[str, pin.GeometryModel] = {}
+        self.coll_data_7dof: Dict[str, pin.GeometryData] = {}
+        self.ee_frame_ids_7dof: Dict[str, int] = {}
         self._init_reduced_models()
 
     def _init_reduced_models(self):
-        """构建左右臂各 10-DoF (3腰 + 7臂) 轻量化子模型，固定 12 腿部与对侧手臂关节"""
+        """构建左右臂各 10-DoF (3腰 + 7臂) 与 7-DoF 单臂轻量化子模型与降维碰撞几何图，固定无关关节"""
         q_ref = pin.neutral(self.model)
         for arm in ["left_arm", "right_arm"]:
-            active_joints = self.chain_10dof_joint_names[arm]
-            locked_joint_ids = [
+            # 1. 10-DoF (3腰 + 7臂)
+            active_joints_10 = self.chain_10dof_joint_names[arm]
+            locked_joint_ids_10 = [
                 self.model.getJointId(jname)
                 for jname in self.model.names[1:]
-                if jname not in active_joints
+                if jname not in active_joints_10
             ]
-            red_model = pin.buildReducedModel(self.model, locked_joint_ids, q_ref)
-            red_data = red_model.createData()
-            self.model_10dof[arm] = red_model
-            self.data_10dof[arm] = red_data
-            self.ee_frame_ids_10dof[arm] = red_model.getFrameId(self.ee_frame_names[arm])
+            red_model_10, red_coll_10 = pin.buildReducedModel(self.model, self.coll_model, locked_joint_ids_10, q_ref)
+            # 剪枝静态连杆对 (在 10-DoF 运动链中两端均为基座的相对静止对)
+            moving_pairs_10 = [
+                p for p in red_coll_10.collisionPairs
+                if red_coll_10.geometryObjects[p.first].parentJoint > 0 or red_coll_10.geometryObjects[p.second].parentJoint > 0
+            ]
+            red_coll_10.removeAllCollisionPairs()
+            for p in moving_pairs_10:
+                red_coll_10.addCollisionPair(p)
+
+            self.model_10dof[arm] = red_model_10
+            self.data_10dof[arm] = red_model_10.createData()
+            self.coll_model_10dof[arm] = red_coll_10
+            self.coll_data_10dof[arm] = pin.GeometryData(red_coll_10)
+            self.ee_frame_ids_10dof[arm] = red_model_10.getFrameId(self.ee_frame_names[arm])
+
+            # 2. 7-DoF (7单臂)
+            active_joints_7 = self.arm_joint_names[arm]
+            locked_joint_ids_7 = [
+                self.model.getJointId(jname)
+                for jname in self.model.names[1:]
+                if jname not in active_joints_7
+            ]
+            red_model_7, red_coll_7 = pin.buildReducedModel(self.model, self.coll_model, locked_joint_ids_7, q_ref)
+            moving_pairs_7 = [
+                p for p in red_coll_7.collisionPairs
+                if red_coll_7.geometryObjects[p.first].parentJoint > 0 or red_coll_7.geometryObjects[p.second].parentJoint > 0
+            ]
+            red_coll_7.removeAllCollisionPairs()
+            for p in moving_pairs_7:
+                red_coll_7.addCollisionPair(p)
+
+            self.model_7dof[arm] = red_model_7
+            self.data_7dof[arm] = red_model_7.createData()
+            self.coll_model_7dof[arm] = red_coll_7
+            self.coll_data_7dof[arm] = pin.GeometryData(red_coll_7)
+            self.ee_frame_ids_7dof[arm] = red_model_7.getFrameId(self.ee_frame_names[arm])
 
     # --------------------------------------------------------------------------
     # 正向运动学 (Forward Kinematics)

@@ -118,10 +118,12 @@ class G1IKSolverNode(Node):
 
         # ── ROS 2 发布者 (标准专业命名，零冗余兼容) ──
         self.pub_joint_states = self.create_publisher(JointState, "/joint_states", 10)
+        self.pub_target_pose = self.create_publisher(PoseStamped, "/g1/kinematics/target_pose", 10)
         self.pub_actual_pose = self.create_publisher(PoseStamped, "/g1/kinematics/actual_pose", 10)
         self.pub_metrics = self.create_publisher(String, "/g1/kinematics/solver_metrics", 10)
         self.pub_safety = self.create_publisher(String, "/g1/safety/collision_status", 10)
         self.pub_markers = self.create_publisher(MarkerArray, "/g1/visualization/markers", 10)
+        self.is_demo_running = False
 
         # ── ROS 2 订阅者 (标准专业命名) ──
         self.sub_target_pose = self.create_subscription(
@@ -225,7 +227,10 @@ class G1IKSolverNode(Node):
                 self.solve_target(target_pos, target_rot=target_rot)
 
             elif action == "CIRCLE_DEMO":
-                self.run_circle_demo()
+                arm = cmd.get("arm", self.active_arm)
+                if arm in ("left_arm", "right_arm"):
+                    self.active_arm = arm
+                self.run_circle_demo(arm=self.active_arm)
 
         except Exception as e:
             self.get_logger().error(f"❌ 解析目标指令异常: {e}")
@@ -288,7 +293,7 @@ class G1IKSolverNode(Node):
             for i, name in enumerate(arm_names):
                 self.target_joints[name] = float(arm_q[i])
 
-            self.interp_duration = max(0.2, duration)
+            self.interp_duration = max(0.02, duration)
             self.interp_start_time = time.time()
             self.is_interpolating = True
 
@@ -317,7 +322,8 @@ class G1IKSolverNode(Node):
                 "convergence_trace": info.get("convergence_trace", []),
                 "step_details": info.get("step_details", []),
                 "pipeline_stages": info.get("pipeline_stages", IK_PIPELINE_STAGES),
-                "algorithm": "10-DoF Weighted DLS (W_waist=8.0) + 28-Pair Barrier",
+                "cascade_stage": str(info.get("cascade_stage", "10DOF_COORDINATED")),
+                "algorithm": "Inria Pink 4.4.0 + ProxQP (Cascade Upright Priority)",
                 "com_pos": info.get("com_pos", [round(float(v), 4) for v in self.com_pos]),
                 "com_proj": info.get("com_proj", [round(float(v), 4) for v in self.com_pos[:2]]),
                 "balance_margin_mm": round(float(info.get("balance_margin_mm", 100.0)), 1),
@@ -328,12 +334,24 @@ class G1IKSolverNode(Node):
                 "actual_rpy_deg": info.get("actual_rpy_deg", []),
                 "actual_quat": info.get("actual_quat", []),
                 "target_rpy_deg": info.get("target_rpy_deg", None),
+                "trajectory_active": bool(self.is_demo_running),
             }
             self.collision_status = {
                 "is_colliding": len(col_pairs) > 0,
                 "min_clearance_mm": round(float(min_clearance), 1),
                 "colliding_pairs": col_pairs,
             }
+
+        # 广播目标位姿到 ROS 2，供遥测中枢与 Web 界面实时追踪
+        stamp = self.get_clock().now().to_msg()
+        quat_tgt = pin.Quaternion(self.target_rot)
+        self.pub_target_pose.publish(
+            create_pose_stamped(
+                self.target_pos,
+                stamp,
+                orientation=(float(quat_tgt.x), float(quat_tgt.y), float(quat_tgt.z), float(quat_tgt.w)),
+            )
+        )
 
         # 立即发布诊断与安全信息
         self._publish_diagnostics()
@@ -406,19 +424,55 @@ class G1IKSolverNode(Node):
         self._publish_diagnostics()
         self.get_logger().info("✔️ 已执行直立预备就绪姿态复位")
 
-    def run_circle_demo(self):
-        """启动后台线程执行连续空间圆周轨迹"""
+    def run_circle_demo(self, arm: Optional[str] = None):
+        """启动后台线程执行连续空间圆周轨迹 (带平滑引入期、对称工作区适配与姿态定向)"""
+        if self.is_demo_running:
+            self.get_logger().warn("⚠️ 轨迹演示正在执行中，忽略重复指令")
+            return
+
+        exec_arm = arm if arm in ("left_arm", "right_arm") else self.active_arm
+
         def _thread_circle():
-            self.get_logger().info("🌀 启动连续空间轨迹演示 (平滑圆周运动)...")
-            center = np.array([0.38, 0.22, 0.86])
-            radius = 0.12
-            steps = 45
-            for step in range(steps):
-                theta = 2.0 * math.pi * (step / steps)
-                circ_tgt = center + np.array([radius * math.cos(theta), 0.0, radius * math.sin(theta)])
-                self.solve_target(circ_tgt, duration=0.08)
-                time.sleep(0.08)
-            self.get_logger().info("✔️ 连续平滑轨迹演示完成！")
+            self.is_demo_running = True
+            try:
+                self.get_logger().info(f"🌀 启动连续空间轨迹演示 (执行臂: {exec_arm}, 优雅平滑圆周)...")
+
+                # 左右臂对称中心与半径配置 (正前上方天然舒适工作区)
+                # 左臂 y = +0.22, 右臂 y = -0.22, x = 0.38, z = 0.82
+                y_center = 0.22 if exec_arm == "left_arm" else -0.22
+                center = np.array([0.38, y_center, 0.82], dtype=np.float64)
+                radius = 0.10  # 10cm 半径
+
+                # 提取标称末端平正姿态 (保持前向微垂，手腕平稳)
+                with self.lock:
+                    R_target = self.actual_rot.copy() if hasattr(self, "actual_rot") and self.actual_rot is not None else np.eye(3)
+
+                # ── 第一阶段：柔顺前导过渡期 (Smooth Lead-in) ──
+                # 避免从待机姿态直接跳变引发冲量，规划 0.8s 优雅滑入圆周起点
+                p_start = center + np.array([radius, 0.0, 0.0], dtype=np.float64)
+                self.solve_target(p_start, target_rot=R_target, duration=0.8)
+                time.sleep(0.85)
+
+                # ── 第二阶段：高频流式空间轨迹循迹 (25Hz / 100步 / T=4.0s) ──
+                steps = 100
+                dt = 0.04
+                for step in range(steps):
+                    theta = 2.0 * math.pi * (step / steps)
+                    circ_tgt = center + np.array([radius * math.cos(theta), 0.0, radius * math.sin(theta)], dtype=np.float64)
+                    self.solve_target(circ_tgt, target_rot=R_target, duration=0.04)
+                    time.sleep(0.04)
+
+                # ── 第三阶段：闭环微步收尾 ──
+                self.solve_target(p_start, target_rot=R_target, duration=0.2)
+                time.sleep(0.25)
+                self.get_logger().info("✔️ 连续平滑空间轨迹演示完美完成！")
+            except Exception as e:
+                self.get_logger().error(f"❌ 轨迹演示执行异常: {e}")
+            finally:
+                self.is_demo_running = False
+                with self.lock:
+                    self.solver_metrics["trajectory_active"] = False
+                self._publish_diagnostics()
 
         t = threading.Thread(target=_thread_circle, daemon=True)
         t.start()
