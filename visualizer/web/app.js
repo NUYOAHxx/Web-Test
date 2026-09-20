@@ -9,6 +9,8 @@
 let scene, camera, renderer, controls;
 let targetOrb, targetRing, actualOrb, errorLine;
 let comOrb, comDropLine, comFloorDisc, supportPolygonBox;
+let trajectoryOrbitLine, motionTrailLine;
+const _trailHistory = [];
 let robotCADGroup;
 let currentArm = "left_arm";
 
@@ -309,6 +311,42 @@ function initThreeScene() {
     const polyMat = new THREE.LineBasicMaterial({ color: 0x00ff88, linewidth: 2, transparent: true, opacity: 0.85 });
     supportPolygonBox = new THREE.Line(polyGeo, polyMat);
     scene.add(supportPolygonBox);
+
+    // ── 空间轨迹演示参考导轨环 (Trajectory Demo Orbit Ring: 霓虹青蓝) ──
+    const orbitPts = [];
+    const orbitRadius = 0.10;
+    for (let i = 0; i <= 64; i++) {
+        const th = (i / 64) * Math.PI * 2;
+        orbitPts.push(new THREE.Vector3(0.38 + orbitRadius * Math.cos(th), 0.22, 0.82 + orbitRadius * Math.sin(th)));
+    }
+    const orbitGeo = new THREE.BufferGeometry().setFromPoints(orbitPts);
+    const orbitMat = new THREE.LineDashedMaterial({
+        color: 0x00f0ff,
+        dashSize: 0.015,
+        gapSize: 0.01,
+        transparent: true,
+        opacity: 0.8,
+        linewidth: 2,
+    });
+    trajectoryOrbitLine = new THREE.Line(orbitGeo, orbitMat);
+    trajectoryOrbitLine.computeLineDistances();
+    trajectoryOrbitLine.visible = false;
+    scene.add(trajectoryOrbitLine);
+
+    // ── 手爪动态运动流光拖尾 (Motion Trail: 钛金渐变) ──
+    const MAX_TRAIL_POINTS = 80;
+    const trailPositions = new Float32Array(MAX_TRAIL_POINTS * 3);
+    const trailGeo = new THREE.BufferGeometry();
+    trailGeo.setAttribute("position", new THREE.BufferAttribute(trailPositions, 3));
+    const trailMat = new THREE.LineBasicMaterial({
+        color: 0xffb800,
+        transparent: true,
+        opacity: 0.85,
+        linewidth: 2,
+    });
+    motionTrailLine = new THREE.Line(trailGeo, trailMat);
+    motionTrailLine.visible = false;
+    scene.add(motionTrailLine);
 
     window.addEventListener("resize", onWindowResize);
     animate();
@@ -841,6 +879,76 @@ function updateDashboardUI(data) {
             positions[0] = target[0]; positions[1] = target[1]; positions[2] = target[2];
             positions[3] = actual[0]; positions[4] = actual[1]; positions[5] = actual[2];
             errorLine.geometry.attributes.position.needsUpdate = true;
+        }
+    }
+
+    // 3.1 空间轨迹导轨环与动态运动流光拖尾实时更新
+    const isDemoActive = Boolean(data.solver_diagnostics && data.solver_diagnostics.trajectory_active);
+    const activeArm = data.arm || "left_arm";
+
+    if (trajectoryOrbitLine) {
+        if (isDemoActive) {
+            trajectoryOrbitLine.visible = true;
+            const yCenter = activeArm === "left_arm" ? 0.22 : -0.22;
+            const posArray = trajectoryOrbitLine.geometry.attributes.position.array;
+            for (let i = 0; i <= 64; i++) {
+                const th = (i / 64) * Math.PI * 2;
+                posArray[i * 3 + 0] = 0.38 + 0.10 * Math.cos(th);
+                posArray[i * 3 + 1] = yCenter;
+                posArray[i * 3 + 2] = 0.82 + 0.10 * Math.sin(th);
+            }
+            trajectoryOrbitLine.geometry.attributes.position.needsUpdate = true;
+            trajectoryOrbitLine.computeLineDistances();
+        } else {
+            trajectoryOrbitLine.visible = false;
+        }
+    }
+
+    if (motionTrailLine) {
+        if (isDemoActive) {
+            motionTrailLine.visible = true;
+            _trailHistory.push(new THREE.Vector3(actual[0], actual[1], actual[2]));
+            if (_trailHistory.length > 80) _trailHistory.shift();
+
+            const posArray = motionTrailLine.geometry.attributes.position.array;
+            for (let i = 0; i < _trailHistory.length; i++) {
+                posArray[i * 3 + 0] = _trailHistory[i].x;
+                posArray[i * 3 + 1] = _trailHistory[i].y;
+                posArray[i * 3 + 2] = _trailHistory[i].z;
+            }
+            motionTrailLine.geometry.attributes.position.needsUpdate = true;
+            motionTrailLine.geometry.setDrawRange(0, _trailHistory.length);
+        } else {
+            if (_trailHistory.length > 0) {
+                _trailHistory.shift();
+                const posArray = motionTrailLine.geometry.attributes.position.array;
+                for (let i = 0; i < _trailHistory.length; i++) {
+                    posArray[i * 3 + 0] = _trailHistory[i].x;
+                    posArray[i * 3 + 1] = _trailHistory[i].y;
+                    posArray[i * 3 + 2] = _trailHistory[i].z;
+                }
+                motionTrailLine.geometry.attributes.position.needsUpdate = true;
+                motionTrailLine.geometry.setDrawRange(0, _trailHistory.length);
+                if (_trailHistory.length === 0) motionTrailLine.visible = false;
+            } else {
+                motionTrailLine.visible = false;
+            }
+        }
+    }
+
+    // 3.2 轨迹演示按钮动态状态与交互反馈
+    if (dom.btnCircleDemo) {
+        if (isDemoActive) {
+            if (!dom.btnCircleDemo.classList.contains("running")) {
+                dom.btnCircleDemo.classList.add("running");
+                dom.btnCircleDemo.disabled = true;
+                dom.btnCircleDemo.innerHTML = `<span class="spinner-icon">🌀</span><span>Running Demo...</span>`;
+            }
+        } else if (dom.btnCircleDemo.classList.contains("running")) {
+            dom.btnCircleDemo.classList.remove("running");
+            dom.btnCircleDemo.disabled = false;
+            dom.btnCircleDemo.innerHTML = `<span class="icon">🌀</span><span>Trajectory Demo</span>`;
+            addLocalEventLog("TELEMETRY", "轨迹演示完成", "空间圆周平滑轨迹执行完毕，高精度收敛就绪");
         }
     }
 

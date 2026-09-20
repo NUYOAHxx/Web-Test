@@ -15,12 +15,12 @@ import os
 import sys
 
 # 获取项目根目录并添加到 sys.path
-dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
 # 导入RRT算法
-from deploy.planning.rrt_star import RRTStar3D, Node3D
+from core.planning.rrt_star import RRTStar3D, Node3D
 
 # 全局变量，用于走路控制
 cmd = [0, 0, 0]  # 行走命令 [前进速度, 侧向速度, 转向速度]
@@ -327,7 +327,7 @@ class ArmBaseController:
         # 初始化高精度 Pinocchio 混合逆运动学求解器
         self.arm_name = f"{arm_side}_arm"
         try:
-            from deploy.solver.g1_hybrid_ik import G1HybridIKSolver
+            from core.solver.g1_hybrid_ik import G1HybridIKSolver
             self.ik_solver = G1HybridIKSolver()
             print(f"[{arm_side}臂] 成功加载 G1HybridIKSolver 混合逆运动学求解器")
         except Exception as e:
@@ -1985,7 +1985,7 @@ def main():
     args = parser.parse_args()
 
     # 加载配置文件
-    config_path = os.path.join(dir_root, "deploy", "config", args.config_file)
+    config_path = os.path.join(dir_root, "config", args.config_file)
     config = ArmConfig.from_yaml(config_path)
 
     # 打印工作空间限制

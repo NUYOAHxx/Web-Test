@@ -1,4 +1,4 @@
-from deploy.kinematics.g1_model import (
+from core.kinematics.g1_model import (
     G1KinematicsModel,
     G1_JOINT_LIMITS,
     G1_WAIST_LIMITS,

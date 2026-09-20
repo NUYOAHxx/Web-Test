@@ -27,22 +27,22 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 # 将项目根目录加入 sys.path
-DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if DIR_ROOT not in sys.path:
     sys.path.insert(0, DIR_ROOT)
 
 import numpy as np
 import pinocchio as pin
 
-from deploy.kinematics.g1_model import (
+from core.kinematics.g1_model import (
     G1KinematicsModel,
     G1_JOINT_LIMITS,
     G1_WAIST_LIMITS,
     G1_READY_POSE,
     G1_DEFAULT_STAND_JOINTS,
 )
-from deploy.collision.g1_collision import G1CollisionChecker
-from deploy.solver.g1_hybrid_ik import IK_PIPELINE_STAGES
+from core.collision.g1_collision import G1CollisionChecker
+from core.solver.g1_hybrid_ik import IK_PIPELINE_STAGES
 
 # 检查 ROS 2 是否可用
 HAS_ROS2 = False
@@ -94,9 +94,7 @@ class RobotTelemetryManager:
         self.active_arm = "left_arm"
         self.joint_positions = dict(G1_DEFAULT_STAND_JOINTS)
         self.target_pos = init_hand_p.copy()
-        self.actual_pos = None  # None 时由 Pinocchio 前向运动学实时算出手爪真实位置
         self.target_rot = init_hand_rot.copy()
-        self.actual_rot = None
 
         # 算法诊断与度量指标缓存
         init_rpy_deg = [round(float(np.degrees(v)), 2) for v in pin.rpy.matrixToRpy(init_hand_rot)]
@@ -145,7 +143,6 @@ class RobotTelemetryManager:
                 # 订阅标准遥测话题 (标准话题，不作冗余兼容)
                 self.ros_node.create_subscription(JointState, "/joint_states", self._on_joint_state, 10)
                 self.ros_node.create_subscription(PoseStamped, "/g1/kinematics/target_pose", self._on_target_pose, 10)
-                self.ros_node.create_subscription(PoseStamped, "/g1/kinematics/actual_pose", self._on_actual_pose, 10)
                 self.ros_node.create_subscription(String, "/g1/kinematics/solver_metrics", self._on_solver_metrics, 10)
 
                 # 发布目标控制指令话题
@@ -250,20 +247,6 @@ class RobotTelemetryManager:
                 self._fk_dirty = True
             self.target_pos = new_pos
 
-    def _on_actual_pose(self, msg: PoseStamped):
-        with self.lock:
-            new_pos = np.array([msg.pose.position.x, msg.pose.position.y, msg.pose.position.z], dtype=np.float64)
-            qx = float(msg.pose.orientation.x)
-            qy = float(msg.pose.orientation.y)
-            qz = float(msg.pose.orientation.z)
-            qw = float(msg.pose.orientation.w)
-            if qx**2 + qy**2 + qz**2 + qw**2 > 1e-4:
-                new_rot = pin.Quaternion(qw, qx, qy, qz).normalized().toRotationMatrix()
-                self.actual_rot = new_rot
-            if self.actual_pos is None or not np.allclose(new_pos, self.actual_pos, atol=1e-4):
-                self._fk_dirty = True
-            self.actual_pos = new_pos
-
     def _on_solver_metrics(self, msg: String):
         try:
             data = json.loads(msg.data)
@@ -346,24 +329,26 @@ class RobotTelemetryManager:
 
         print(f"[Web 目标中枢] 🚀 成功向 ROS 2 发布 6D 目标指令: [{x:.3f}, {y:.3f}, {z:.3f}] (执行臂: {arm}, RPY: {rpy})")
 
+    def _compute_ee_pose_fk(self, arm: str, joint_dict: Optional[Dict[str, float]] = None) -> Tuple[np.ndarray, np.ndarray]:
+        """计算指定关节配置下末端手爪的笛卡尔空间坐标与旋转矩阵"""
+        joints = joint_dict if joint_dict is not None else G1_DEFAULT_STAND_JOINTS
+        q_full = pin.neutral(self.kin.model)
+        for jname, val in joints.items():
+            if self.kin.model.existJointName(jname):
+                jid = self.kin.model.getJointId(jname)
+                q_full[self.kin.model.joints[jid].idx_q] = val
+        pin.forwardKinematics(self.kin.model, self.kin.data, q_full)
+        pin.updateFramePlacements(self.kin.model, self.kin.data)
+        ee_frame = "left_wrist_yaw_link" if arm == "left_arm" else "right_wrist_yaw_link"
+        fid = self.kin.model.getFrameId(ee_frame)
+        return self.kin.data.oMf[fid].translation.copy(), self.kin.data.oMf[fid].rotation.copy()
+
     def dispatch_set_arm(self, arm: str):
         """切换当前监控与控制的手臂 (left_arm / right_arm)"""
         with self.lock:
             self.active_arm = arm
             # 同步更新目标位置为该臂当前手爪真实位置与姿态，保持零残差
-            q_full = pin.neutral(self.kin.model)
-            for jname, val in self.joint_positions.items():
-                if self.kin.model.existJointName(jname):
-                    jid = self.kin.model.getJointId(jname)
-                    q_full[self.kin.model.joints[jid].idx_q] = val
-            pin.forwardKinematics(self.kin.model, self.kin.data, q_full)
-            pin.updateFramePlacements(self.kin.model, self.kin.data)
-            ee_frame = "left_wrist_yaw_link" if arm == "left_arm" else "right_wrist_yaw_link"
-            fid = self.kin.model.getFrameId(ee_frame)
-            self.target_pos = self.kin.data.oMf[fid].translation.copy()
-            self.target_rot = self.kin.data.oMf[fid].rotation.copy()
-            self.actual_pos = None
-            self.actual_rot = None
+            self.target_pos, self.target_rot = self._compute_ee_pose_fk(arm, self.joint_positions)
             self._fk_dirty = True
             self.add_event_log("CONFIG", f"切换操作臂: {arm}", f"已切换至 {'左臂 (Left Arm)' if arm == 'left_arm' else '右臂 (Right Arm)'}")
 
@@ -377,18 +362,7 @@ class RobotTelemetryManager:
         with self.lock:
             self.add_event_log("COMMAND", "下达复位指令", "恢复官方对称微屈直立就绪姿态")
             # 重新计算就绪姿态下手爪真实位置与姿态并重置目标
-            q_tmp = pin.neutral(self.kin.model)
-            for k, v in G1_DEFAULT_STAND_JOINTS.items():
-                if self.kin.model.existJointName(k):
-                    q_tmp[self.kin.model.joints[self.kin.model.getJointId(k)].idx_q] = v
-            pin.forwardKinematics(self.kin.model, self.kin.data, q_tmp)
-            pin.updateFramePlacements(self.kin.model, self.kin.data)
-            ee_frame = "left_wrist_yaw_link" if self.active_arm == "left_arm" else "right_wrist_yaw_link"
-            fid = self.kin.model.getFrameId(ee_frame)
-            self.target_pos = self.kin.data.oMf[fid].translation.copy()
-            self.target_rot = self.kin.data.oMf[fid].rotation.copy()
-            self.actual_pos = None
-            self.actual_rot = None
+            self.target_pos, self.target_rot = self._compute_ee_pose_fk(self.active_arm, G1_DEFAULT_STAND_JOINTS)
             self._fk_dirty = True
 
         stand_quat = pin.Quaternion(self.target_rot)
@@ -412,7 +386,6 @@ class RobotTelemetryManager:
         else:
             self.reset_to_stand_local()
 
-
     def dispatch_circle_demo(self):
         """下达连续空间轨迹演示指令"""
         with self.lock:
@@ -426,15 +399,7 @@ class RobotTelemetryManager:
     def reset_to_stand_local(self):
         with self.lock:
             self.joint_positions = dict(G1_DEFAULT_STAND_JOINTS)
-            q_tmp = pin.neutral(self.kin.model)
-            for k, v in G1_DEFAULT_STAND_JOINTS.items():
-                if self.kin.model.existJointName(k):
-                    q_tmp[self.kin.model.joints[self.kin.model.getJointId(k)].idx_q] = v
-            pin.forwardKinematics(self.kin.model, self.kin.data, q_tmp)
-            pin.updateFramePlacements(self.kin.model, self.kin.data)
-            fid = self.kin.model.getFrameId("left_wrist_yaw_link" if self.active_arm == "left_arm" else "right_wrist_yaw_link")
-            self.target_pos = self.kin.data.oMf[fid].translation.copy()
-            self.actual_pos = None
+            self.target_pos, self.target_rot = self._compute_ee_pose_fk(self.active_arm, G1_DEFAULT_STAND_JOINTS)
             self._fk_dirty = True
 
     # ─────────────────────────────────────────────────────────────
@@ -477,8 +442,8 @@ class RobotTelemetryManager:
             fid = self.kin.model.getFrameId(ee_frame)
             fk_actual_pos = self.kin.data.oMf[fid].translation.copy()
             fk_actual_rot = self.kin.data.oMf[fid].rotation.copy()
-            display_actual_pos = fk_actual_pos if self.actual_pos is None else self.actual_pos
-            display_actual_rot = fk_actual_rot if self.actual_rot is None else self.actual_rot
+            display_actual_pos = fk_actual_pos
+            display_actual_rot = fk_actual_rot
 
             # 空间轴向偏差向量与欧氏残差范数 (毫米级)
             delta_xyz = (display_actual_pos - self.target_pos) * 1000.0
@@ -510,11 +475,10 @@ class RobotTelemetryManager:
                         "quat": [round(float(v), 5) for v in [q_rot.x, q_rot.y, q_rot.z, q_rot.w]],
                     }
 
-            # 5. 全域 28 对碰撞干涉检测与物理安全净空
-            col_pairs = self.collision.get_colliding_pairs(q_full, arm=self.active_arm)
-            min_dist_m = self.collision.compute_min_distance(q_full, arm=self.active_arm)
-            min_clearance_mm = float(min_dist_m * 1000.0)
-            zone_clearances = self.collision.compute_zone_distances(q_full, arm=self.active_arm)
+            # 5. 全域碰撞干涉检测与物理安全净空 (update_fk=False 复用第3步已计算的FK，避免重复求距)
+            col_pairs = self.collision.get_colliding_pairs(q_full, arm=self.active_arm, update_fk=False)
+            zone_clearances = self.collision.compute_zone_distances(q_full, arm=self.active_arm, update_fk=False)
+            min_clearance_mm = float(min(zone_clearances.values())) if zone_clearances else 50.0
 
             # 5.1 Pinocchio 全身刚体动力学计算 (CoM 双足平衡安全、广义重力补偿力矩与可操作度)
             bal_metrics = self.kin.evaluate_balance(q_full)

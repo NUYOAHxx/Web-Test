@@ -25,9 +25,9 @@ DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if DIR_ROOT not in sys.path:
     sys.path.insert(0, DIR_ROOT)
 
-from deploy.kinematics.g1_model import G1KinematicsModel, G1_DEFAULT_STAND_JOINTS, G1_READY_POSE
-from deploy.collision.g1_collision import G1CollisionChecker
-from deploy.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.kinematics.g1_model import G1KinematicsModel, G1_DEFAULT_STAND_JOINTS, G1_READY_POSE
+from core.collision.g1_collision import G1CollisionChecker
+from core.solver.g1_hybrid_ik import G1HybridIKSolver
 
 
 def test_collision_suite():

@@ -40,10 +40,10 @@ if pgrep -f "g1_ik_node.py" > /dev/null 2>&1; then
     sleep 0.5
 fi
 
-echo "[提示] 启动后台 Headless 10-DoF IK 求解服务节点 (deploy/solver/g1_ik_node.py)..."
-python3 -u "$DIR/deploy/solver/g1_ik_node.py" &
+echo "[提示] 启动后台 Headless 10-DoF IK 求解服务节点 (core/solver/g1_ik_node.py)..."
+python3 -u "$DIR/core/solver/g1_ik_node.py" &
 IK_PID=$!
 trap "kill -9 $IK_PID 2>/dev/null || true" EXIT INT TERM
 sleep 0.5
 
-python3 -u "$DIR/deploy/visualizer/web/server.py" --port "$PORT"
+python3 -u "$DIR/visualizer/web/server.py" --port "$PORT"

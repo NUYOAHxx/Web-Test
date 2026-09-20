@@ -13,4 +13,4 @@ if [ -d ".venv" ]; then
     source .venv/bin/activate
 fi
 
-python3 deploy/simulation/deploy_mujoco53.py "$@"
+python3 simulation/deploy_mujoco53.py "$@"

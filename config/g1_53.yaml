@@ -1,5 +1,5 @@
 # model path
-policy_path: "{LEGGED_GYM_ROOT_DIR}/pre_train/g1/policy.pt"
+policy_path: "{LEGGED_GYM_ROOT_DIR}/simulation/policy/policy.pt"
 xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/g1/scene53.xml"
 
 # Total simulation time

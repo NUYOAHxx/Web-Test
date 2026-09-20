@@ -29,9 +29,9 @@ dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
-from deploy.solver.g1_hybrid_ik import G1HybridIKSolver
-from deploy.kinematics.g1_model import G1_READY_POSE, G1_DEFAULT_STAND_JOINTS
-from deploy.visualizer.markers import create_pose_stamped, create_ik_markers
+from core.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.kinematics.g1_model import G1_READY_POSE, G1_DEFAULT_STAND_JOINTS
+from visualizer.rviz.markers import create_pose_stamped, create_ik_markers
 
 # 宇树 G1 基础站姿关节字典 (复用单一定义源)
 DEFAULT_JOINTS = G1_DEFAULT_STAND_JOINTS

@@ -23,7 +23,7 @@ URDF_PATH="/home/parallels/ws_moveit/src/g1_description/urdf/g1_29dof.urdf"
 if [ ! -f "$URDF_PATH" ]; then
     URDF_PATH="$DIR/resources/g1/g1_29dof.urdf"
 fi
-RVIZ_CFG="$DIR/deploy/visualizer/view_10dof_ik.rviz"
+RVIZ_CFG="$DIR/visualizer/rviz/view_10dof_ik.rviz"
 
 echo "=================================================================="
 echo "    启动 Unitree G1 10-DoF 躯干-手臂协同逆运动学 RViz 可视化看板"
@@ -64,4 +64,4 @@ fi
 
 # 3. 启动 10-DoF 交互式解算与终端监控控制台
 echo "[3/3] 进入 10-DoF 交互式控制台与数据监控报表..."
-python3 "$DIR/deploy/visualizer/visualize_10dof_rviz.py"
+python3 "$DIR/visualizer/rviz/visualize_10dof_rviz.py"

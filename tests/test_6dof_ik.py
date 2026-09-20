@@ -20,7 +20,7 @@ DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if DIR_ROOT not in sys.path:
     sys.path.insert(0, DIR_ROOT)
 
-from deploy.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.solver.g1_hybrid_ik import G1HybridIKSolver
 
 
 def test_6dof_ik_suite():

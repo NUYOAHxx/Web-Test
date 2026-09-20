@@ -38,11 +38,11 @@ pkill -f "g1_ik_node.py" 2>/dev/null || true
 # 检查是否使用 ros2 launch 还是直接调度
 if command -v ros2 &> /dev/null; then
     echo "✔️ 检测到 ROS 2 环境，使用 ros2 launch 调度系统..."
-    exec ros2 launch deploy/launch/g1_telemetry_system.launch.py "$@"
+    exec ros2 launch launch/g1_telemetry_system.launch.py "$@"
 else
     echo "⚠️ 未检测到全局 ros2 命令，使用 Python 多进程直接调度..."
-    python3 deploy/solver/g1_ik_node.py &
+    python3 core/solver/g1_ik_node.py &
     IK_PID=$!
     trap "kill $IK_PID 2>/dev/null || true" EXIT INT TERM
-    python3 deploy/visualizer/web/server.py --port 8080
+    python3 visualizer/web/server.py --port 8080
 fi

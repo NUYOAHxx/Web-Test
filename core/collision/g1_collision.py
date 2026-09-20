@@ -23,7 +23,7 @@ Unitree G1 工业级全域自碰撞安全检测引擎 (Industrial Collision & Sa
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import pinocchio as pin
-from deploy.kinematics.g1_model import G1KinematicsModel
+from core.kinematics.g1_model import G1KinematicsModel
 
 
 class G1CollisionChecker:

@@ -19,28 +19,33 @@
 
 ```
 UNITREE-G1-ROBOT-MODEL/
-├── deploy/                     # 核心算法与业务实现模块
-│   ├── collision/              # 28 对全机身几何自碰撞检测引擎 (g1_collision.py)
-│   ├── config/                 # 机器人控制与关节配置 (g1_53.yaml)
-│   ├── kinematics/             # 正运动学模型与关节常量 (g1_model.py)
-│   ├── launch/                 # ROS 2 节点调度启动文件 (g1_telemetry_system.launch.py)
-│   ├── planning/               # 空间路径规划算法 (rrt_star.py)
-│   ├── simulation/             # MuJoCo 53-DoF 物理仿真与强化学习部署 (deploy_mujoco53.py)
-│   ├── solver/                 # 10-DoF 逆解算法 (g1_hybrid_ik.py) 与 Headless 服务节点 (g1_ik_node.py)
-│   └── visualizer/             # RViz 桌面可视化与 Web 遥测监控大屏 (web/)
-├── output/                     # 诊断报表、轨迹对比图与测试输出
-├── pre_train/                  # 预训练策略权重文件
-│   └── g1/policy.pt
-├── resources/                  # 机器人 URDF / MJCF 模型描述与 3D 网格资源
+├── core/                       # 核心算法与业务逻辑模块
+│   ├── kinematics/             # Pinocchio 刚体动力学与正运动学 (g1_model.py)
+│   ├── collision/              # MoveIt SRDF ACM 28 对全机身自碰撞检测引擎 (g1_collision.py)
+│   ├── solver/                 # 10-DoF 协同逆解 (g1_hybrid_ik.py) 与 Headless 服务 (g1_ik_node.py)
+│   └── planning/               # 三维空间路径规划与轨迹生成 (rrt_star.py)
+├── visualizer/                 # 可视化与监控大屏
+│   ├── web/                    # Web 数字孪生实时遥测监控大屏 (server.py, app.js, index.html)
+│   └── rviz/                   # ROS 2 RViz 3D 监控与 Marker 生成 (visualize_10dof_rviz.py)
+├── simulation/                 # MuJoCo 53-DoF 全身仿真与强化学习部署
+│   ├── deploy_mujoco53.py      # MuJoCo 物理仿真运行入口
+│   └── policy/                 # 预训练策略权重文件 (policy.pt)
+├── config/                     # 机器人配置与仿真参数 (g1_53.yaml)
+├── launch/                     # ROS 2 Launch 启动脚本 (g1_telemetry_system.launch.py)
+├── resources/                  # 机器人 URDF / SRDF / MJCF 模型与 3D 网格资源
 ├── scripts/                    # 统一操作与服务启动脚本
 │   ├── run_10dof_rviz.sh       # 启动 10-DoF RViz 3D 监控
 │   ├── run_mujoco.sh           # 启动 MuJoCo 53-DoF 全身仿真
 │   ├── run_telemetry_system.sh # 启动 ROS 2 Headless IK + Web 遥测系统
 │   └── run_web_dashboard.sh    # 启动 Web 数字孪生仪表盘 (默认端口 8080)
-├── tests/                      # 自动化单元测试、基准压力测试与 PTP 诊断工具
+├── benchmarks/                 # 性能压测与轨迹规划基准测试
+│   ├── ik_benchmark.py         # 大规模随机逆解性能与收敛基准评测
+│   └── ptp_planning.py         # 点对点轨迹规划与奇异点敏感度分析
+├── tests/                      # pytest 自动化单元测试套件
 │   ├── test_10dof_ik.py        # 10-DoF 协同逆解验证套件
-│   ├── test_ik_benchmark.py    # 大规模压力与位移距离基准评测
-│   └── test_ptp_planning.py    # 点对点轨迹规划与奇异点敏感度分析
+│   ├── test_6dof_ik.py         # 6-DoF 位姿逆解测试套件
+│   ├── test_collision_engine.py# 自碰撞检测引擎测试
+│   └── test_pinocchio_dynamics.py # 动力学模型测试
 ├── LICENSE                     # Apache 2.0 开源许可
 ├── README.md                   # 工程文档
 ├── pyproject.toml              # 项目依赖与包配置
@@ -77,21 +82,19 @@ bash scripts/run_10dof_rviz.sh
 bash scripts/run_mujoco.sh
 ```
 
-*(注：根目录下的 `run.sh`、`run_web_dashboard.sh` 等脚本提供便捷转发，可直接在根目录执行。)*
+## 测试与基准评估工具
 
-## 测试与诊断工具
-
-项目中提供完备的算法测试与压力评估工具：
+项目中提供完备的自动化单元测试、算法压测与轨迹规划诊断工具：
 
 ```bash
-# 运行 10-DoF 协同逆解功能测试
-python3 tests/test_10dof_ik.py
+# 运行自动化单元测试套件 (pytest)
+pytest tests/
 
 # 运行大规模随机逆解性能与收敛基准评测
-python3 tests/test_ik_benchmark.py --samples 500
+python3 benchmarks/ik_benchmark.py --samples 500
 
 # 运行点对点 (PTP) 轨迹规划与 Z 轴扫描分析
-python3 tests/test_ptp_planning.py --sweep-z
+python3 benchmarks/ptp_planning.py --sweep-z
 ```
 
 ## 许可证

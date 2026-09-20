@@ -21,7 +21,7 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 def generate_launch_description():
-    dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
     # URDF 模型路径查找
     default_urdf = "/home/parallels/ws_moveit/src/g1_description/urdf/g1_29dof.urdf"
@@ -51,7 +51,7 @@ def generate_launch_description():
 
     # 1. 核心无头 IK 解算服务节点 (Headless ROS 2 Node)
     ik_solver_process = ExecuteProcess(
-        cmd=[sys.executable, os.path.join(dir_root, "deploy/solver/g1_ik_node.py")],
+        cmd=[sys.executable, os.path.join(dir_root, "core/solver/g1_ik_node.py")],
         output="screen",
         name="g1_ik_solver"
     )
@@ -67,7 +67,7 @@ def generate_launch_description():
 
     # 3. Web 纯被动遥测监控与目标指令分发服务端
     web_server_process = ExecuteProcess(
-        cmd=[sys.executable, os.path.join(dir_root, "deploy/visualizer/web/server.py"), "--port", LaunchConfiguration("port")],
+        cmd=[sys.executable, os.path.join(dir_root, "visualizer/web/server.py"), "--port", LaunchConfiguration("port")],
         output="screen",
         name="g1_telemetry_hub"
     )

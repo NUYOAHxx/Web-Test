@@ -13,8 +13,8 @@ import numpy as np
 # 加入项目根目录
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from deploy.kinematics.g1_model import G1KinematicsModel, G1_READY_POSE
-from deploy.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.kinematics.g1_model import G1KinematicsModel, G1_READY_POSE
+from core.solver.g1_hybrid_ik import G1HybridIKSolver
 
 
 def test_pinocchio_model_reduction():

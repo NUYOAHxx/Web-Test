@@ -39,13 +39,13 @@ DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if DIR_ROOT not in sys.path:
     sys.path.insert(0, DIR_ROOT)
 
-from deploy.solver.g1_hybrid_ik import (
+from core.solver.g1_hybrid_ik import (
     G1HybridIKSolver,
     G1_READY_POSE,
     G1_DEFAULT_STAND_JOINTS,
     IK_PIPELINE_STAGES,
 )
-from deploy.visualizer.markers import create_pose_stamped, create_ik_markers, create_com_markers
+from visualizer.rviz.markers import create_pose_stamped, create_ik_markers, create_com_markers
 
 
 class G1IKSolverNode(Node):

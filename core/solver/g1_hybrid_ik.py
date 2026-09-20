@@ -21,14 +21,14 @@ import pink
 from pink.tasks import FrameTask, PostureTask
 from pink.barriers import SelfCollisionBarrier
 
-from deploy.kinematics.g1_model import (
+from core.kinematics.g1_model import (
     G1KinematicsModel,
     G1_JOINT_LIMITS,
     G1_WAIST_LIMITS,
     G1_READY_POSE,
     G1_DEFAULT_STAND_JOINTS,
 )
-from deploy.collision.g1_collision import G1CollisionChecker
+from core.collision.g1_collision import G1CollisionChecker
 
 # 逆运动学算法五大计算流水线阶段定义 (Pink + ProxQP 工业标准架构)
 IK_PIPELINE_STAGES = [
