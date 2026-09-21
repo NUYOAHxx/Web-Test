@@ -1,9 +1,14 @@
 import math
 import random
 import numpy as np
-import matplotlib.pyplot as plt
-from mpl_toolkits.mplot3d import Axes3D
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+try:
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+except Exception:
+    plt = None
+    Axes3D = None
+    Poly3DCollection = None
 
 
 # 定义三维节点类

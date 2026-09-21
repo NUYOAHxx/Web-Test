@@ -1,0 +1,269 @@
+# joint_limits.yaml allows additional limits to be specified for joints in the robot description.
+# Units: position (radians), velocity (radians/s), acceleration (radians/s^2)
+
+joint_limits:
+  # ==================== Left Arm ====================
+  left_shoulder_pitch_joint:
+    has_position_limits: true
+    min_position: -3.0892
+    max_position: 2.6704
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_shoulder_roll_joint:
+    has_position_limits: true
+    min_position: -1.5882
+    max_position: 2.2515
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_shoulder_yaw_joint:
+    has_position_limits: true
+    min_position: -2.618
+    max_position: 2.618
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_elbow_joint:
+    has_position_limits: true
+    min_position: -1.0472
+    max_position: 2.0944
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_wrist_roll_joint:
+    has_position_limits: true
+    min_position: -1.9722
+    max_position: 1.9722
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_wrist_pitch_joint:
+    has_position_limits: true
+    min_position: -1.6144
+    max_position: 1.6144
+    has_velocity_limits: true
+    max_velocity: 22.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_wrist_yaw_joint:
+    has_position_limits: true
+    min_position: -1.6144
+    max_position: 1.6144
+    has_velocity_limits: true
+    max_velocity: 22.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  # ==================== Right Arm ====================
+  right_shoulder_pitch_joint:
+    has_position_limits: true
+    min_position: -3.0892
+    max_position: 2.6704
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_shoulder_roll_joint:
+    has_position_limits: true
+    min_position: -2.2515
+    max_position: 1.5882
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_shoulder_yaw_joint:
+    has_position_limits: true
+    min_position: -2.618
+    max_position: 2.618
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_elbow_joint:
+    has_position_limits: true
+    min_position: -1.0472
+    max_position: 2.0944
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_wrist_roll_joint:
+    has_position_limits: true
+    min_position: -1.9722
+    max_position: 1.9722
+    has_velocity_limits: true
+    max_velocity: 37.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_wrist_pitch_joint:
+    has_position_limits: true
+    min_position: -1.6144
+    max_position: 1.6144
+    has_velocity_limits: true
+    max_velocity: 22.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_wrist_yaw_joint:
+    has_position_limits: true
+    min_position: -1.6144
+    max_position: 1.6144
+    has_velocity_limits: true
+    max_velocity: 22.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  # ==================== Waist ====================
+  waist_yaw_joint:
+    has_position_limits: true
+    min_position: -2.618
+    max_position: 2.618
+    has_velocity_limits: true
+    max_velocity: 32.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  waist_roll_joint:
+    has_position_limits: true
+    min_position: -0.52
+    max_position: 0.52
+    has_velocity_limits: true
+    max_velocity: 30.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  waist_pitch_joint:
+    has_position_limits: true
+    min_position: -0.52
+    max_position: 0.52
+    has_velocity_limits: true
+    max_velocity: 30.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  # ==================== Left Leg ====================
+  left_hip_pitch_joint:
+    has_position_limits: true
+    min_position: -2.5307
+    max_position: 2.8798
+    has_velocity_limits: true
+    max_velocity: 32.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_hip_roll_joint:
+    has_position_limits: true
+    min_position: -0.5236
+    max_position: 2.9671
+    has_velocity_limits: true
+    max_velocity: 32.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_hip_yaw_joint:
+    has_position_limits: true
+    min_position: -2.7576
+    max_position: 2.7576
+    has_velocity_limits: true
+    max_velocity: 32.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_knee_joint:
+    has_position_limits: true
+    min_position: -0.0873
+    max_position: 2.8798
+    has_velocity_limits: true
+    max_velocity: 20.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_ankle_pitch_joint:
+    has_position_limits: true
+    min_position: -0.8727
+    max_position: 0.5236
+    has_velocity_limits: true
+    max_velocity: 30.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  left_ankle_roll_joint:
+    has_position_limits: true
+    min_position: -0.2618
+    max_position: 0.2618
+    has_velocity_limits: true
+    max_velocity: 30.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  # ==================== Right Leg ====================
+  right_hip_pitch_joint:
+    has_position_limits: true
+    min_position: -2.5307
+    max_position: 2.8798
+    has_velocity_limits: true
+    max_velocity: 32.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_hip_roll_joint:
+    has_position_limits: true
+    min_position: -2.9671
+    max_position: 0.5236
+    has_velocity_limits: true
+    max_velocity: 32.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_hip_yaw_joint:
+    has_position_limits: true
+    min_position: -2.7576
+    max_position: 2.7576
+    has_velocity_limits: true
+    max_velocity: 32.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_knee_joint:
+    has_position_limits: true
+    min_position: -0.0873
+    max_position: 2.8798
+    has_velocity_limits: true
+    max_velocity: 20.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_ankle_pitch_joint:
+    has_position_limits: true
+    min_position: -0.8727
+    max_position: 0.5236
+    has_velocity_limits: true
+    max_velocity: 30.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
+
+  right_ankle_roll_joint:
+    has_position_limits: true
+    min_position: -0.2618
+    max_position: 0.2618
+    has_velocity_limits: true
+    max_velocity: 30.0
+    has_acceleration_limits: true
+    max_acceleration: 10.0
