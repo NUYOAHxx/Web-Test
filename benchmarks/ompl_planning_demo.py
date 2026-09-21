@@ -27,7 +27,7 @@ import rclpy
 from core.planning.moveit_ompl_planner import MoveItOMPLPlanner, PlanResult
 
 
-def run_ompl_demo():
+def run_ompl_demo(use_home: bool = False):
     print("=" * 80)
     print(" 🚀 Unitree G1 MoveIt 2 OMPL 全局运动规划基准演示")
     print("=" * 80)
@@ -45,9 +45,9 @@ def run_ompl_demo():
         print("   bash scripts/run_moveit_ompl.sh\n")
         return
 
-    print("✔️ MoveIt 2 OMPL 规划服务端已就绪，开始测试流水线...\n")
+    print("✔️ MoveIt 2 OMPL 规划服务端已就绪，开始测试流水线...")
 
-    # 定义标准基准就绪姿态 (确保即使外部 RViz 交互改变了机器人姿态，基准压测亦能 100% 确定性复现)
+    # 起始姿态选择：默认完全遵循 MoveIt 规范从 /joint_states 实时当前姿态规划；可选固定基准姿态
     ready_joints = {
         "left_shoulder_pitch_joint": 0.2,
         "left_shoulder_roll_joint": 0.2,
@@ -59,7 +59,12 @@ def run_ompl_demo():
         "waist_yaw_joint": 0.0,
         "waist_roll_joint": 0.0,
         "waist_pitch_joint": 0.0,
-    }
+    } if use_home else None
+
+    if use_home:
+        print("• 规划起始源: 预设基准就绪姿态 (Home Pose)\n")
+    else:
+        print("• 规划起始源: 机器人实时当前姿态 (/joint_states)\n")
 
     # ──────────────────────────────────────────────────────────────────────────
     # 【测试 1】7-DoF 左臂自由空间点对点规划 (left_arm, RRTConnect)
@@ -194,4 +199,12 @@ def run_ompl_demo():
 
 
 if __name__ == "__main__":
-    run_ompl_demo()
+    import argparse
+    parser = argparse.ArgumentParser(description="Unitree G1 MoveIt 2 OMPL 运动规划演示与基准评测")
+    parser.add_argument(
+        "--use-home",
+        action="store_true",
+        help="强制使用固定的预设就绪姿态（Home Pose）作为规划起点；若未指定则默认完全遵循 MoveIt 实时 /joint_states 姿态规划",
+    )
+    args = parser.parse_args()
+    run_ompl_demo(use_home=args.use_home)
