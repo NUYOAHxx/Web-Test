@@ -1,14 +1,6 @@
 import math
 import random
 import numpy as np
-try:
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-except Exception:
-    plt = None
-    Axes3D = None
-    Poly3DCollection = None
 
 
 # 定义三维节点类
@@ -217,7 +209,14 @@ if __name__ == "__main__":
     # 执行路径规划
     path = rrt.plan()
 
-    # 可视化
+    # 可视化 (按需动态导入)
+    try:
+        import matplotlib.pyplot as plt
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    except ImportError:
+        print("未检测到兼容的 matplotlib 库，跳过 3D 绘图。")
+        exit(0)
+
     fig = plt.figure(figsize=(12, 12))
     ax = fig.add_subplot(111, projection='3d')
 

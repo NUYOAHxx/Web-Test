@@ -203,6 +203,7 @@ class MoveItOMPLPlanner:
         if start_joints:
             mpr.start_state.joint_state.name = list(start_joints.keys())
             mpr.start_state.joint_state.position = [float(v) for v in start_joints.values()]
+            mpr.start_state.is_diff = True
 
         # 构造目标约束 (Goal Constraints)
         constraints = moveit_msgs.msg.Constraints()
@@ -279,6 +280,7 @@ class MoveItOMPLPlanner:
         if start_joints:
             mpr.start_state.joint_state.name = list(start_joints.keys())
             mpr.start_state.joint_state.position = [float(v) for v in start_joints.values()]
+            mpr.start_state.is_diff = True
 
         constraints = moveit_msgs.msg.Constraints()
         constraints.name = f"{group_name}_joint_goal"
