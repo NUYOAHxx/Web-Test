@@ -4,13 +4,12 @@ import queue
 import collections
 import numpy as np
 import mujoco
-import mujoco.viewer
 import yaml
 import argparse
 import torch
 import math  # 为方向计算添加
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List
 import os
 import sys
 
@@ -20,7 +19,7 @@ if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
 # 导入RRT算法
-from core.planning.rrt_star import RRTStar3D, Node3D
+from core.planning.rrt_star import RRTStar3D
 
 # 全局变量，用于走路控制
 cmd = [0, 0, 0]  # 行走命令 [前进速度, 侧向速度, 转向速度]
@@ -1989,7 +1988,7 @@ def main():
     config = ArmConfig.from_yaml(config_path)
 
     # 打印工作空间限制
-    print(f"工作空间限制:")
+    print("工作空间限制:")
     print(f"  X轴: {config.workspace_limits['x']}")
     print(f"  Y轴: {config.workspace_limits['y']}")
     print(f"  Z轴: {config.workspace_limits['z']}")
@@ -2005,7 +2004,7 @@ def main():
 
     # 打印关节信息以帮助调试
     n_joints = data.qpos.shape[0] - 7  # 减去基座的7个自由度
-    print(f"\n模型关节信息:")
+    print("\n模型关节信息:")
     print(f"  总关节数: {n_joints}")
     print(f"  控制器数量: {model.nu}")
     print(f"  默认关节角度数组长度: {len(config.default_angles)}")

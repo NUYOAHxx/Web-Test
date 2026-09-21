@@ -16,7 +16,6 @@ import time
 import math
 import threading
 import numpy as np
-import pinocchio as pin
 
 # ROS 2 与消息包导入
 import rclpy
@@ -166,7 +165,7 @@ def print_formatted_report(
 
     # 1. 目标位置信息
     reach_tag = "\033[92m[在 37.7cm 臂展舒适区内]\033[0m" if dist_shoulder <= 37.7 else "\033[93m[超出 37.7cm 单臂极限，需腰部拓展]\033[0m"
-    print(f"\033[1m【1. 空间目标点与可达性】\033[0m")
+    print("\033[1m【1. 空间目标点与可达性】\033[0m")
     print(f"  • 目标空间坐标 (Target) : [X = \033[36m{target_pos[0]:+.3f}\033[0m m,  Y = \033[36m{target_pos[1]:+.3f}\033[0m m,  Z = \033[36m{target_pos[2]:+.3f}\033[0m m]")
     print(f"  • 当前操作执行手臂      : \033[33m{arm}\033[0m")
     print(f"  • 距肩关节基座距离      : \033[1m{dist_shoulder:.1f} cm\033[0m {reach_tag}")
@@ -174,7 +173,7 @@ def print_formatted_report(
     # 2. 7-DoF vs 10-DoF 求解对比
     s7 = "\033[92m✔️ 成功收敛\033[0m" if ok_7 else "\033[91m❌ 失败 (臂长死锁/超出物理包络)\033[0m"
     s10 = "\033[92m✔️ 成功精准命中\033[0m" if ok_10 else "\033[91m❌ 未达容差\033[0m"
-    print(f"\n\033[1m【2. 求解器性能与收敛对比】\033[0m")
+    print("\n\033[1m【2. 求解器性能与收敛对比】\033[0m")
     print(f"  • 7-DoF  单臂求解结果  : {s7}  (残差: {info_7['pos_err_mm']:.2f} mm, 耗时: {info_7['time_ms']:.2f} ms)")
     print(f"  • 10-DoF 协同求解结果  : {s10}  (残差: \033[92m{info_10['pos_err_mm']:.2f} mm\033[0m, 耗时: \033[92m{info_10['time_ms']:.2f} ms\033[0m, 迭代: {info_10['iters']} 步)")
 
@@ -182,35 +181,35 @@ def print_formatted_report(
     deg_yaw = math.degrees(w_q[0])
     deg_roll = math.degrees(w_q[1])
     deg_pitch = math.degrees(w_q[2])
-    print(f"\n\033[1m【3. 腰部 3 自由度躯干分配 (3-DoF Waist)】\033[0m")
+    print("\n\033[1m【3. 腰部 3 自由度躯干分配 (3-DoF Waist)】\033[0m")
     print(f"  • waist_yaw_joint   (偏航转向) : \033[32m{w_q[0]:+.4f}\033[0m rad ({deg_yaw:+.1f}°)  --> {'偏航直立 0 位' if abs(deg_yaw)<3 else ('向左转腰' if deg_yaw>0 else '向右转腰')}")
     print(f"  • waist_roll_joint  (侧倾微调) : \033[32m{w_q[1]:+.4f}\033[0m rad ({deg_roll:+.1f}°)  --> {'无侧倾' if abs(deg_roll)<3 else ('左倾' if deg_roll>0 else '右倾')}")
     print(f"  • waist_pitch_joint (俯仰前屈) : \033[32m{w_q[2]:+.4f}\033[0m rad ({deg_pitch:+.1f}°)  --> {'直立不弯腰' if abs(deg_pitch)<3 else ('前屈俯身弯腰' if deg_pitch>0 else '躯干后仰')}")
 
     # 4. 手臂 7 自由度明细
-    print(f"\n\033[1m【4. 手臂 7 自由度各关节配置 (7-DoF Arm)】\033[0m")
+    print("\n\033[1m【4. 手臂 7 自由度各关节配置 (7-DoF Arm)】\033[0m")
     for i, name in enumerate(jnames):
         short_name = name.replace("left_", "").replace("right_", "")
         deg = math.degrees(a_q[i])
         print(f"  • {short_name:<20}: {a_q[i]:+.4f} rad ({deg:+6.1f}°)")
 
     # 5. 正向运动学闭环验算
-    print(f"\n\033[1m【5. Pinocchio 正向运动学 (FK) 闭环真实验算】\033[0m")
+    print("\n\033[1m【5. Pinocchio 正向运动学 (FK) 闭环真实验算】\033[0m")
     print(f"  • 实际达到的末端坐标   : [X = {fk_pos[0]:+.3f} m,  Y = {fk_pos[1]:+.3f} m,  Z = {fk_pos[2]:+.3f} m]")
     print(f"  • 三维欧氏闭环距离误差 : \033[1;92m{err_mm:.3f} mm\033[0m (满足亚毫米级容差)")
 
     # 6. 机身碰撞安全检测 (Collision Safety)
-    print(f"\n\033[1m【6. 机身碰撞安全监测 (Self-Collision Check)】\033[0m")
+    print("\n\033[1m【6. 机身碰撞安全监测 (Self-Collision Check)】\033[0m")
     if col_pairs is not None and min_dist_mm is not None:
         if len(col_pairs) == 0:
-            print(f"  • 碰撞监测范围        : 全机身 28 对关键连杆 (胸腔/骨盆/对侧臂/头部/腿部)")
-            print(f"  • 物理干涉状态        : \033[1;92m✔️ 安全 (严格无自碰撞，手臂与机身各部位保持安全间隙)\033[0m")
+            print("  • 碰撞监测范围        : 全机身 28 对关键连杆 (胸腔/骨盆/对侧臂/头部/腿部)")
+            print("  • 物理干涉状态        : \033[1;92m✔️ 安全 (严格无自碰撞，手臂与机身各部位保持安全间隙)\033[0m")
             print(f"  • 最小物理净空距离    : \033[1;92m{min_dist_mm:.1f} mm\033[0m (满足物理安全裕度)")
-            print(f"  • 核心区域安全状态    : 臂-胸腔: \033[92m✔️ 安全\033[0m | 双臂互碰: \033[92m✔️ 安全\033[0m | 臂-头部: \033[92m✔️ 安全\033[0m | 臂-下肢: \033[92m✔️ 安全\033[0m")
+            print("  • 核心区域安全状态    : 臂-胸腔: \033[92m✔️ 安全\033[0m | 双臂互碰: \033[92m✔️ 安全\033[0m | 臂-头部: \033[92m✔️ 安全\033[0m | 臂-下肢: \033[92m✔️ 安全\033[0m")
         else:
             print(f"  • 物理干涉状态        : \033[1;91m⚠️ 发生机身穿透碰撞! (共 {len(col_pairs)} 处干涉)\033[0m")
             print(f"  • 最小物理净空距离    : \033[1;91m{min_dist_mm:.1f} mm (穿透)\033[0m")
-            print(f"  • 报警连杆列表        :")
+            print("  • 报警连杆列表        :")
             for l1, l2, cat in col_pairs:
                 print(f"    - \033[91m{l1} <-> {l2} ({cat})\033[0m")
     else:
@@ -219,7 +218,7 @@ def print_formatted_report(
         print(f"  • 躯干-手臂干涉状态   : {col_str}")
 
     # 7. 机制行为诊断
-    print(f"\n\033[1m【7. 躯干-手臂协同机制诊断】\033[0m")
+    print("\n\033[1m【7. 躯干-手臂协同机制诊断】\033[0m")
     if abs(deg_yaw) < 5.0 and abs(deg_roll) < 5.0 and abs(deg_pitch) < 5.0:
         print("  👉 \033[92m【手臂优先机制完全生效】\033[0m：腰部各轴偏角均在 5° 内，躯干保持直立，全靠手臂灵巧完成抓取！")
     elif deg_pitch > 8.0:

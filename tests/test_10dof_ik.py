@@ -8,7 +8,6 @@ import os
 import sys
 import numpy as np
 import pytest
-import pinocchio as pin
 
 dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if dir_root not in sys.path:

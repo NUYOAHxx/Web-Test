@@ -21,7 +21,7 @@ import time
 import math
 import json
 import threading
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional, Any
 
 import numpy as np
 import pinocchio as pin
@@ -30,9 +30,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Point, PoseStamped
+from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
-from visualization_msgs.msg import Marker, MarkerArray
+from visualization_msgs.msg import MarkerArray
 
 # 添加项目根目录到 Python 搜索路径
 DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -459,8 +459,8 @@ class G1IKSolverNode(Node):
                 for step in range(steps):
                     theta = 2.0 * math.pi * (step / steps)
                     circ_tgt = center + np.array([radius * math.cos(theta), 0.0, radius * math.sin(theta)], dtype=np.float64)
-                    self.solve_target(circ_tgt, target_rot=R_target, duration=0.04)
-                    time.sleep(0.04)
+                    self.solve_target(circ_tgt, target_rot=R_target, duration=dt)
+                    time.sleep(dt)
 
                 # ── 第三阶段：闭环微步收尾 ──
                 self.solve_target(p_start, target_rot=R_target, duration=0.2)

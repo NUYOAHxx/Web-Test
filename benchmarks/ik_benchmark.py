@@ -23,7 +23,6 @@ if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
 from core.solver.g1_hybrid_ik import G1HybridIKSolver
-from core.kinematics.g1_model import G1_JOINT_LIMITS
 
 
 def run_pure_local_dls(solver, arm: str, seed_q: np.ndarray, target_pos: np.ndarray, max_iters: int = 35):

@@ -13,7 +13,6 @@ Unitree G1 MoveIt 2 OMPL (Open Motion Planning Library) 标准调度启动文件
 """
 
 import os
-import sys
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition

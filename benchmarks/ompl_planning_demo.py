@@ -24,7 +24,7 @@ if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
 import rclpy
-from core.planning.moveit_ompl_planner import MoveItOMPLPlanner, PlanResult
+from core.planning.moveit_ompl_planner import MoveItOMPLPlanner
 
 
 def run_ompl_demo(use_home: bool = False):
@@ -74,7 +74,6 @@ def run_ompl_demo(use_home: bool = False):
     target_pos_1 = [0.25, 0.22, 0.85]
     print(f"  • 目标末端空间坐标: {target_pos_1}")
 
-    t0 = time.perf_counter()
     res1 = planner.plan_to_pose(
         group_name="left_arm",
         target_pos=target_pos_1,
@@ -82,7 +81,6 @@ def run_ompl_demo(use_home: bool = False):
         allowed_planning_time=3.0,
         start_joints=ready_joints,
     )
-    dt1 = time.perf_counter() - t0
 
     if res1.success:
         print(f"  ✔️ {res1.summary()}")
@@ -99,7 +97,6 @@ def run_ompl_demo(use_home: bool = False):
     target_pos_2 = [0.42, 0.32, 0.95]
     print(f"  • 远距离目标坐标: {target_pos_2} (需要腰部 3-DoF 旋转倾斜介入协同)")
 
-    t0 = time.perf_counter()
     res2 = planner.plan_to_pose(
         group_name="left_arm_torso",
         target_pos=target_pos_2,
@@ -107,7 +104,6 @@ def run_ompl_demo(use_home: bool = False):
         allowed_planning_time=5.0,
         start_joints=ready_joints,
     )
-    dt2 = time.perf_counter() - t0
 
     if res2.success:
         print(f"  ✔️ {res2.summary()}")
@@ -199,7 +195,6 @@ def run_ompl_demo(use_home: bool = False):
 
 
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser(description="Unitree G1 MoveIt 2 OMPL 运动规划演示与基准评测")
     parser.add_argument(
         "--use-home",

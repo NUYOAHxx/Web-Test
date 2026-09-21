@@ -29,16 +29,14 @@ Unitree G1 MoveIt 2 OMPL (Open Motion Planning Library) 全局运动规划客户
 import time
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 
 # ROS 2 与 MoveIt 消息包
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Pose, PoseStamped, Point, Quaternion
-from sensor_msgs.msg import JointState
+from geometry_msgs.msg import Pose, Point, Quaternion
 from trajectory_msgs.msg import JointTrajectory
-from std_msgs.msg import Header
 from shape_msgs.msg import SolidPrimitive
 
 import moveit_msgs.msg

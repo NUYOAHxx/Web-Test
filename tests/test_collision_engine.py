@@ -18,7 +18,6 @@ import os
 import sys
 import time
 import numpy as np
-import pinocchio as pin
 
 # 注入项目根目录
 DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -47,11 +46,11 @@ def test_collision_suite():
     n_10dof = len(kin.coll_model_10dof["left_arm"].collisionPairs)
     n_7dof = len(kin.coll_model_7dof["left_arm"].collisionPairs)
 
-    print(f"\n【1. 碰撞对拓扑与 ACM 过滤检查】")
+    print("\n【1. 碰撞对拓扑与 ACM 过滤检查】")
     print(f"  • MoveIt SRDF 过滤后全机身有效碰撞对 : {n_pairs} 对 (完全剔除相连相邻连杆与物理不可达对)")
     print(f"  • 10-DoF 动态运动链有效对 (剪除静态对) : {n_10dof} 对")
     print(f"  • 7-DoF 单臂动态运动链有效对           : {n_7dof} 对")
-    print(f"  • 语义分类统计:")
+    print("  • 语义分类统计:")
     for cat, idxs in col._category_indices.items():
         print(f"    - {cat:10s}: {len(idxs):3d} 对")
 
@@ -64,7 +63,7 @@ def test_collision_suite():
     print("  ✔️ ACM 规则解析与运动学动态剪枝测试 100% 通过！")
 
     # 3. 验证默认姿态下的安全性 (基准姿态无误报)
-    print(f"\n【2. 基准健康姿态安全度评估 (零误报测试)】")
+    print("\n【2. 基准健康姿态安全度评估 (零误报测试)】")
     q_stand = np.zeros(kin.model.nq)
     for name, val in G1_DEFAULT_STAND_JOINTS.items():
         if kin.model.existJointName(name):
@@ -94,7 +93,7 @@ def test_collision_suite():
     print("  ✔️ 默认健康姿态测试通过：零误报，最小物理间隙 > 15mm！")
 
     # 4. 危险碰撞穿透精准拦截测试
-    print(f"\n【3. 极端干涉穿透精准拦截测试】")
+    print("\n【3. 极端干涉穿透精准拦截测试】")
 
     # Case A: 双臂胸前交叉抱胸相撞
     q_cross = q_stand.copy()
@@ -141,7 +140,7 @@ def test_collision_suite():
     print("  ✔️ 危险干涉拦截测试 100% 通过：精准捕获并输出碰撞连杆名称与分类！")
 
     # 5. 极速降维碰撞判定性能基准 (Reduced Collision Benchmark)
-    print(f"\n【4. 极速降维碰撞检测门禁性能基准 (1,000 次压力测试)】")
+    print("\n【4. 极速降维碰撞检测门禁性能基准 (1,000 次压力测试)】")
     N = 1000
     t_start = time.perf_counter()
     for _ in range(N):
@@ -159,7 +158,7 @@ def test_collision_suite():
     print("  ✔️ 碰撞检测极速门禁性能达标，完全满足 1kHz+ 控制环实时需求！")
 
     # 6. Web 大屏与 ROS 2 遥测数据接口测试
-    print(f"\n【5. Web 大屏与 ROS 2 遥测接口完整性测试】")
+    print("\n【5. Web 大屏与 ROS 2 遥测接口完整性测试】")
     zone_dists = col.compute_zone_distances(q_stand, update_fk=True)
     print("  • 区域间距输出 (mm):", zone_dists)
     for k in ("arm_torso", "arm_arm", "arm_head", "arm_leg", "torso_arm", "inter_arm", "head_arm", "leg_arm"):
@@ -168,7 +167,7 @@ def test_collision_suite():
     print("  ✔️ 遥测数据字典结构与双向别名 100% 满足 Web 大屏需求！")
 
     # 7. Inria Pink SelfCollisionBarrier 集成测试
-    print(f"\n【6. Inria Pink 4.4.0 SelfCollisionBarrier (CBF) 屏障函数求解测试】")
+    print("\n【6. Inria Pink 4.4.0 SelfCollisionBarrier (CBF) 屏障函数求解测试】")
     solver = G1HybridIKSolver()
     target_pos = np.array([0.35, 0.22, 0.85])
     ok_barrier, w_sol, a_sol, info_barrier = solver.solve_10dof_ik(

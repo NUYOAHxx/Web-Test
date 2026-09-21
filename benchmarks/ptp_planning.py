@@ -26,7 +26,6 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from core.solver.g1_hybrid_ik import G1HybridIKSolver
-from core.kinematics.g1_model import G1_JOINT_LIMITS, G1_READY_POSE
 
 # G1 机械臂物理几何常数 (单位: 米)
 G1_UPPER_ARM_LEN = 0.193   # 大臂长 (肩到肘)
@@ -240,11 +239,11 @@ def diagnose_starts_comparison(
     if res_A["success"]:
         min_m = min(res_A["manipulability"])
         max_err = max(res_A["errors_mm"])
-        print(f"  * 规划状态       : \033[92m成功 (SUCCESS)\033[0m")
+        print("  * 规划状态       : \033[92m成功 (SUCCESS)\033[0m")
         print(f"  * 全程最小可操控度: {min_m:.4f}")
         print(f"  * 最大跟踪误差   : {max_err:.2f} mm")
     else:
-        print(f"  * 规划状态       : \033[91m失败 (FAILED)\033[0m")
+        print("  * 规划状态       : \033[91m失败 (FAILED)\033[0m")
         print(f"  * 失败核心原因   : {res_A['failure_reason']}")
 
     print("\n【路径 B 测试结果 (Start B -> Goal)】:")
@@ -252,11 +251,11 @@ def diagnose_starts_comparison(
     if res_B["success"]:
         min_m = min(res_B["manipulability"])
         max_err = max(res_B["errors_mm"])
-        print(f"  * 规划状态       : \033[92m成功 (SUCCESS)\033[0m")
+        print("  * 规划状态       : \033[92m成功 (SUCCESS)\033[0m")
         print(f"  * 全程最小可操控度: {min_m:.4f}")
         print(f"  * 最大跟踪误差   : {max_err:.2f} mm")
     else:
-        print(f"  * 规划状态       : \033[91m失败 (FAILED)\033[0m")
+        print("  * 规划状态       : \033[91m失败 (FAILED)\033[0m")
         print(f"  * 失败核心原因   : {res_B['failure_reason']}")
 
     # 3. 现象深度原因剖析
@@ -267,25 +266,25 @@ def diagnose_starts_comparison(
     # 判据 1: 几何物理极限越界
     if res_A["start_dist_to_shoulder"] > G1_MAX_REACH and res_B["start_dist_to_shoulder"] <= G1_MAX_REACH:
         diff_cm = (res_A["start_dist_to_shoulder"] - G1_MAX_REACH) * 100.0
-        print(f"[原因 1 - 绝对几何不可达 (Geometric Reach Limit)]")
+        print("[原因 1 - 绝对几何不可达 (Geometric Reach Limit)]")
         print(f"  * 起点 A (Z={start_A[2]:.2f}) 到肩部距离达 {res_A['start_dist_to_shoulder']*100:.1f} cm，已超过手臂物理极限 {diff_cm:.1f} cm！")
-        print(f"    在空间上机器人即使完全伸直手臂也绝不可能触及，因此任何 IK 解算器都会被限位阻断。")
+        print("    在空间上机器人即使完全伸直手臂也绝不可能触及，因此任何 IK 解算器都会被限位阻断。")
         print(f"  * 而起点 B (Z={start_B[2]:.2f}) 距肩部仅 {res_B['start_dist_to_shoulder']*100:.1f} cm，完全落在 37.7 cm 的自然操作包络圈内。\n")
 
     # 判据 2: 奇异点与可操控度骤降 (Manipulability Drop)
     if res_B["success"] and (not res_A["success"] or (res_A.get("manipulability") and min(res_A["manipulability"]) < 0.005)):
-        print(f"[原因 2 - 运动学奇异性与可操控度瓶颈 (Kinematic Singularity)]")
-        print(f"  * 起点 A 所在的高度通常伴随肘关节接近伸直或肩部俯仰角极限。")
-        print(f"    当可操控度 sqrt(det(J J^T)) 逼近 0 时，雅可比矩阵发生退化，沿某些笛卡尔方向的微小位移")
-        print(f"    会要求关节以接近无穷大的速度旋转，从而导致数值梯度停止收敛。")
-        print(f"  * 起点 B 处肘关节拥有约 30°~60° 的黄金预备曲率，雅可比处于良态开阔区。\n")
+        print("[原因 2 - 运动学奇异性与可操控度瓶颈 (Kinematic Singularity)]")
+        print("  * 起点 A 所在的高度通常伴随肘关节接近伸直或肩部俯仰角极限。")
+        print("    当可操控度 sqrt(det(J J^T)) 逼近 0 时，雅可比矩阵发生退化，沿某些笛卡尔方向的微小位移")
+        print("    会要求关节以接近无穷大的速度旋转，从而导致数值梯度停止收敛。")
+        print("  * 起点 B 处肘关节拥有约 30°~60° 的黄金预备曲率，雅可比处于良态开阔区。\n")
 
     # 判据 3: 笛卡尔直线路径切入不可行凸集 (Workspace Non-Convexity)
     if not res_A["success"] and res_A["failed_step"] > 0:
-        print(f"[原因 3 - 笛卡尔直线穿越不可行区域 (Workspace Boundary Clipping)]")
-        print(f"  * 虽然起点 A 和终点 Goal 单独来看都可以解出，但连接两点的【直线轨迹】在中途切入了死区。")
-        print(f"    机械臂的可达工作空间是一个非凸（Non-convex）的环状球壳，两点之间的直线并不保证全程落在可达区域内！")
-        print(f"  * 解决方案：使用关节空间插补 (MoveJ) 或 RRT* 规划器绕过直线死区，而不是强行走直线 (MoveL)。\n")
+        print("[原因 3 - 笛卡尔直线穿越不可行区域 (Workspace Boundary Clipping)]")
+        print("  * 虽然起点 A 和终点 Goal 单独来看都可以解出，但连接两点的【直线轨迹】在中途切入了死区。")
+        print("    机械臂的可达工作空间是一个非凸（Non-convex）的环状球壳，两点之间的直线并不保证全程落在可达区域内！")
+        print("  * 解决方案：使用关节空间插补 (MoveJ) 或 RRT* 规划器绕过直线死区，而不是强行走直线 (MoveL)。\n")
 
     # 4. 可选生成可视化分析图
     if export_plot:

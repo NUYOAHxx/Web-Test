@@ -23,12 +23,9 @@ from launch_ros.actions import Node
 def generate_launch_description():
     dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-    # URDF 模型路径查找
-    default_urdf = "/home/parallels/ws_moveit/src/g1_description/urdf/g1_29dof.urdf"
-    if not os.path.exists(default_urdf):
-        default_urdf = os.path.join(dir_root, "resources/g1/g1_29dof.urdf")
-
-    default_rviz_config = "/home/parallels/ws_moveit/src/g1_description/rviz/view_robot.rviz"
+    # URDF 模型路径与 RViz 配置定位 (自包含工程路径)
+    default_urdf = os.path.join(dir_root, "resources/g1/g1_29dof.urdf")
+    default_rviz_config = os.path.join(dir_root, "visualizer/rviz/view_10dof_ik.rviz")
 
     # 读取 URDF 内容供 robot_state_publisher 使用
     robot_description_content = ""

@@ -38,7 +38,6 @@ from core.kinematics.g1_model import (
     G1KinematicsModel,
     G1_JOINT_LIMITS,
     G1_WAIST_LIMITS,
-    G1_READY_POSE,
     G1_DEFAULT_STAND_JOINTS,
 )
 from core.collision.g1_collision import G1CollisionChecker
@@ -48,7 +47,6 @@ from core.solver.g1_hybrid_ik import IK_PIPELINE_STAGES
 HAS_ROS2 = False
 try:
     import rclpy
-    from rclpy.node import Node
     from sensor_msgs.msg import JointState
     from geometry_msgs.msg import PoseStamped
     from std_msgs.msg import String
@@ -72,7 +70,7 @@ class RobotTelemetryManager:
         try:
             _, _, self.visual_model = pin.buildModelsFromUrdf(
                 self.kin.urdf_path,
-                package_dirs=["/home/parallels/ws_moveit/src", os.path.join(DIR_ROOT, "resources")]
+                package_dirs=[os.path.join(DIR_ROOT, "resources")]
             )
             self.visual_data = self.visual_model.createData()
             print(f"[Web 纯遥测后端] ✔️ 成功挂载 {len(self.visual_model.geometryObjects)} 个官方 3D 视觉网格！")
@@ -126,7 +124,7 @@ class RobotTelemetryManager:
         # 实时事件日志队列
         self.event_logs: List[Dict[str, Any]] = [
             {"time": time.strftime("%H:%M:%S"), "type": "SYSTEM", "title": "遥测监控引擎就绪", "desc": "Pinocchio 动力学拓扑与 28 对安全雷达就绪"},
-            {"time": time.strftime("%H:%M:%S"), "type": "INFO", "title": "初始就绪姿态对齐", "desc": f"手爪与规划目标精准贴合，初始空间残差 0.0 mm"},
+            {"time": time.strftime("%H:%M:%S"), "type": "INFO", "title": "初始就绪姿态对齐", "desc": "手爪与规划目标精准贴合，初始空间残差 0.0 mm"},
         ]
 
         # 启动 ROS 2 监听与指令分发节点
@@ -718,7 +716,7 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                     "rpy": rpy,
                     "arm": arm,
                     "preset": preset,
-                    "message": f"6D 目标指令已发布至 ROS 2 话题 /g1/kinematics/target_pose，由 IK 引擎解算",
+                    "message": "6D 目标指令已发布至 ROS 2 话题 /g1/kinematics/target_pose，由 IK 引擎解算",
                 }, ensure_ascii=False).encode("utf-8"))
             except Exception as e:
                 self.send_response(400)

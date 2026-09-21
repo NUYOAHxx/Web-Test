@@ -94,14 +94,7 @@ class G1KinematicsModel:
 
     def __init__(self, urdf_path: Optional[str] = None, srdf_path: Optional[str] = None):
         if urdf_path is None:
-            default_paths = [
-                os.path.join(os.path.dirname(__file__), "../../resources/g1/g1_29dof.urdf"),
-                "/home/parallels/ws_moveit/src/g1_description/urdf/g1_29dof.urdf",
-            ]
-            for p in default_paths:
-                if os.path.exists(p):
-                    urdf_path = os.path.abspath(p)
-                    break
+            urdf_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../resources/g1/g1_29dof.urdf"))
 
         if not urdf_path or not os.path.exists(urdf_path):
             raise FileNotFoundError(f"无法找到 G1 URDF 模型文件: {urdf_path}")
@@ -112,15 +105,8 @@ class G1KinematicsModel:
 
         # ── 0. 载入与解析 MoveIt SRDF 碰撞矩阵 (ACM) ──
         if srdf_path is None:
-            default_srdf_paths = [
-                os.path.join(os.path.dirname(__file__), "../../resources/g1/g1_29dof.srdf"),
-                "/home/parallels/ws_moveit/src/g1_moveit_config/config/g1_29dof.srdf",
-            ]
-            for p in default_srdf_paths:
-                if os.path.exists(p):
-                    srdf_path = os.path.abspath(p)
-                    break
-        self.srdf_path: Optional[str] = srdf_path
+            srdf_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../resources/g1/g1_29dof.srdf"))
+        self.srdf_path: Optional[str] = srdf_path if os.path.exists(srdf_path) else None
 
         # 构建工业级几何碰撞模型与几何数据
         self.coll_model: pin.GeometryModel = pin.buildGeomFromUrdf(self.model, self.urdf_path, pin.GeometryType.COLLISION)

@@ -19,10 +19,7 @@ if [ -f "$HOME/ws_moveit/install/setup.bash" ]; then
     source "$HOME/ws_moveit/install/setup.bash"
 fi
 
-URDF_PATH="/home/parallels/ws_moveit/src/g1_description/urdf/g1_29dof.urdf"
-if [ ! -f "$URDF_PATH" ]; then
-    URDF_PATH="$DIR/resources/g1/g1_29dof.urdf"
-fi
+URDF_PATH="$DIR/resources/g1/g1_29dof.urdf"
 RVIZ_CFG="$DIR/visualizer/rviz/view_10dof_ik.rviz"
 
 echo "=================================================================="

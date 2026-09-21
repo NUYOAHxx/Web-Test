@@ -20,7 +20,7 @@ Unitree G1 工业级全域自碰撞安全检测引擎 (Industrial Collision & Sa
    - 屏障函数无缝支持：与 Inria Pink 4.4.0 SelfCollisionBarrier 深度兼容。
 """
 
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pinocchio as pin
 from core.kinematics.g1_model import G1KinematicsModel
