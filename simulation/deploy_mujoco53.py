@@ -323,14 +323,14 @@ class ArmBaseController:
 
         self.target_dof_pos = config.default_angles.copy()
 
-        # 初始化高精度 Pinocchio 混合逆运动学求解器
+        # 初始化高精度 Pinocchio Pink + ProxQP 逆运动学求解器
         self.arm_name = f"{arm_side}_arm"
         try:
-            from core.solver.g1_hybrid_ik import G1HybridIKSolver
-            self.ik_solver = G1HybridIKSolver()
-            print(f"[{arm_side}臂] 成功加载 G1HybridIKSolver 混合逆运动学求解器")
+            from core.solver.g1_pink_ik import G1PinkIKSolver
+            self.ik_solver = G1PinkIKSolver()
+            print(f"[{arm_side}臂] 成功加载 G1PinkIKSolver (Pink + ProxQP) 逆运动学求解器")
         except Exception as e:
-            print(f"[{arm_side}臂] G1HybridIKSolver 初始化失败: {e}, 将使用原生阻尼最小二乘法")
+            print(f"[{arm_side}臂] G1PinkIKSolver 初始化失败: {e}, 将使用原生阻尼最小二乘法")
             self.ik_solver = None
 
     def _get_arm_joint_ids(self) -> List[int]:
@@ -688,8 +688,8 @@ class ArmBaseController:
             if dof_idx < len(self.target_dof_pos):
                 saved_angles[dof_idx] = angle
 
-        # 优先使用高精度 Pinocchio 混合解算器 (带热启动与零空间自然下垂角投影)
-        solved_by_hybrid = False
+        # 优先使用高精度 Pinocchio Pink + ProxQP 逆运动学求解器 (带热启动与零空间姿态投影)
+        solved_by_pink = False
         if self.ik_solver is not None:
             # 坐标变换：转换目标点到 Pinocchio URDF 空间 (原点 world 在 pelvis 初始位置下方的 0.763m 处)
             pelvis_pos = self.data.xpos[base_id]
@@ -704,7 +704,7 @@ class ArmBaseController:
                 max_iters=30,
             )
             if success:
-                solved_by_hybrid = True
+                solved_by_pink = True
                 # 平滑步进向目标解，避免突变
                 delta_q = q_sol - current_q
                 max_step = 0.04
@@ -713,7 +713,7 @@ class ArmBaseController:
                     delta_q *= max_step / norm_step
                 self.target_dof_pos[start_idx:end_idx] += delta_q
 
-        if not solved_by_hybrid:
+        if not solved_by_pink:
             # 使用改进的阻尼最小二乘法求解逆运动学 (兜底方案)
             dq = self.damped_ls_ik(jacp, pos_error_scaled)
             self.target_dof_pos[start_idx:end_idx] += dq * self.move_speed

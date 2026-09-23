@@ -26,7 +26,7 @@ if DIR_ROOT not in sys.path:
 
 from core.kinematics.g1_model import G1KinematicsModel, G1_DEFAULT_STAND_JOINTS, G1_READY_POSE
 from core.collision.g1_collision import G1CollisionChecker
-from core.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.solver.g1_pink_ik import G1PinkIKSolver
 
 
 def test_collision_suite():
@@ -168,7 +168,7 @@ def test_collision_suite():
 
     # 7. Inria Pink SelfCollisionBarrier 集成测试
     print("\n【6. Inria Pink 4.4.0 SelfCollisionBarrier (CBF) 屏障函数求解测试】")
-    solver = G1HybridIKSolver()
+    solver = G1PinkIKSolver()
     target_pos = np.array([0.35, 0.22, 0.85])
     ok_barrier, w_sol, a_sol, info_barrier = solver.solve_10dof_ik(
         arm="left_arm",

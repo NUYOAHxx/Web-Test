@@ -25,7 +25,7 @@ root_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from core.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.solver.g1_pink_ik import G1PinkIKSolver
 
 # G1 机械臂物理几何常数 (单位: 米)
 G1_UPPER_ARM_LEN = 0.193   # 大臂长 (肩到肘)
@@ -39,7 +39,7 @@ class G1PointToPointPlanner:
     """
 
     def __init__(self, urdf_path: str = None):
-        self.solver = G1HybridIKSolver(urdf_path)
+        self.solver = G1PinkIKSolver(urdf_path)
         self.model = self.solver.model
         self.data = self.solver.data
         

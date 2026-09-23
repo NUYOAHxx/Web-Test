@@ -13,12 +13,12 @@ dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
-from core.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.solver.g1_pink_ik import G1PinkIKSolver
 
 
 @pytest.fixture(scope="module")
 def solver():
-    return G1HybridIKSolver()
+    return G1PinkIKSolver()
 
 
 def test_10dof_near_target_arm_priority(solver):

@@ -14,7 +14,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from core.kinematics.g1_model import G1KinematicsModel, G1_READY_POSE
-from core.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.solver.g1_pink_ik import G1PinkIKSolver
 
 
 def test_pinocchio_model_reduction():
@@ -108,11 +108,11 @@ def test_pinocchio_manipulability():
     print("  ✔️ 可操作度与奇异点分析测试通过！")
 
 
-def test_hybrid_ik_with_com_balance():
-    """测试 5. 混合 IK 求解器集成零空间 CoM 平衡约束"""
+def test_pink_ik_with_com_balance():
+    """测试 5. Pink IK 求解器集成零空间 CoM 平衡约束"""
     print("----------------------------------------------------------------------")
-    print("▶ 5. 测试 10-DoF 混合 IK 求解 (集成零空间 CoM 平衡约束)...")
-    solver = G1HybridIKSolver()
+    print("▶ 5. 测试 10-DoF Pink 凸优化求解 (集成零空间 CoM 平衡约束)...")
+    solver = G1PinkIKSolver()
 
     targets = [
         np.array([0.35, 0.22, 0.85]),
@@ -132,7 +132,7 @@ def test_hybrid_ik_with_com_balance():
         assert "gravity_torques" in info, "返回字典缺少 gravity_torques"
         assert "manipulability" in info, "返回字典缺少 manipulability"
 
-    print("  ✔️ 混合 IK 求解与 CoM 平衡零空间约束验证完全通过！")
+    print("  ✔️ Pink IK 求解与 CoM 平衡零空间约束验证完全通过！")
 
 
 if __name__ == "__main__":
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     test_pinocchio_com_and_balance()
     test_pinocchio_gravity_and_dynamics()
     test_pinocchio_manipulability()
-    test_hybrid_ik_with_com_balance()
+    test_pink_ik_with_com_balance()
     print("======================================================================")
     print("🎉 所有 Pinocchio 动力学、平衡安全与求解器集成测试 100% 成功！")
     print("======================================================================")

@@ -17,7 +17,7 @@
 
 - [1. 项目概述](#1-项目概述)
 - [2. 系统核心架构与特性](#2-系统核心架构与特性)
-  - [2.1 10-DoF 躯干-手臂协同加权逆运动学 (Hybrid IK)](#21-10-dof-躯干-手臂协同加权逆运动学-hybrid-ik)
+  - [2.1 10-DoF 躯干-手臂协同加权逆运动学 (Pink IK)](#21-10-dof-躯干-手臂协同加权逆运动学-pink-ik)
   - [2.2 MoveIt SRDF ACM 工业级全域自碰撞安全引擎](#22-moveit-srdf-acm-工业级全域自碰撞安全引擎)
   - [2.3 Web 数字孪生实时遥测监控大屏](#23-web-数字孪生实时遥测监控大屏)
   - [2.4 MuJoCo 53-DoF 全身物理仿真与策略部署](#24-mujoco-53-dof-全身物理仿真与策略部署)
@@ -83,7 +83,7 @@
 │                                                                                  │
 │ ┌───────────────────────────────────────┐  ┌───────────────────────────────────┐ │
 │ │ 10-DoF 躯干-手臂协同加权求解器        │  │ MoveIt SRDF ACM 碰撞安全引擎      │ │
-│ │ (core/solver/g1_hybrid_ik.py)         │  │ (core/collision/g1_collision.py)  │ │
+│ │ (core/solver/g1_pink_ik.py)           │  │ (core/collision/g1_collision.py)  │ │
 │ │                                       │  │                                   │ │
 │ │ • Stage 1: Lie-Manifold Configuration │  │ • MoveIt SRDF ACM 自动解析        │ │
 │ │ • Stage 2: SE(3) FrameTask (位置+旋转)│  │ • 28 对物理风险干涉对拓扑        │ │
@@ -105,7 +105,7 @@
 └─────────────────────────────────────────┘     └─────────────────────────────────────────┘
 ```
 
-### 2.1 10-DoF 躯干-手臂协同加权逆运动学 (Hybrid IK)
+### 2.1 10-DoF 躯干-手臂协同加权逆运动学 (Pink IK)
 
 - **运动链构型**：3 自由度腰部（`waist_yaw`, `waist_roll`, `waist_pitch`）+ 7 自由度机械臂（`shoulder_pitch`, `shoulder_roll`, `shoulder_yaw`, `elbow`, `wrist_roll`, `wrist_pitch`, `wrist_yaw`），形成 10-DoF 冗余运动系统。
 - **动臂优先原则 (Arm Priority)**：腰部关节赋予高代价权重（$w_{\text{waist}} \gg w_{\text{arm}}$），在手臂工作空间内仅依靠 7-DoF 手臂运动；当目标越出单臂极限包络时，腰部按需平滑介入协同完成大跨度作业。
@@ -174,7 +174,7 @@ UNITREE-G1-ROBOT-MODEL/
 │   │   └── g1_collision.py         # 28 对全机身自碰撞检测与 ~40μs 极速降维门禁
 │   ├── solver/                     # 逆运动学算法与 ROS 2 服务节点
 │   │   ├── __init__.py             # 导出求解器
-│   │   ├── g1_hybrid_ik.py         # Pink + ProxQP 10-DoF 协同加权逆解与级联直立姿态
+│   │   ├── g1_pink_ik.py           # Pink + ProxQP 10-DoF 协同加权逆解与级联直立姿态
 │   │   └── g1_ik_node.py           # ROS 2 Headless 核心逆解服务节点
 │   └── planning/                   # 空间路径与运动规划
 │       ├── __init__.py             # 导出规划器 (MoveItOMPLPlanner, RRTStar3D)
@@ -410,7 +410,7 @@ python3 benchmarks/ik_benchmark.py --samples 500
 ================================================================================
 【测试 2】随机起点-终点对点规划对比评测 (left_arm, 测试对数: 500)
 ================================================================================
-位移距离区间       | 样本量 | 纯单初猜局部 DLS            | G1 混合多级求解器 (Hybrid IK)
+位移距离区间       | 样本量 | 纯单初猜局部 DLS            | G1 Pink 凸优化求解器 (Pink IK)
                   |        | 成功率   平均步数  平均耗时  | 成功率   平均步数  平均耗时   热启命中率
 --------------------------------------------------------------------------------------------
 超短距离 (< 5cm)  | 54     | 100.0%    2.1步   0.04ms    | 100.0%    1.0步   0.28ms   (100.0%直通)

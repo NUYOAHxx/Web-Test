@@ -39,8 +39,8 @@ DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if DIR_ROOT not in sys.path:
     sys.path.insert(0, DIR_ROOT)
 
-from core.solver.g1_hybrid_ik import (
-    G1HybridIKSolver,
+from core.solver.g1_pink_ik import (
+    G1PinkIKSolver,
     G1_READY_POSE,
     G1_DEFAULT_STAND_JOINTS,
     IK_PIPELINE_STAGES,
@@ -57,8 +57,8 @@ class G1IKSolverNode(Node):
         self.get_logger().info(" 🚀 Unitree G1 10-DoF 躯干-手臂协同 IK 解算服务节点启动中...")
         self.get_logger().info("======================================================")
 
-        # 实例化混合求解器 (封装 Pinocchio 运动学模型与 28 对碰撞检测器)
-        self.solver = G1HybridIKSolver()
+        # 实例化 Pink 凸优化求解器 (封装 Pinocchio 运动学模型与 28 对碰撞检测器)
+        self.solver = G1PinkIKSolver()
         self.active_arm = "left_arm"
         self.lock = threading.RLock()
 

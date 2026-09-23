@@ -28,7 +28,7 @@ dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
-from core.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.solver.g1_pink_ik import G1PinkIKSolver
 from core.kinematics.g1_model import G1_READY_POSE, G1_DEFAULT_STAND_JOINTS
 from visualizer.rviz.markers import create_pose_stamped, create_ik_markers
 
@@ -39,7 +39,7 @@ DEFAULT_JOINTS = G1_DEFAULT_STAND_JOINTS
 class G1RvizViewer(Node):
     def __init__(self):
         super().__init__("g1_rviz_viewer")
-        self.solver = G1HybridIKSolver()
+        self.solver = G1PinkIKSolver()
         self.current_arm = "left_arm"
 
         # 关节状态缓存

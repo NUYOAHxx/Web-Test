@@ -41,7 +41,7 @@ from core.kinematics.g1_model import (
     G1_DEFAULT_STAND_JOINTS,
 )
 from core.collision.g1_collision import G1CollisionChecker
-from core.solver.g1_hybrid_ik import IK_PIPELINE_STAGES
+from core.solver.g1_pink_ik import IK_PIPELINE_STAGES
 
 # 检查 ROS 2 是否可用
 HAS_ROS2 = False

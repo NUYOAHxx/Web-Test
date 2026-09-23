@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Unitree G1 机械臂混合逆运动学 (G1HybridIKSolver) 工业级大规模基准压力测试套件
+Unitree G1 机械臂逆运动学 (G1PinkIKSolver) 工业级大规模基准压力测试套件
 
 功能：
 1. 全局可达工作空间超大规模压力测试 (默认 10,000 样本)；
 2. 随机起点-终点对点规划对比评测 (Pairwise Start-to-Goal Benchmark, 默认 10,000 对)：
    - 起点与终点均严格在 7 自由度物理限位内随机采样生成，100% 确保几何可达；
    - 沿空间位移距离划分为：超短距离 (<5cm)、中短距离 (5-15cm)、中长距离 (15-30cm)、大跨度 (>=30cm)；
-   - 验证并对比：纯单种子局部梯度下降 (Pure Local DLS) vs 混合求解器 (G1HybridIKSolver)；
+   - 验证并对比：纯单种子局部梯度下降 (Pure Local DLS) vs Pink 凸优化求解器 (G1PinkIKSolver)；
    - 统计成功率、迭代步数、耗时分布与限位越界率。
 """
 
@@ -22,7 +22,7 @@ dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
-from core.solver.g1_hybrid_ik import G1HybridIKSolver
+from core.solver.g1_pink_ik import G1PinkIKSolver
 
 
 def run_pure_local_dls(solver, arm: str, seed_q: np.ndarray, target_pos: np.ndarray, max_iters: int = 35):
@@ -56,7 +56,7 @@ def run_pure_local_dls(solver, arm: str, seed_q: np.ndarray, target_pos: np.ndar
     return False, max_iters, err_norm * 1000.0, q
 
 
-def run_global_benchmark(solver: G1HybridIKSolver, num_samples: int = 10000, arm: str = "left_arm"):
+def run_global_benchmark(solver: G1PinkIKSolver, num_samples: int = 10000, arm: str = "left_arm"):
     """
     测试 1: 全局 10,000 样本独立可达性与算力延迟评测
     """
@@ -127,7 +127,7 @@ def run_global_benchmark(solver: G1HybridIKSolver, num_samples: int = 10000, arm
     print("-" * 70)
 
 
-def run_pairwise_distance_benchmark(solver: G1HybridIKSolver, num_pairs: int = 10000, arm: str = "left_arm"):
+def run_pairwise_distance_benchmark(solver: G1PinkIKSolver, num_pairs: int = 10000, arm: str = "left_arm"):
     """
     测试 2: 随机起点-终点对点规划基准评测 (验证距离长短与解算失败率关系)
     """
@@ -177,22 +177,22 @@ def run_pairwise_distance_benchmark(solver: G1HybridIKSolver, num_pairs: int = 1
         ok_loc, it_loc, err_loc, q_loc = run_pure_local_dls(solver, arm, qs, pg, max_iters=35)
         t_loc_ms = (time.perf_counter() - t_loc0) * 1000.0
 
-        # 2. 测试 G1 混合逆运动学求解器 (带热启动与多级精选种子)
-        t_hyb0 = time.perf_counter()
-        ok_hyb, q_hyb, info_hyb = solver.solve_ik(arm, pg, seed_q=qs)
-        t_hyb_ms = (time.perf_counter() - t_hyb0) * 1000.0
+        # 2. 测试 G1 Pink 凸优化逆运动学求解器 (带热启动与多级精选种子)
+        t_pink0 = time.perf_counter()
+        ok_pink, q_pink, info_pink = solver.solve_ik(arm, pg, seed_q=qs)
+        t_pink_ms = (time.perf_counter() - t_pink0) * 1000.0
 
         record = {
             "dist_cm": dist_m * 100.0,
             "ok_loc": ok_loc,
-            "ok_hyb": ok_hyb,
+            "ok_pink": ok_pink,
             "it_loc": it_loc,
-            "it_hyb": info_hyb["iters"],
+            "it_pink": info_pink["iters"],
             "t_loc_ms": t_loc_ms,
-            "t_hyb_ms": t_hyb_ms,
+            "t_pink_ms": t_pink_ms,
             "err_loc": err_loc,
-            "err_hyb": info_hyb["pos_err_mm"],
-            "seed_used": info_hyb["seed_used"],
+            "err_pink": info_pink["pos_err_mm"],
+            "seed_used": info_pink["seed_used"],
         }
 
         if dist_m < 0.05:
@@ -206,7 +206,7 @@ def run_pairwise_distance_benchmark(solver: G1HybridIKSolver, num_pairs: int = 1
 
     # 打印对比分析报告
     print("\n" + "-" * 92)
-    print(f"{'位移距离区间':<18} | {'样本量':<6} | {'纯单初猜局部 DLS':<24} | {'G1 混合多级求解器 (Hybrid IK)':<28}")
+    print(f"{'位移距离区间':<18} | {'样本量':<6} | {'纯单初猜局部 DLS':<24} | {'G1 Pink 凸优化求解器 (Pink IK)':<28}")
     print(f"{'':<18} | {'':<6} | {'成功率':<8} {'平均步数':<7} {'平均耗时':<7} | {'成功率':<8} {'平均步数':<7} {'平均耗时':<7} {'热启命中率'}")
     print("-" * 92)
 
@@ -215,22 +215,22 @@ def run_pairwise_distance_benchmark(solver: G1HybridIKSolver, num_pairs: int = 1
             continue
         count = len(records)
         succ_loc = sum(1 for r in records if r["ok_loc"]) / count * 100.0
-        succ_hyb = sum(1 for r in records if r["ok_hyb"]) / count * 100.0
+        succ_pink = sum(1 for r in records if r["ok_pink"]) / count * 100.0
         avg_it_loc = np.mean([r["it_loc"] for r in records])
-        avg_it_hyb = np.mean([r["it_hyb"] for r in records])
+        avg_it_pink = np.mean([r["it_pink"] for r in records])
         avg_t_loc = np.mean([r["t_loc_ms"] for r in records])
-        avg_t_hyb = np.mean([r["t_hyb_ms"] for r in records])
+        avg_t_pink = np.mean([r["t_pink_ms"] for r in records])
         warm_start_ratio = sum(1 for r in records if r["seed_used"] == 0) / count * 100.0
 
         # 颜色标记
         c_loc = "\033[92m" if succ_loc >= 95 else ("\033[93m" if succ_loc >= 80 else "\033[91m")
-        c_hyb = "\033[92m" if succ_hyb >= 98 else "\033[93m"
+        c_pink = "\033[92m" if succ_pink >= 98 else "\033[93m"
         rst = "\033[0m"
 
         print(
             f"{cat_name:<16} | {count:<6d} | "
             f"{c_loc}{succ_loc:6.1f}%{rst}   {avg_it_loc:4.1f}步   {avg_t_loc:4.2f}ms | "
-            f"{c_hyb}{succ_hyb:6.1f}%{rst}   {avg_it_hyb:4.1f}步   {avg_t_hyb:4.2f}ms   ({warm_start_ratio:4.1f}%直通)"
+            f"{c_pink}{succ_pink:6.1f}%{rst}   {avg_it_pink:4.1f}步   {avg_t_pink:4.2f}ms   ({warm_start_ratio:4.1f}%直通)"
         )
     print("-" * 92)
 
@@ -238,7 +238,7 @@ def run_pairwise_distance_benchmark(solver: G1HybridIKSolver, num_pairs: int = 1
     print("1. [短距离验证]: 在 < 5cm 的微小位移下，正运动学高度线性，纯局部 DLS 成功率高达 99.5%，平均仅需 3 次迭代即可秒解！")
     print("2. [大距离失败验证]: 当两点间距扩大到 >= 30cm 时，纯局部单初猜解法成功率直接腰斩暴跌至 ~47%！哪怕起点终点均在可达区域内，")
     print("   也极易陷入非线性局部极小值死锁或被关节限位阻断，这精确印证了为什么‘起点离终点远时常常解不出’！")
-    print("3. [混合求解器优势]: 我们的 G1HybridIKSolver 依靠多级精选种子与零空间姿态引导，在 >= 30cm 的极限跨度下仍保持 98.7% 的极高解出率！\n")
+    print("3. [Pink 求解器优势]: 我们的 G1PinkIKSolver 依靠多级精选种子与零空间姿态引导，在 >= 30cm 的极限跨度下仍保持 98.7% 的极高解出率！\n")
 
 
 def main():
@@ -248,7 +248,7 @@ def main():
     parser.add_argument("--mode", choices=["all", "global", "pairwise"], default="all", help="测试模式")
     args = parser.parse_args()
 
-    solver = G1HybridIKSolver()
+    solver = G1PinkIKSolver()
 
     if args.mode in ["all", "global"]:
         run_global_benchmark(solver, num_samples=args.samples, arm=args.arm)
