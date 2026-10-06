@@ -20,13 +20,13 @@ from core.solver.g1_pink_ik import G1PinkIKSolver, G1_READY_POSE, IKSolveStatus
 
 def run_comprehensive_evaluation():
     print("=" * 80)
-    print("🤖 启动 Unitree G1 逆运动学求解器能力、范围与五大行为全维度测试")
+    print("[ROBOT] 启动 Unitree G1 逆运动学求解器能力、范围与五大行为全维度测试")
     print("=" * 80)
 
     solver = G1PinkIKSolver()
     arm = "left_arm"
     sh_origin = solver.kin.model_7dof[arm].jointPlacements[1].translation
-    print(f"📍 左肩基准坐标: X={sh_origin[0]:.4f}, Y={sh_origin[1]:.4f}, Z={sh_origin[2]:.4f}")
+    print(f"[POS] 左肩基准坐标: X={sh_origin[0]:.4f}, Y={sh_origin[1]:.4f}, Z={sh_origin[2]:.4f}")
 
     results = {}
 
@@ -261,7 +261,7 @@ def run_comprehensive_evaluation():
     # 综合裁定与合规性评估报告
     # ==========================================================================
     print("\n" + "=" * 80)
-    print("🏆 Unitree G1 逆运动学求解器能力与合规性综合裁定报告")
+    print("[BEST] Unitree G1 逆运动学求解器能力与合规性综合裁定报告")
     print("=" * 80)
 
     all_passed = (
@@ -276,7 +276,7 @@ def run_comprehensive_evaluation():
     print(f"2. 五大行为合规: ①臂内腰定 | ②极限平滑 | ③远端协同 | ④平滑归零 | ⑤反抖动 全部通过；")
     print(f"3. 位姿精度标准: 6D 空间位姿达到 0.00 mm / 0.00° 极限制霸精度，超限姿态坚决拒绝，0% 虚报成功；")
     print(f"4. 物理安全保障: 关节限位越界率 0.00%，吞吐率高达 {results['safety']['throughput']:.0f} 次/秒。")
-    print(f"\n【最终合规裁定结论】: {'🎉 完全符合全部设计标准与工程要求 (100% COMPLIANT)' if all_passed else '❌ 未完全符合要求'}")
+    print(f"\n【最终合规裁定结论】: {'[SUCCESS] 完全符合全部设计标准与工程要求 (100% COMPLIANT)' if all_passed else '[FAIL] 未完全符合要求'}")
     print("=" * 80)
 
     return all_passed, results

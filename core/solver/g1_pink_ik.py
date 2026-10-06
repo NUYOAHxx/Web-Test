@@ -1,64 +1,134 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Unitree G1 机械臂工业级逆运动学优化求解器 (Industrial Pink + ProxQP IK Engine)
+Unitree G1 10-DoF / 7-DoF 全身运动学逆解优化求解器 (Pink + ProxQP IK Engine)
 ================================================================================
 
-架构原则 (First Principles & Industrial Standards):
-1. 数学严谨流形优化：完全基于 Inria / CNRS 原厂开发的人形机器人专用开源库 Pink 4.4.0；
-2. 凸二次规划求解内核：集成 LAAS-CNRS 开发的高阶原对偶内点法 ProxQP 求解器；
-3. SE(3) 李群测地线残差：由 FrameTask 严格计算空间 3D 线位移与 SO(3) 李代数对数姿态残差；
-4. 绝对关节硬限位保证：由 ConfigurationLimit 在 QP 凸多面体空间内强制约束，数学上 0% 越界；
-5. 标称姿态引力与加权：通过 PostureTask 施加对角加权矩阵，严格实现腰部高惩罚、手臂优先运动；
-6. 彻底清除所有 Ad-hoc 补丁：零魔数初猜、零手工碰撞踢脉冲、零非量纲误差混合。
+本模块基于 Inria Pink 运动学引擎与 LAAS-CNRS ProxQP 原对偶凸二次规划内核，
+为 Unitree G1 双足人形机器人提供高精度、强鲁棒、满足全物理约束的笛卡尔末端逆运动学解算。
+支持 7-DoF 单臂高灵巧解算与 10-DoF (3-DoF 腰部 + 7-DoF 手臂) 躯干-手臂自适应协同求解。
+
+数学优化建模 (Mathematical Formulation):
+----------------------------------------
+在 SE(3) 李群流形上，单步逆运动学解算被建模为有约束凸二次规划问题 (Convex QP)：
+
+    min_{v}   (1/2) * || J_ee(q) * v - e_se3 ||_{W_task}^2
+            + (1/2) * || v - v_ref ||_{W_posture}^2
+    s.t.      (q_min - q) / dt <= v <= (q_max - q) / dt     (硬关节物理限位约束)
+              h_i(q) + ∇h_i(q)^T * v >= 0                   (机身自碰撞屏障约束)
+              ||v * dt||_inf <= Δq_max                      (信赖域步长截断约束)
+
+核心架构与技术特性 (Core Architectural Features):
+-------------------------------------------------
+1. SE(3) 李群测地线流形残差 (Lie-Manifold Geodesic Metric)：
+   严格计算空间 3D 线位移残差与 SO(3) 旋转群测地线误差 log3(R_tgt * R_cur^T)，
+   避免欧拉角奇异点（万向节死锁）并实现最短测地线角位移收敛。
+2. 原对偶内点凸二次规划内核 (Primal-Dual ProxQP Core)：
+   基于原对偶内点法微秒级求解有约束二次规划，保证全局凸可行域最优收敛性。
+3. 严格多面体硬关节限位保证 (Hard Configuration Limits)：
+   将 G1 硬件物理极限直接转化为 QP 不等式约束矩阵 (G v <= h)，
+   从算法数学源头彻底杜绝关节越界，保障电机减速器与内部线束安全。
+4. 基于空间距离感知的自适应腰臂协同 (Smooth Waist-Arm Coordination)：
+   采用 C^2 连续 Smoothstep 激活函数调节腰部各向异性阻尼刚度矩阵：
+   - 近端舒适区 (d <= 30cm)：手臂优先伸展，腰部锁紧保持直立；
+   - 远端扩展区 (d > 38.5cm)：腰部非对称柔顺介入（偏航优先、限制侧倾），兼顾全身质心 (CoM) 平衡。
+5. 二阶段李群高斯-牛顿微调抛光 (Two-Stage Gauss-Newton Polish)：
+   在 QP 收敛至邻域后，执行 2 步无阻尼高斯-牛顿微调，消除正则化阻尼残差，
+   实现亚毫米级 (<1.0 mm) 与亚度级 (<1.0°) 高精度收敛。
 """
 
 import time
-from typing import Dict, List, Optional, Tuple, Any
+from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import numpy as np
 import pinocchio as pin
 import pink
-from pink.tasks import FrameTask, PostureTask
 from pink.barriers import SelfCollisionBarrier
+from pink.limits import ConfigurationLimit
+from pink.tasks import FrameTask, PostureTask
 
+from core.collision.g1_collision import G1CollisionChecker
 from core.kinematics.g1_model import (
     G1KinematicsModel,
-    G1_READY_POSE,
     G1_DEFAULT_STAND_JOINTS,
+    G1_READY_POSE,
+    G1_JOINT_LIMITS,
+    G1_WAIST_LIMITS,
 )
-from core.collision.g1_collision import G1CollisionChecker
+
+# 统一由核心模型驱动的角度制映射表 (便于调试与前端大屏直观展示)
+G1_JOINT_LIMITS_DEG: Dict[str, Tuple[float, float]] = {
+    k: (round(float(np.degrees(v[0])), 1), round(float(np.degrees(v[1])), 1))
+    for k, v in G1_JOINT_LIMITS.items()
+}
+
+G1_WAIST_LIMITS_DEG: Dict[str, Tuple[float, float]] = {
+    k: (round(float(np.degrees(v[0])), 1), round(float(np.degrees(v[1])), 1))
+    for k, v in G1_WAIST_LIMITS.items()
+}
 
 # 逆运动学算法五大计算流水线阶段定义 (Pink + ProxQP 工业标准架构)
 IK_PIPELINE_STAGES = [
-    {"id": 1, "name": "Configuration", "fullName": "Pink Lie-Manifold Setup",      "desc": "构建流形构型并绑定硬关节限位 (ConfigurationLimit, 0% 越界保证)"},
-    {"id": 2, "name": "FrameTask",     "fullName": "SE(3) Manifold Task",          "desc": "末端执行器 SE(3) 位置 + 李代数对数旋转测地线流形任务"},
-    {"id": 3, "name": "PostureTask",   "fullName": "Joint-Weighted Posture",       "desc": "各关节运动代价加权（腰部高惩罚，手臂运动优先，就绪姿态引力）"},
-    {"id": 4, "name": "ProxQP Solver", "fullName": "Inria ProxQP Solver",          "desc": "高阶原对偶凸二次规划求解器微秒级求解 (Inria / LAAS-CNRS)"},
-    {"id": 5, "name": "Safety Barrier", "fullName": "Whole-Body Collision Barrier", "desc": "基于 MoveIt SRDF ACM 工业级自碰撞极速门禁与 CBF 屏障函数"},
+    {
+        "id": 1,
+        "name": "ConfigurationLimit",
+        "fullName": "Pink Lie-Manifold & Hard Joint Bounds",
+        "desc": "构建流形构型并绑定硬关节限位 (ConfigurationLimit, 在 QP 凸空间保证 100% 不越界)",
+    },
+    {
+        "id": 2,
+        "name": "FrameTask",
+        "fullName": "SE(3) Manifold Task",
+        "desc": "末端执行器 SE(3) 位置 + 李代数对数旋转测地线流形任务",
+    },
+    {
+        "id": 3,
+        "name": "PostureTask",
+        "fullName": "Joint-Weighted Posture",
+        "desc": "各关节运动代价加权（腰部高惩罚，手臂运动优先，就绪姿态引力）",
+    },
+    {
+        "id": 4,
+        "name": "ProxQP Solver",
+        "fullName": "Inria ProxQP Solver",
+        "desc": "高阶原对偶凸二次规划求解器微秒级求解 (Inria / LAAS-CNRS)",
+    },
+    {
+        "id": 5,
+        "name": "Safety Barrier",
+        "fullName": "Whole-Body Collision Barrier",
+        "desc": "基于 MoveIt SRDF ACM 工业级自碰撞极速门禁与 CBF 屏障函数",
+    },
 ]
 
-from enum import Enum
+
+# ==============================================================================
+# 状态枚举与诊断结果容器 (Diagnostics & Status Types)
+# ==============================================================================
 
 
 class IKSolveStatus(str, Enum):
     """逆运动学求解诊断状态枚举"""
-    CONVERGED = "CONVERGED"                          # 严苛双重收敛 (位置与姿态均达标，且无碰撞)
+
+    CONVERGED = "CONVERGED"  # 严苛双重收敛 (位置与姿态均达标，关节未越界且无自碰撞)
     POSITION_REACHED_ONLY = "POSITION_REACHED_ONLY"  # 仅位置收敛，姿态未达标
-    RELAXED_ORIENTATION = "RELAXED_ORIENTATION"      # 姿态受控微松弛容差下收敛 (<=2.0°)
+    RELAXED_ORIENTATION = "RELAXED_ORIENTATION"  # 姿态受控微松弛容差下收敛 (<=2.0°)
     MAX_ITERATIONS_EXCEEDED = "MAX_ITERATIONS_EXCEEDED"  # 达到最大迭代步数仍未达标
     JOINT_LIMIT_VIOLATION = "JOINT_LIMIT_VIOLATION"  # 撞击关节硬限位阻断
-    SINGULARITY_DETECTED = "SINGULARITY_DETECTED"    # 发生严重运动学奇异
-    SELF_COLLISION = "SELF_COLLISION"                # 触发全机身自碰撞门禁
-    QP_INFEASIBLE = "QP_INFEASIBLE"                  # QP 优化器无可行域
-    INVALID_INPUT = "INVALID_INPUT"                  # 输入目标包含 NaN 或 Inf
+    SINGULARITY_DETECTED = "SINGULARITY_DETECTED"  # 发生严重运动学奇异
+    SELF_COLLISION = "SELF_COLLISION"  # 触发全机身自碰撞门禁
+    QP_INFEASIBLE = "QP_INFEASIBLE"  # QP 优化器无可行域
+    INVALID_INPUT = "INVALID_INPUT"  # 输入目标包含 NaN 或 Inf
 
 
 class IKResult(dict):
     """
     Unitree G1 工业级逆运动学求解诊断结果对象。
     同时继承 dict 与提供对象属性访问，100% 兼容既有字典索引 (res['pos_err_mm'])
-    与类型安全的属性自省 (res.pos_err_mm, res.status)。
+    与类型安全的属性自省 (res.pos_err_mm, res.status, res.within_limits)。
     """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.__dict__ = self
@@ -68,20 +138,36 @@ class IKResult(dict):
         """是否成功收敛 (严苛收敛或允许松弛下的收敛)"""
         return bool(self.get("success", False))
 
+    @property
+    def within_joint_limits(self) -> bool:
+        """是否严格处于关节物理安全限位内"""
+        return bool(self.get("within_limits", True))
+
     def __repr__(self) -> str:
         status_val = self.get("status", "UNKNOWN")
         status_str = status_val.value if hasattr(status_val, "value") else str(status_val)
         return (
             f"<IKResult success={self.get('success', False)} status={status_str} "
             f"pos_err={self.get('pos_err_mm', 0.0):.2f}mm rot_err={self.get('rot_err_deg', 0.0):.2f}° "
+            f"limit_margin={self.get('joint_limit_margin_deg', 0.0):.1f}° "
             f"time={self.get('time_ms', 0.0):.2f}ms iters={self.get('iters', 0)}>"
         )
+
+
+# ==============================================================================
+# G1 Pink + ProxQP 逆运动学求解器主类
+# ==============================================================================
 
 
 class G1PinkIKSolver:
     """
     Unitree G1 工业级逆运动学求解器 (Pink + ProxQP 引擎)
+    支持 7-DoF 单臂逆运动学与 10-DoF (3腰+7臂) 躯干-手臂自适应协同逆运动学解算。
     """
+
+    # --------------------------------------------------------------------------
+    # 1. 初始化与运动学模型委托 (Initialization & Model Delegation)
+    # --------------------------------------------------------------------------
 
     def __init__(
         self,
@@ -90,9 +176,10 @@ class G1PinkIKSolver:
         urdf_path: Optional[str] = None,
     ):
         """
-        构造逆运动学求解器
+        构造逆运动学求解器。
+
         :param kinematics: 注入的运动学引擎 (若为 None 则自动初始化默认模型)
-        :param collision_checker: 注入的碰撞安全引擎 (若为 None 则自动初始化默认碰撞检测器)
+        :param collision_checker: 注入的碰撞安全引擎 (若为 None 则自动初始化默认检测器)
         :param urdf_path: 当 kinematics 为 None 时指定的 URDF 路径
         """
         if kinematics is None:
@@ -105,7 +192,7 @@ class G1PinkIKSolver:
         else:
             self.collision = collision_checker
 
-        # ── 核心运动学属性与配置便捷委托 ──
+        # 核心运动学属性与配置便捷委托
         self.urdf_path: str = self.kin.urdf_path
         self.model: pin.Model = self.kin.model
         self.data: pin.Data = self.kin.data
@@ -122,6 +209,10 @@ class G1PinkIKSolver:
         self.arm_joint_names: Dict[str, List[str]] = self.kin.arm_joint_names
         self.chain_10dof_indices: Dict[str, List[int]] = self.kin.chain_10dof_indices
 
+        # 硬件限位常量引用绑定
+        self.hardware_joint_limits = G1_JOINT_LIMITS
+        self.hardware_waist_limits = G1_WAIST_LIMITS
+
         # 快捷方法委托
         self.forward_kinematics = self.kin.forward_kinematics
         self.forward_kinematics_10dof = self.kin.forward_kinematics_10dof
@@ -131,6 +222,10 @@ class G1PinkIKSolver:
         self.compute_gravity_torques = self.kin.compute_gravity_torques
         self.compute_manipulability = self.kin.compute_manipulability
 
+    # --------------------------------------------------------------------------
+    # 2. 遥测度量与健康状态计算 (Telemetry & Physical Health Diagnostics)
+    # --------------------------------------------------------------------------
+
     def _extract_solution_telemetry(
         self,
         arm: str,
@@ -139,7 +234,9 @@ class G1PinkIKSolver:
         target_rot: Optional[np.ndarray] = None,
         q_full_base: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
-        """提取解算构型下的 Pinocchio 刚体动力学、全身质心平衡与全 6D 空间位姿指标"""
+        """
+        提取解算构型下的 Pinocchio 刚体动力学、全身质心平衡与全 6D 空间位姿指标。
+        """
         q_10dof = np.concatenate([waist_q, arm_q])
         q_full = self.build_q_10dof(arm, waist_q, arm_q, base_q=q_full_base)
         bal = self.kin.evaluate_balance(q_full)
@@ -163,8 +260,14 @@ class G1PinkIKSolver:
         low_lim, up_lim = self.limits_10dof[arm]
         dist_to_low = q_10dof - low_lim
         dist_to_up = up_lim - q_10dof
-        joint_limit_margin_rad = float(np.min(np.minimum(dist_to_low, dist_to_up)))
+        margins = np.minimum(dist_to_low, dist_to_up)
+        crit_idx = int(np.argmin(margins))
+        joint_limit_margin_rad = float(margins[crit_idx])
         joint_limit_margin_deg = round(float(np.degrees(joint_limit_margin_rad)), 2)
+
+        all_names_10 = list(self.waist_joint_names) + list(self.arm_joint_names[arm])
+        critical_joint_name = all_names_10[crit_idx]
+        within_limits = bool(np.all(q_10dof >= low_lim - 1e-4) and np.all(q_10dof <= up_lim + 1e-4))
 
         return {
             "com_pos": bal["com_pos"],
@@ -177,16 +280,95 @@ class G1PinkIKSolver:
             "min_singular_value": manip.get("min_singular_value", 0.0) if isinstance(manip, dict) else 0.0,
             "is_singular": manip.get("is_singular", False) if isinstance(manip, dict) else False,
             "condition_number": manip.get("condition_number", 1.0) if isinstance(manip, dict) else 1.0,
+            "within_limits": within_limits,
             "joint_limit_margin": round(joint_limit_margin_rad, 4),
             "joint_limit_margin_deg": joint_limit_margin_deg,
+            "critical_joint": critical_joint_name,
+            "joint_limits_bounds": {
+                "lower": [round(float(v), 4) for v in low_lim],
+                "upper": [round(float(v), 4) for v in up_lim],
+            },
             "actual_rpy_deg": act_rpy_deg,
             "actual_quat": [round(float(v), 5) for v in [act_quat.x, act_quat.y, act_quat.z, act_quat.w]],
             "target_rpy_deg": tgt_rpy_deg,
             "rot_err_deg": rot_err_deg,
         }
 
+    def _classify_solve_status(
+        self,
+        is_success: bool,
+        fin_col: bool,
+        fin_ep: float,
+        fin_er: float,
+        pos_tol: float,
+        rot_tol: float,
+        has_rot: bool,
+        is_singular: bool,
+        within_limits: bool = True,
+    ) -> IKSolveStatus:
+        """纯函数式状态分类机：按严苛优先律裁定最终诊断状态枚举。"""
+        if not within_limits:
+            return IKSolveStatus.JOINT_LIMIT_VIOLATION
+        if fin_col:
+            return IKSolveStatus.SELF_COLLISION
+        if is_success:
+            return IKSolveStatus.CONVERGED
+        if fin_ep < pos_tol and has_rot and fin_er >= rot_tol:
+            return IKSolveStatus.POSITION_REACHED_ONLY
+        if is_singular:
+            return IKSolveStatus.SINGULARITY_DETECTED
+        return IKSolveStatus.MAX_ITERATIONS_EXCEEDED
+
+    def _validate_target_pos(
+        self,
+        target_pos: Any,
+        arm: str,
+        is_10dof: bool,
+    ) -> Tuple[bool, np.ndarray, Optional[IKResult]]:
+        """检验目标空间坐标有效性，拦截 NaN / Inf 等非法浮点异常。"""
+        pos = np.asarray(target_pos, dtype=np.float64)
+        if np.isnan(pos).any() or np.isinf(pos).any():
+            ready_arm = G1_READY_POSE[arm]
+            q_sol = np.concatenate([np.zeros(3), ready_arm]) if is_10dof else ready_arm.copy()
+            fail_res = IKResult(
+                success=False,
+                status=IKSolveStatus.INVALID_INPUT,
+                q_solution=q_sol,
+                waist_solution=np.zeros(3) if is_10dof else None,
+                arm_solution=ready_arm.copy(),
+                pos_err_mm=999.0,
+                rot_err_deg=180.0,
+                within_limits=True,
+                time_ms=0.0,
+                iters=0,
+                error="Invalid target_pos NaN/Inf",
+            )
+            return False, pos, fail_res
+        return True, pos, None
+
+    def _apply_orientation_relaxation(
+        self,
+        ok: bool,
+        res: IKResult,
+        allow_relaxation: bool,
+        has_rot: bool,
+        pos_tol: float,
+        rot_tol: float,
+    ) -> bool:
+        """
+        严苛位姿标准下的受控微松弛逻辑。
+        仅允许极窄受控微松弛 (上限严格控制在 rot_tol*1.5 且不超过 2.0°，杜绝宽松阶梯)。
+        """
+        if not ok and allow_relaxation and has_rot:
+            micro_rot_tol_deg = min(float(np.degrees(rot_tol)) * 1.5, 2.0)
+            if res.pos_err_mm < pos_tol * 1000.0 and res.rot_err_deg <= micro_rot_tol_deg and not res.is_colliding and res.get("within_limits", True):
+                res.status = IKSolveStatus.RELAXED_ORIENTATION
+                res.success = True
+                return True
+        return ok
+
     # --------------------------------------------------------------------------
-    # 内部流水线辅助工序 (Internal Pipeline Auxiliaries)
+    # 3. 内部流水线辅助工序 (Internal Pipeline Auxiliaries)
     # --------------------------------------------------------------------------
 
     def _build_seed_chain(
@@ -200,11 +382,11 @@ class G1PinkIKSolver:
         seed_waist: Optional[np.ndarray] = None,
         seed_arm: Optional[np.ndarray] = None,
     ) -> Tuple[List[np.ndarray], List[str]]:
-        """构建确定性启发式多种子链 (Warm Start -> Ready Pose -> 4组 QMC 空间网格)"""
+        """构建确定性启发式多种子链 (Warm Start -> Ready Pose -> 4组 QMC 空间网格)。"""
         seed_chain: List[np.ndarray] = []
         seed_names: List[str] = []
 
-        # 1. Warm Start 种子装配
+        # 1. Warm Start 种子装配 (确保严格夹断在关节上下限之内)
         if is_10dof:
             if seed_waist is not None or seed_arm is not None:
                 ready_arm = G1_READY_POSE[arm]
@@ -226,7 +408,7 @@ class G1PinkIKSolver:
                 seed_names.append("Warm Start")
 
         # 2. Ready Pose 中立就绪种子
-        seed_chain.append(ready_q.copy())
+        seed_chain.append(np.clip(ready_q.copy(), lower_limit, upper_limit))
         seed_names.append("Ready Pose")
 
         # 3. 确定性低差异准蒙特卡洛多起点探索 (4 组均匀分位网格)
@@ -235,7 +417,7 @@ class G1PinkIKSolver:
             qmc_seed = lower_limit + alpha * (upper_limit - lower_limit)
             if is_10dof:
                 qmc_seed[:3] *= 0.30  # 空间探索中对腰部初猜施加阻尼，优先探索手臂
-            seed_chain.append(qmc_seed)
+            seed_chain.append(np.clip(qmc_seed, lower_limit, upper_limit))
             seed_names.append(f"QMC Grid #{r_idx+1}")
 
         return seed_chain, seed_names
@@ -255,9 +437,11 @@ class G1PinkIKSolver:
         check_collision: bool,
     ) -> Tuple[np.ndarray, float, float]:
         """
-        二阶段高精李群高斯-牛顿微调抛光器 (~25 微秒)
+        二阶段高精李群高斯-牛顿微调抛光器 (~25 微秒)。
         在第一阶段满足硬限位与防自碰的前提下，执行 2 步无阻尼李群高斯-牛顿微调，消除 QP 正则化残差。
-        返回: (polished_q, best_err, best_rot_norm)
+        每一步迭代候选构型严格进行箱式限位截断 [lower_limit, upper_limit]，确保零越界。
+
+        :return: (polished_q, best_err, best_rot_norm)
         """
         has_rot = target_rot is not None
         pin.forwardKinematics(model, data, q_init)
@@ -290,6 +474,8 @@ class G1PinkIKSolver:
             m = 6 if has_rot else 3
             dq = J.T @ np.linalg.solve(J @ J.T + 1e-6 * np.eye(m), e_vec)
             dq = np.clip(dq, -0.04, 0.04)
+
+            # 强制箱式硬关节限位截断 (Box Joint Bounds Clamping)
             q_cand = np.clip(q_pol + dq, lower_limit, upper_limit)
 
             is_cand_col = (
@@ -312,30 +498,8 @@ class G1PinkIKSolver:
 
         return best_q, best_err, best_rot_norm
 
-    def _classify_solve_status(
-        self,
-        is_success: bool,
-        fin_col: bool,
-        fin_ep: float,
-        fin_er: float,
-        pos_tol: float,
-        rot_tol: float,
-        has_rot: bool,
-        is_singular: bool,
-    ) -> IKSolveStatus:
-        """纯函数式状态分类机：按严苛优先律裁定最终诊断状态枚举"""
-        if fin_col:
-            return IKSolveStatus.SELF_COLLISION
-        if is_success:
-            return IKSolveStatus.CONVERGED
-        if fin_ep < pos_tol and has_rot and fin_er >= rot_tol:
-            return IKSolveStatus.POSITION_REACHED_ONLY
-        if is_singular:
-            return IKSolveStatus.SINGULARITY_DETECTED
-        return IKSolveStatus.MAX_ITERATIONS_EXCEEDED
-
     # --------------------------------------------------------------------------
-    # 通用凸二次规划优化内核 (_solve_qp_core) — Pink + ProxQP / OSQP
+    # 4. 通用凸二次规划优化内核 (_solve_qp_core) — Pink + ProxQP / OSQP
     # --------------------------------------------------------------------------
 
     def _solve_qp_core(
@@ -363,7 +527,8 @@ class G1PinkIKSolver:
         record_trace: bool = True,
     ) -> Tuple[bool, np.ndarray, IKResult]:
         """
-        统一的 SE(3) 流形凸二次规划优化内核 (DRY 架构，供 7-DoF 与 10-DoF 共用)
+        统一的 SE(3) 流形凸二次规划优化内核 (供 7-DoF 与 10-DoF 共用)。
+        显式将 ConfigurationLimit 注入 ProxQP 优化器，以凸线性不等式硬约束保证 100% 关节限位合规。
         """
         has_rot = target_rot is not None
         model = self.kin.model_10dof[arm] if is_10dof else self.kin.model_7dof[arm]
@@ -387,6 +552,10 @@ class G1PinkIKSolver:
 
         tasks = [task_ee, task_posture]
 
+        # 3. 显式关节物理硬限位约束 (Pink ConfigurationLimit)
+        # 将 q_min <= q + dt * v <= q_max 作为硬不等式线性约束加入二次规划内核
+        joint_limits = [ConfigurationLimit(model, config_limit_gain=0.5)]
+
         best_q: Optional[np.ndarray] = None
         best_err = float("inf")
         best_rot_norm: float = 0.0
@@ -398,8 +567,16 @@ class G1PinkIKSolver:
         dt = 0.25
 
         # 构型对象复用：若启用 CBF 屏障函数则挂载降维碰撞模型，否则轻量构造极速收敛
-        coll_model = (self.kin.coll_model_10dof[arm] if is_10dof else self.kin.coll_model_7dof[arm]) if enable_collision_barrier else None
-        coll_data = (self.kin.coll_data_10dof[arm] if is_10dof else self.kin.coll_data_7dof[arm]) if enable_collision_barrier else None
+        coll_model = (
+            (self.kin.coll_model_10dof[arm] if is_10dof else self.kin.coll_model_7dof[arm])
+            if enable_collision_barrier
+            else None
+        )
+        coll_data = (
+            (self.kin.coll_data_10dof[arm] if is_10dof else self.kin.coll_data_7dof[arm])
+            if enable_collision_barrier
+            else None
+        )
         config = pink.Configuration(model, data, seed_chain[0].copy(), collision_model=coll_model, collision_data=coll_data)
 
         barriers = []
@@ -421,7 +598,9 @@ class G1PinkIKSolver:
                 if self.collision.is_colliding_reduced(arm, seed, is_10dof=is_10dof):
                     continue
 
-            config.update(seed.copy())
+            # 初始构型夹紧在物理限位内
+            clamped_seed = np.clip(seed.copy(), lower_limit, upper_limit)
+            config.update(clamped_seed)
             seed_switches.append(total_iters)
             prev_err_mm: Optional[float] = None
             stall_count = 0
@@ -444,11 +623,26 @@ class G1PinkIKSolver:
                 else:
                     task_posture.cost = cost_posture.copy()
 
+                # 调用 ProxQP 进行凸二次规划求解，显式传入 limits=[ConfigurationLimit]
                 try:
-                    v = pink.solve_ik(config, tasks, dt, solver="proxqp", barriers=barriers if barriers else None)
+                    v = pink.solve_ik(
+                        config,
+                        tasks,
+                        dt,
+                        solver="proxqp",
+                        limits=joint_limits,
+                        barriers=barriers if barriers else None,
+                    )
                 except Exception:
                     try:
-                        v = pink.solve_ik(config, tasks, dt, solver="osqp", barriers=barriers if barriers else None)
+                        v = pink.solve_ik(
+                            config,
+                            tasks,
+                            dt,
+                            solver="osqp",
+                            limits=joint_limits,
+                            barriers=barriers if barriers else None,
+                        )
                     except Exception:
                         break
 
@@ -458,8 +652,10 @@ class G1PinkIKSolver:
                 if max_step is not None and max_step > 0 and step_max > max_step:
                     v = v * (max_step / step_max)
 
+                # 积分更新并施加数值限位绝对防护
                 config.integrate_inplace(v, dt)
-                q_cur = config.q.copy()
+                q_cur = np.clip(config.q.copy(), lower_limit, upper_limit)
+                config.q = q_cur.copy()
 
                 # 正向运动学与流形残差
                 cur_pose = config.get_transform_frame_to_world(ee_frame)
@@ -491,21 +687,33 @@ class G1PinkIKSolver:
                 if pos_norm < pos_tol and (not has_rot or rot_norm < rot_tol) and not is_col:
                     if record_trace:
                         step_details.append({
-                            "step": total_iters, "iter": it + 1, "seed_idx": seed_idx,
-                            "seed_name": seed_names[seed_idx], "pos_err_mm": round(cur_err_mm, 3),
+                            "step": total_iters,
+                            "iter": it + 1,
+                            "seed_idx": seed_idx,
+                            "seed_name": seed_names[seed_idx],
+                            "pos_err_mm": round(cur_err_mm, 3),
                             "rot_err_deg": round(float(np.degrees(rot_norm)), 3),
-                            "delta_mm": delta_mm, "damping": 1e-4, "is_colliding": False,
-                            "status": "CONVERGED", "action": "Pink ProxQP Optimal Reached",
+                            "delta_mm": delta_mm,
+                            "damping": 1e-4,
+                            "is_colliding": False,
+                            "status": "CONVERGED",
+                            "action": "Pink ProxQP Optimal Reached",
                         })
                     break
 
                 if record_trace:
                     step_details.append({
-                        "step": total_iters, "iter": it + 1, "seed_idx": seed_idx,
-                        "seed_name": seed_names[seed_idx], "pos_err_mm": round(cur_err_mm, 3),
+                        "step": total_iters,
+                        "iter": it + 1,
+                        "seed_idx": seed_idx,
+                        "seed_name": seed_names[seed_idx],
+                        "pos_err_mm": round(cur_err_mm, 3),
                         "rot_err_deg": round(float(np.degrees(rot_norm)), 3),
-                        "delta_mm": delta_mm, "damping": 1e-4, "is_colliding": bool(is_col),
-                        "status": "QP_DESCENT", "action": "Pink ProxQP Step",
+                        "delta_mm": delta_mm,
+                        "damping": 1e-4,
+                        "is_colliding": bool(is_col),
+                        "status": "QP_DESCENT",
+                        "action": "Pink ProxQP Step",
                     })
 
                 # 智能停滞检测 (Stall Detection)
@@ -541,6 +749,9 @@ class G1PinkIKSolver:
         if best_q is None:
             best_q = ready_q.copy()
 
+        # 最终严格再次确保关节点绝对截断于合法限位内
+        best_q = np.clip(best_q, lower_limit, upper_limit)
+
         # 计算最终位姿残差与合格判定
         pin.forwardKinematics(model, data, best_q)
         pin.updateFramePlacements(model, data)
@@ -552,7 +763,8 @@ class G1PinkIKSolver:
             if check_collision and self.collision is not None
             else False
         )
-        is_success = (fin_ep < pos_tol) and (not has_rot or fin_er < rot_tol) and not fin_col
+        within_limits = bool(np.all(best_q >= lower_limit - 1e-4) and np.all(best_q <= upper_limit + 1e-4))
+        is_success = (fin_ep < pos_tol) and (not has_rot or fin_er < rot_tol) and not fin_col and within_limits
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         w_q = best_q[:3] if is_10dof else waist_q_base
@@ -570,9 +782,16 @@ class G1PinkIKSolver:
             rot_tol=rot_tol,
             has_rot=has_rot,
             is_singular=telemetry.get("is_singular", False),
+            within_limits=within_limits,
         )
 
         telemetry["rot_err_deg"] = round(float(np.degrees(fin_er)), 4) if has_rot else 0.0
+        telemetry["within_limits"] = within_limits
+
+        if is_10dof:
+            mode_str = "10DOF_6DOF_POSE" if has_rot else "10DOF_3DOF_POS"
+        else:
+            mode_str = "7DOF_6DOF_POSE" if has_rot else "7DOF_3DOF_POS"
 
         ik_res = IKResult(
             success=bool(is_success),
@@ -591,27 +810,28 @@ class G1PinkIKSolver:
             step_details=step_details,
             pipeline_stages=IK_PIPELINE_STAGES,
             is_colliding=bool(fin_col),
-            mode="10DOF_6DOF_POSE" if (is_10dof and has_rot) else ("10DOF_3DOF_POS" if is_10dof else ("7DOF_6DOF_POSE" if has_rot else "7DOF_3DOF_POS")),
+            mode=mode_str,
             **telemetry,
         )
         return is_success, best_q, ik_res
 
     # --------------------------------------------------------------------------
-    # 7-DoF 单臂逆运动学求解 (solve_ik) — Pink + ProxQP 工业级内核
+    # 5. 7-DoF 单臂逆运动学求解接口 (solve_ik)
     # --------------------------------------------------------------------------
 
     def solve_ik(
         self,
         arm: str,
-        target_pos: np.ndarray,
+        target_pos: Union[List[float], np.ndarray],
         target_rot: Optional[np.ndarray] = None,
         seed_q: Optional[np.ndarray] = None,
         q_full_base: Optional[np.ndarray] = None,
-        pos_tol: float = 1e-3,       # 1.0 mm
-        rot_tol: float = 2e-2,       # ~1.15°
+        pos_tol: float = 1e-3,  # 1.0 mm
+        rot_tol: float = 2e-2,  # ~1.15°
         max_iters: int = 35,
         max_step: float = 0.20,
         check_collision: bool = True,
+        custom_limits: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         damping: Optional[float] = None,
         enable_collision_barrier: bool = False,
         barrier_d_min: float = 0.015,
@@ -620,25 +840,31 @@ class G1PinkIKSolver:
         **kwargs,
     ) -> Tuple[bool, np.ndarray, IKResult]:
         """
-        7-DoF 单臂逆运动学 — 基于 Pink 凸二次规划 (ProxQP)
+        7-DoF 单臂逆运动学求解 — 基于 Pink 凸二次规划 (ProxQP)。
+
+        :param arm: 操作臂 ("left_arm" 或 "right_arm")
+        :param target_pos: 目标笛卡尔空间坐标 [x, y, z] (单位: 米)
+        :param target_rot: 可选的 3x3 目标旋转矩阵
+        :param seed_q: 初始猜测关节构型 (7-DoF)
+        :param pos_tol: 位置收敛公差 (米, 默认 0.001 即 1mm)
+        :param rot_tol: 姿态收敛公差 (弧度, 默认 ~1.15°)
+        :param max_iters: 最大优化迭代步数
+        :param max_step: 单步最大关节步长截断 (rad)
+        :param check_collision: 是否启用机身自碰撞检测
+        :param custom_limits: 可选的自定义/收紧关节限位 (lower_limits, upper_limits)
+        :param allow_relaxation: 是否允许姿态受控微松弛 (<=2.0°)
+        :return: (is_success, q_solution, ik_result_info)
         """
         start_time = time.perf_counter()
-        target_pos = np.asarray(target_pos, dtype=np.float64)
-        if np.isnan(target_pos).any() or np.isinf(target_pos).any():
-            fail_res = IKResult(
-                success=False,
-                status=IKSolveStatus.INVALID_INPUT,
-                q_solution=G1_READY_POSE[arm].copy(),
-                arm_solution=G1_READY_POSE[arm].copy(),
-                pos_err_mm=999.0,
-                rot_err_deg=180.0,
-                time_ms=0.0,
-                iters=0,
-                error="Invalid target_pos NaN/Inf",
-            )
+        valid, pos_arr, fail_res = self._validate_target_pos(target_pos, arm, is_10dof=False)
+        if not valid:
             return False, G1_READY_POSE[arm].copy(), fail_res
 
-        lower_limit, upper_limit = self.limits[arm]
+        if custom_limits is not None:
+            lower_limit, upper_limit = custom_limits
+        else:
+            lower_limit, upper_limit = self.limits[arm]
+
         ready_q = G1_READY_POSE[arm]
 
         # 确定性多初猜链构建 (Warm Start -> Ready Pose -> QMC 空间网格)
@@ -661,7 +887,7 @@ class G1PinkIKSolver:
         ok, q_sol, res = self._solve_qp_core(
             arm=arm,
             is_10dof=False,
-            target_pos=target_pos,
+            target_pos=pos_arr,
             target_rot=target_rot,
             seed_chain=seed_chain,
             seed_names=seed_names,
@@ -682,36 +908,36 @@ class G1PinkIKSolver:
             record_trace=record_trace,
         )
 
-        # ── 严苛位姿标准与受控微松弛 (Strict Pose Standards & Micro-Relaxation) ──
-        if not ok and allow_relaxation and target_rot is not None:
-            # 仅允许极窄受控微松弛 (上限严格控制在 rot_tol*1.5 且不超过 2.0°，杜绝宽松阶梯)
-            micro_rot_tol_deg = min(float(np.degrees(rot_tol)) * 1.5, 2.0)
-            if res.pos_err_mm < pos_tol * 1000.0 and res.rot_err_deg <= micro_rot_tol_deg and not res.is_colliding:
-                res.status = IKSolveStatus.RELAXED_ORIENTATION
-                res.success = True
-                return True, q_sol, res
-
+        ok = self._apply_orientation_relaxation(
+            ok=ok,
+            res=res,
+            allow_relaxation=allow_relaxation,
+            has_rot=(target_rot is not None),
+            pos_tol=pos_tol,
+            rot_tol=rot_tol,
+        )
         return ok, q_sol, res
 
     # --------------------------------------------------------------------------
-    # 10-DoF 协同逆运动学 (solve_10dof_ik) — Pink + ProxQP 工业级内核
+    # 6. 10-DoF 躯干-手臂协同逆运动学求解接口 (solve_10dof_ik)
     # --------------------------------------------------------------------------
 
     def solve_10dof_ik(
         self,
         arm: str,
-        target_pos: np.ndarray,
+        target_pos: Union[List[float], np.ndarray],
         target_rot: Optional[np.ndarray] = None,
-        target_rpy: Optional[np.ndarray] = None,
+        target_rpy: Optional[Union[List[float], np.ndarray]] = None,
         seed_waist: Optional[np.ndarray] = None,
         seed_arm: Optional[np.ndarray] = None,
         q_full_base: Optional[np.ndarray] = None,
-        pos_tol: float = 1e-3,       # 1.0 mm
-        rot_tol: float = 2.0e-2,     # ~1.15°
+        pos_tol: float = 1e-3,  # 1.0 mm
+        rot_tol: float = 2.0e-2,  # ~1.15°
         max_iters: int = 35,
         waist_weight: float = 10.0,  # 腰部惩罚倍率 (手臂优先)
         max_step: float = 0.18,
         check_collision: bool = True,
+        custom_limits: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         damping: Optional[float] = None,
         cascade_upright: bool = True,
         enable_collision_barrier: bool = False,
@@ -721,28 +947,26 @@ class G1PinkIKSolver:
         **kwargs,
     ) -> Tuple[bool, np.ndarray, np.ndarray, IKResult]:
         """
-        10-DoF (3腰 + 7臂) 躯干-手臂协同逆运动学 — 基于 Pink 凸二次规划 (ProxQP)
+        10-DoF (3腰 + 7臂) 躯干-手臂协同逆运动学 — 基于 Pink 凸二次规划 (ProxQP)。
+
         采用工业级级联直立优先与连续柔性过渡架构 (Continuous Waist-Arm Coordination Architecture)：
         1. 阶段 1：手臂舒适区 (dist <= 30.0cm)：
            - 若初始腰部接近零位，锁定腰部为 [0, 0, 0] 执行 7-DoF 单臂极速求解 (<0.5ms)，腰部保持 0.00°；
         2. 阶段 2：连续柔性过渡与协同扩展 (30.0cm < dist < 38.5cm 及超展区)：
            - 基于 C2 smoothstep 连续函数调制各向异性刚度，腰部随距离平滑介入，消除 ON/OFF 抖动。
+
+        :param arm: 操作臂 ("left_arm" 或 "right_arm")
+        :param target_pos: 目标空间坐标 [x, y, z] (单位: 米)
+        :param target_rot: 可选的 3x3 目标旋转矩阵
+        :param target_rpy: 可选的欧拉角 [roll, pitch, yaw] (弧度)
+        :param waist_weight: 腰部阻尼加权基准值 (默认 10.0，数值越大手臂越优先)
+        :param cascade_upright: 是否启用近距舒适区直立优先快速通道
+        :param custom_limits: 可选的自定义/收紧 10-DoF 关节限位 (lower_limits, upper_limits)
+        :return: (is_success, waist_solution, arm_solution, ik_result_info)
         """
         start_time = time.perf_counter()
-        target_pos = np.asarray(target_pos, dtype=np.float64)
-        if np.isnan(target_pos).any() or np.isinf(target_pos).any():
-            fail_res = IKResult(
-                success=False,
-                status=IKSolveStatus.INVALID_INPUT,
-                q_solution=np.concatenate([np.zeros(3), G1_READY_POSE[arm]]),
-                waist_solution=np.zeros(3),
-                arm_solution=G1_READY_POSE[arm].copy(),
-                pos_err_mm=999.0,
-                rot_err_deg=180.0,
-                time_ms=0.0,
-                iters=0,
-                error="Invalid target_pos NaN/Inf",
-            )
+        valid, pos_arr, fail_res = self._validate_target_pos(target_pos, arm, is_10dof=True)
+        if not valid:
             return False, np.zeros(3), G1_READY_POSE[arm].copy(), fail_res
 
         # 支持欧拉角输入
@@ -755,14 +979,14 @@ class G1PinkIKSolver:
 
         # ── 连续自适应工作空间协调架构 (Smooth Continuous Waist-Arm Coordination) ──
         sh_origin = self.kin.model_7dof[arm].jointPlacements[1].translation
-        dist_to_shoulder = float(np.linalg.norm(target_pos - sh_origin))
+        dist_to_shoulder = float(np.linalg.norm(pos_arr - sh_origin))
 
         # 舒适区内静态单次求解快速通道 (仅在当前腰部本就处于零位、且处于舒适区 <= 30cm 时秒级返回，避免无谓开销)
         sw_norm = float(np.linalg.norm(seed_waist)) if seed_waist is not None else 0.0
         if cascade_upright and dist_to_shoulder <= 0.300 and sw_norm < 0.02:
             ok_7, q_arm_7, info_7 = self.solve_ik(
                 arm=arm,
-                target_pos=target_pos,
+                target_pos=pos_arr,
                 target_rot=target_rot,
                 seed_q=seed_arm,
                 q_full_base=q_full_base,
@@ -795,7 +1019,7 @@ class G1PinkIKSolver:
 
         # ── 连续过渡区域激活权重计算 ──
         d_near = 0.300
-        d_far  = 0.385
+        d_far = 0.385
         if dist_to_shoulder <= d_near:
             mu = 0.0
             stage_name = "ARM_COMFORT_ZONE"
@@ -812,7 +1036,11 @@ class G1PinkIKSolver:
         w_assist = np.array([1.5e-4, 8.0e-4, 3.0e-4]) * float(waist_weight)
         waist_weights = w_lock * (1.0 - mu) + w_assist * mu
 
-        lower_limit, upper_limit = self.limits_10dof[arm]
+        if custom_limits is not None:
+            lower_limit, upper_limit = custom_limits
+        else:
+            lower_limit, upper_limit = self.limits_10dof[arm]
+
         ready_arm = G1_READY_POSE[arm]
         ready_10dof = np.concatenate([np.zeros(3), ready_arm])
         n = 10
@@ -836,7 +1064,7 @@ class G1PinkIKSolver:
         ok_10, q_sol, info_10 = self._solve_qp_core(
             arm=arm,
             is_10dof=True,
-            target_pos=target_pos,
+            target_pos=pos_arr,
             target_rot=target_rot,
             seed_chain=seed_chain,
             seed_names=seed_names,
@@ -863,15 +1091,14 @@ class G1PinkIKSolver:
         info_10.waist_solution = waist_sol
         info_10.arm_solution = arm_sol
 
-        # ── 严苛位姿标准与受控微松弛 (Strict Pose Standards & Micro-Relaxation) ──
-        if not ok_10 and allow_relaxation and has_rot:
-            # 仅允许极窄受控微松弛 (上限严格控制在 rot_tol*1.5 且不超过 2.0°，杜绝宽松阶梯)
-            micro_rot_tol_deg = min(float(np.degrees(rot_tol)) * 1.5, 2.0)
-            if info_10.pos_err_mm < pos_tol * 1000.0 and info_10.rot_err_deg <= micro_rot_tol_deg and not info_10.is_colliding:
-                info_10.status = IKSolveStatus.RELAXED_ORIENTATION
-                info_10.success = True
-                return True, waist_sol, arm_sol, info_10
-
+        ok_10 = self._apply_orientation_relaxation(
+            ok=ok_10,
+            res=info_10,
+            allow_relaxation=allow_relaxation,
+            has_rot=has_rot,
+            pos_tol=pos_tol,
+            rot_tol=rot_tol,
+        )
         return ok_10, waist_sol, arm_sol, info_10
 
 
@@ -882,5 +1109,8 @@ __all__ = [
     "IK_PIPELINE_STAGES",
     "G1_READY_POSE",
     "G1_DEFAULT_STAND_JOINTS",
+    "G1_JOINT_LIMITS",
+    "G1_WAIST_LIMITS",
+    "G1_JOINT_LIMITS_DEG",
+    "G1_WAIST_LIMITS_DEG",
 ]
-

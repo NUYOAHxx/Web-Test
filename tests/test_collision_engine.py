@@ -31,7 +31,7 @@ from core.solver.g1_pink_ik import G1PinkIKSolver
 
 def test_collision_suite():
     print("=" * 80)
-    print("🚀 启动 Unitree G1 工业级自碰撞检测引擎 (MoveIt SRDF ACM) 全面自动化测试")
+    print("[START] 启动 Unitree G1 工业级自碰撞检测引擎 (MoveIt SRDF ACM) 全面自动化测试")
     print("=" * 80)
 
     # 1. 初始化模型与碰撞检测引擎
@@ -39,7 +39,7 @@ def test_collision_suite():
     kin = G1KinematicsModel()
     col = G1CollisionChecker(kin)
     t_init = (time.perf_counter() - t0) * 1000.0
-    print(f"✔️ 模型与 SRDF ACM 引擎初始化成功，耗时: {t_init:.2f} ms")
+    print(f"[OK] 模型与 SRDF ACM 引擎初始化成功，耗时: {t_init:.2f} ms")
 
     # 2. 验证 ACM 矩阵与拓扑分类
     n_pairs = len(col.pair_metadata)
@@ -60,7 +60,7 @@ def test_collision_suite():
     assert len(col._category_indices["arm_torso"]) == 42
     assert len(col._category_indices["arm_arm"]) == 47
     assert len(col._category_indices["arm_head"]) == 8
-    print("  ✔️ ACM 规则解析与运动学动态剪枝测试 100% 通过！")
+    print("  [OK] ACM 规则解析与运动学动态剪枝测试 100% 通过！")
 
     # 3. 验证默认姿态下的安全性 (基准姿态无误报)
     print("\n【2. 基准健康姿态安全度评估 (零误报测试)】")
@@ -90,7 +90,7 @@ def test_collision_suite():
     assert not is_col_right, "错误：右臂默认姿态被误判为碰撞！"
     assert not is_col_red, "错误：降维模型默认姿态被误判为碰撞！"
     assert min_dist_mm > 15.0, f"错误：默认姿态最小安全裕度过低 ({min_dist_mm:.1f} mm <= 15 mm)！"
-    print("  ✔️ 默认健康姿态测试通过：零误报，最小物理间隙 > 15mm！")
+    print("  [OK] 默认健康姿态测试通过：零误报，最小物理间隙 > 15mm！")
 
     # 4. 危险碰撞穿透精准拦截测试
     print("\n【3. 极端干涉穿透精准拦截测试】")
@@ -137,7 +137,7 @@ def test_collision_suite():
     assert col_torso, "错误：手臂撞入胸腔未被拦截！"
     assert len(torso_pairs) > 0, "错误：未识别出 arm_torso 臂胸干涉分类！"
 
-    print("  ✔️ 危险干涉拦截测试 100% 通过：精准捕获并输出碰撞连杆名称与分类！")
+    print("  [OK] 危险干涉拦截测试 100% 通过：精准捕获并输出碰撞连杆名称与分类！")
 
     # 5. 极速降维碰撞判定性能基准 (Reduced Collision Benchmark)
     print("\n【4. 极速降维碰撞检测门禁性能基准 (1,000 次压力测试)】")
@@ -155,7 +155,7 @@ def test_collision_suite():
     print(f"  • 29-DoF 全身全连杆碰撞检测平均耗时 : {t_full:.1f} 微秒")
     print(f"  • 10-DoF 降维几何模型碰撞检测平均耗时 : {t_red:.1f} 微秒 (提速 {t_full/t_red:.1f}x)")
     assert t_red < 250.0, f"降维碰撞检测过慢: {t_red:.1f} 微秒 (应 < 250 微秒)"
-    print("  ✔️ 碰撞检测极速门禁性能达标，完全满足 1kHz+ 控制环实时需求！")
+    print("  [OK] 碰撞检测极速门禁性能达标，完全满足 1kHz+ 控制环实时需求！")
 
     # 6. Web 大屏与 ROS 2 遥测数据接口测试
     print("\n【5. Web 大屏与 ROS 2 遥测接口完整性测试】")
@@ -164,7 +164,7 @@ def test_collision_suite():
     for k in ("arm_torso", "arm_arm", "arm_head", "arm_leg", "torso_arm", "inter_arm", "head_arm", "leg_arm"):
         assert k in zone_dists, f"缺少遥测键: {k}"
         assert isinstance(zone_dists[k], float), f"遥测值类型异常: {zone_dists[k]}"
-    print("  ✔️ 遥测数据字典结构与双向别名 100% 满足 Web 大屏需求！")
+    print("  [OK] 遥测数据字典结构与双向别名 100% 满足 Web 大屏需求！")
 
     # 7. Inria Pink SelfCollisionBarrier 集成测试
     print("\n【6. Inria Pink 4.4.0 SelfCollisionBarrier (CBF) 屏障函数求解测试】")
@@ -180,10 +180,10 @@ def test_collision_suite():
     print(f"  • 启用 SelfCollisionBarrier 求解结果: 成功={ok_barrier}, 残差={info_barrier.get('pos_err_mm', 0):.2f} mm")
     assert ok_barrier, "错误：Pink ProxQP 结合 SelfCollisionBarrier 求解失败！"
     assert info_barrier["pos_err_mm"] < 1.0, "残差未达标"
-    print("  ✔️ Inria Pink 4.4.0 控制屏障函数 (CBF) 凸二次规划平滑避碰求解成功！")
+    print("  [OK] Inria Pink 4.4.0 控制屏障函数 (CBF) 凸二次规划平滑避碰求解成功！")
 
     print("\n" + "=" * 80)
-    print("🎉 恭喜！宇树 G1 工业级自碰撞检测系统 (SRDF ACM + Pinocchio/Coal) 所有测试全部通过！")
+    print("[SUCCESS] 恭喜！宇树 G1 工业级自碰撞检测系统 (SRDF ACM + Pinocchio/Coal) 所有测试全部通过！")
     print("=" * 80)
 
 

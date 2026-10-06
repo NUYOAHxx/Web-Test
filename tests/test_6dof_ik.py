@@ -25,7 +25,7 @@ from core.solver.g1_pink_ik import G1PinkIKSolver
 
 def test_6dof_ik_suite():
     print("=" * 80)
-    print("🚀 启动 Unitree G1 10-DoF 6-DoF 全空间位姿逆运动学自动化测试")
+    print("[START] 启动 Unitree G1 10-DoF 6-DoF 全空间位姿逆运动学自动化测试")
     print("=" * 80)
 
     solver = G1PinkIKSolver()
@@ -95,12 +95,12 @@ def test_6dof_ik_suite():
         assert r["rot_err_deg"] < 1.5, f"Case {r['name']} rot err {r['rot_err_deg']:.2f}° exceeded 1.5°!"
         assert r["within_limits"], f"Case {r['name']} joint limit violation!"
 
-    print("\n🎉 5/5 6-DoF 全空间位姿逆运动学测试全部通过！双重残差均严格达标 (<1.0mm, <1.5°)！")
+    print("\n[SUCCESS] 5/5 6-DoF 全空间位姿逆运动学测试全部通过！双重残差均严格达标 (<1.0mm, <1.5°)！")
 
 
 def test_backward_compatibility():
     print("\n" + "=" * 80)
-    print("🔄 验证 3-DoF 纯位置求解向后兼容性 (target_rot=None)")
+    print("[SWITCH] 验证 3-DoF 纯位置求解向后兼容性 (target_rot=None)")
     print("=" * 80)
 
     solver = G1PinkIKSolver()
@@ -113,12 +113,12 @@ def test_backward_compatibility():
     assert ok, "3-DoF backward compatibility test failed!"
     assert info["pos_err_mm"] < 1.0, f"3-DoF pos err {info['pos_err_mm']:.2f}mm exceeded 1.0mm!"
     assert info["mode"] == "10DOF_3DOF_POS", f"Expected mode 10DOF_3DOF_POS, got {info['mode']}"
-    print(f"✔️ 3-DoF 纯位置解算测试通过！残差: {info['pos_err_mm']:.3f}mm, 耗时: {info['time_ms']:.2f}ms")
+    print(f"[OK] 3-DoF 纯位置解算测试通过！残差: {info['pos_err_mm']:.3f}mm, 耗时: {info['time_ms']:.2f}ms")
 
 
 def test_ik_result_and_relaxation():
     print("\n" + "=" * 80)
-    print("🧪 验证 IKResult 强类型诊断对象、双模兼容性与受控姿态松弛")
+    print("[TEST] 验证 IKResult 强类型诊断对象、双模兼容性与受控姿态松弛")
     print("=" * 80)
 
     from core.solver import IKSolveStatus, IKResult, G1_READY_POSE
@@ -136,7 +136,7 @@ def test_ik_result_and_relaxation():
     assert res.pos_err_mm == res["pos_err_mm"], "pos_err_mm property and dict access must match"
     assert res.min_singular_value > 0.0, "min_singular_value must be positive"
     assert res.joint_limit_margin > 0.0, "joint_limit_margin must be positive"
-    print(f"✔️ IKResult 双模兼容性与高阶指标验证通过: SVD σ_min={res.min_singular_value}, 限位裕度={res.joint_limit_margin_deg}°")
+    print(f"[OK] IKResult 双模兼容性与高阶指标验证通过: SVD σ_min={res.min_singular_value}, 限位裕度={res.joint_limit_margin_deg}°")
 
     # 2. 验证严苛位姿标准与明确拒绝 (allow_relaxation=False vs True)
     pos_ok, rot_ok = solver.forward_kinematics("left_arm", G1_READY_POSE["left_arm"])
@@ -157,14 +157,14 @@ def test_ik_result_and_relaxation():
     )
     assert not ok_relax, "Relaxed mode must REJECT severe orientation error (180°), strictly enforcing pose accuracy!"
     assert not res_relax.success, "res_relax.success must remain False"
-    print(f"✔️ 严苛位姿标准如期生效: 严重超限姿态在无论是否开启松弛下均坚决被拒 ({res_relax.status.value})")
+    print(f"[OK] 严苛位姿标准如期生效: 严重超限姿态在无论是否开启松弛下均坚决被拒 ({res_relax.status.value})")
 
     # 3. 显式纯位置模式 (target_rot=None): 当调用方主动仅需要 3D 位置时，返回 CONVERGED
     ok_pos, _, res_pos = solver.solve_ik("left_arm", pos_ok, target_rot=None, max_iters=20)
     assert ok_pos, "Explicit position-only mode must succeed when target_rot=None"
     assert res_pos.status == IKSolveStatus.CONVERGED, "Explicit position-only must mark CONVERGED"
     assert res_pos.pos_err_mm < 1.0, f"Position error {res_pos.pos_err_mm:.2f}mm must be < 1.0mm"
-    print(f"✔️ 显式纯位置模式验证通过: target_pos 完美收敛 ({res_pos.pos_err_mm:.3f} mm, {res_pos.status.value})")
+    print(f"[OK] 显式纯位置模式验证通过: target_pos 完美收敛 ({res_pos.pos_err_mm:.3f} mm, {res_pos.status.value})")
 
 
 if __name__ == "__main__":

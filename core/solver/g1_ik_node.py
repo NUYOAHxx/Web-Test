@@ -34,6 +34,15 @@ from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import String
 from visualization_msgs.msg import MarkerArray
 
+# 检查 MoveIt 2 消息类型可用性
+HAS_MOVEIT_MSGS = False
+try:
+    from moveit_msgs.srv import GetPositionIK
+    from moveit_msgs.msg import MoveItErrorCodes, RobotState, DisplayTrajectory
+    HAS_MOVEIT_MSGS = True
+except ImportError:
+    HAS_MOVEIT_MSGS = False
+
 # 添加项目根目录到 Python 搜索路径
 DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if DIR_ROOT not in sys.path:
@@ -54,7 +63,7 @@ class G1IKSolverNode(Node):
     def __init__(self):
         super().__init__("g1_ik_solver")
         self.get_logger().info("======================================================")
-        self.get_logger().info(" 🚀 Unitree G1 10-DoF 躯干-手臂协同 IK 解算服务节点启动中...")
+        self.get_logger().info(" [INIT] Unitree G1 10-DoF 躯干-手臂协同 IK 解算服务节点启动中...")
         self.get_logger().info("======================================================")
 
         # 实例化 Pink 凸优化求解器 (封装 Pinocchio 运动学模型与 28 对碰撞检测器)
@@ -116,6 +125,10 @@ class G1IKSolverNode(Node):
             "colliding_pairs": [],
         }
 
+        # ── 是否发布 /joint_states 参数 (在 MoveIt 体系下由控制器广播，此处可设为 False) ──
+        self.declare_parameter("publish_joint_states", True)
+        self.publish_joint_states = bool(self.get_parameter("publish_joint_states").value)
+
         # ── ROS 2 发布者 (标准专业命名，零冗余兼容) ──
         self.pub_joint_states = self.create_publisher(JointState, "/joint_states", 10)
         self.pub_target_pose = self.create_publisher(PoseStamped, "/g1/kinematics/target_pose", 10)
@@ -132,13 +145,27 @@ class G1IKSolverNode(Node):
         self.sub_command = self.create_subscription(
             String, "/g1/kinematics/target_command", self._on_target_command_msg, 10
         )
+        if not self.publish_joint_states:
+            self.sub_joint_states_feedback = self.create_subscription(
+                JointState, "/joint_states", self._on_joint_states_feedback, 10
+            )
 
         # 50Hz 实时轨迹平滑插值广播定时器 (20ms 步长)
         self.timer = self.create_timer(0.02, self._on_timer_step)
 
-        self.get_logger().info("✔️ 订阅话题就绪: /g1/kinematics/target_pose & /g1/kinematics/target_command")
-        self.get_logger().info("✔️ 发布总线就绪: /joint_states (50Hz), /g1/kinematics/*, /g1/safety/*")
-        self.get_logger().info(f"✔️ 初始对齐就绪: 手爪空间坐标 [{init_fk_pos[0]:.3f}, {init_fk_pos[1]:.3f}, {init_fk_pos[2]:.3f}], 姿态 RPY: {init_rpy_deg}°")
+        # ── MoveIt 2 标准兼容逆运动学服务接口 (/g1/compute_ik) 与规划路径监听 ──
+        if HAS_MOVEIT_MSGS:
+            self.srv_compute_ik = self.create_service(
+                GetPositionIK, "/g1/compute_ik", self._on_compute_ik_service
+            )
+            self.sub_display_path = self.create_subscription(
+                DisplayTrajectory, "/display_planned_path", self._on_display_planned_path_msg, 10
+            )
+            self.get_logger().info("[OK] MoveIt 2 标准兼容服务就绪: /g1/compute_ik & /display_planned_path")
+
+        self.get_logger().info("[OK] 订阅话题就绪: /g1/kinematics/target_pose & /g1/kinematics/target_command")
+        self.get_logger().info("[OK] 发布总线就绪: /joint_states (50Hz), /g1/kinematics/*, /g1/safety/*")
+        self.get_logger().info(f"[OK] 初始对齐就绪: 手爪空间坐标 [{init_fk_pos[0]:.3f}, {init_fk_pos[1]:.3f}, {init_fk_pos[2]:.3f}], 姿态 RPY: {init_rpy_deg}°")
 
     # ─────────────────────────────────────────────────────────────
     # 目标指令订阅处理
@@ -170,7 +197,7 @@ class G1IKSolverNode(Node):
                 self.target_rot = target_rot.copy()
 
         self.get_logger().info(
-            f"📥 收到外部笛卡尔 6D 目标位姿: [{target_pos[0]:.3f}, {target_pos[1]:.3f}, {target_pos[2]:.3f}] m "
+            f"[RECV] 收到外部笛卡尔 6D 目标位姿: [{target_pos[0]:.3f}, {target_pos[1]:.3f}, {target_pos[2]:.3f}] m "
             f"(操作臂: {self.active_arm}, 6D姿态约束: {target_rot is not None})"
         )
         self.solve_target(target_pos, target_rot=target_rot)
@@ -186,7 +213,7 @@ class G1IKSolverNode(Node):
                 new_arm = str(cmd["arm"])
                 if new_arm in ["left_arm", "right_arm"] and new_arm != self.active_arm:
                     self.active_arm = new_arm
-                    self.get_logger().info(f"🔄 切换操作臂为: {self.active_arm}")
+                    self.get_logger().info(f"[SWITCH] 切换操作臂为: {self.active_arm}")
 
             if action == "SET_ARM":
                 arm = self.active_arm
@@ -233,7 +260,106 @@ class G1IKSolverNode(Node):
                 self.run_circle_demo(arm=self.active_arm)
 
         except Exception as e:
-            self.get_logger().error(f"❌ 解析目标指令异常: {e}")
+            self.get_logger().error(f"[ERROR] 解析目标指令异常: {e}")
+
+    # ─────────────────────────────────────────────────────────────
+    # MoveIt 2 标准逆运动学服务处理 (/g1/compute_ik)
+    # ─────────────────────────────────────────────────────────────
+    def _on_compute_ik_service(self, request, response):
+        """
+        处理 MoveIt 2 标准逆运动学服务请求 (/g1/compute_ik, moveit_msgs/srv/GetPositionIK)
+        支持规划组：left_arm, right_arm, left_arm_torso, right_arm_torso
+        """
+        req = request.ik_request
+        group_name = req.group_name
+        pose_stamped = req.pose_stamped
+
+        # 1. 提取目标末端空间位姿
+        p = pose_stamped.pose.position
+        target_pos = np.array([p.x, p.y, p.z], dtype=np.float64)
+
+        o = pose_stamped.pose.orientation
+        target_rot = None
+        if o.x**2 + o.y**2 + o.z**2 + o.w**2 > 1e-4:
+            q_pin = pin.Quaternion(o.w, o.x, o.y, o.z).normalized()
+            target_rot = q_pin.toRotationMatrix()
+
+        # 2. 提取种子关节配置 (Seed)
+        seed_waist = None
+        seed_arm = None
+        if req.robot_state and req.robot_state.joint_state.name:
+            seed_dict = dict(zip(req.robot_state.joint_state.name, req.robot_state.joint_state.position))
+            if any(name in seed_dict for name in self.solver.waist_joint_names):
+                seed_waist = np.array([seed_dict.get(n, 0.0) for n in self.solver.waist_joint_names], dtype=np.float64)
+            arm_names = self.solver.left_arm_joint_names if "left" in group_name else self.solver.right_arm_joint_names
+            if any(name in seed_dict for name in arm_names):
+                seed_arm = np.array([seed_dict.get(n, 0.0) for n in arm_names], dtype=np.float64)
+
+        if seed_waist is None:
+            with self.lock:
+                seed_waist = np.array([
+                    self.current_joints["waist_yaw_joint"],
+                    self.current_joints["waist_roll_joint"],
+                    self.current_joints["waist_pitch_joint"],
+                ], dtype=np.float64)
+
+        arm_id = "left_arm" if "left" in group_name else "right_arm"
+        arm_names = self.solver.left_arm_joint_names if arm_id == "left_arm" else self.solver.right_arm_joint_names
+        if seed_arm is None:
+            with self.lock:
+                seed_arm = np.array([self.current_joints[n] for n in arm_names], dtype=np.float64)
+
+        avoid_col = req.avoid_collisions
+
+        with self.lock:
+            self.target_pos = target_pos.copy()
+            if target_rot is not None:
+                self.target_rot = target_rot.copy()
+            self.active_arm = arm_id
+
+        # 3. 区分 7-DoF 与 10-DoF 规划组进行 Pink 求解
+        if group_name in ("left_arm", "right_arm"):
+            ok, arm_sol, info = self.solver.solve_ik(
+                arm=arm_id,
+                target_pos=target_pos,
+                target_rot=target_rot,
+                seed_chain=seed_arm,
+                check_collision=avoid_col,
+            )
+            if ok:
+                response.error_code.val = MoveItErrorCodes.SUCCESS
+                response.solution.joint_state.name = list(arm_names)
+                response.solution.joint_state.position = [float(v) for v in arm_sol]
+                self.get_logger().info(f"[OK] MoveIt IK 服务响应成功 [{group_name}]: 耗时={info.time_ms:.1f}ms, 残差={info.pos_err_mm:.2f}mm")
+            else:
+                response.error_code.val = MoveItErrorCodes.NO_IK_SOLUTION
+                self.get_logger().warn(f"[WARN] MoveIt IK 服务求解未收敛 [{group_name}]: 残差={info.pos_err_mm:.2f}mm")
+
+        elif group_name in ("left_arm_torso", "right_arm_torso"):
+            ok, waist_sol, arm_sol, info = self.solver.solve_10dof_ik(
+                arm=arm_id,
+                target_pos=target_pos,
+                target_rot=target_rot,
+                seed_waist=seed_waist,
+                seed_arm=seed_arm,
+                check_collision=avoid_col,
+            )
+            if ok:
+                response.error_code.val = MoveItErrorCodes.SUCCESS
+                all_names = list(self.solver.waist_joint_names) + list(arm_names)
+                all_positions = [float(v) for v in waist_sol] + [float(v) for v in arm_sol]
+                response.solution.joint_state.name = all_names
+                response.solution.joint_state.position = all_positions
+                self.get_logger().info(f"[OK] MoveIt 10-DoF IK 服务响应成功 [{group_name}]: 耗时={info.time_ms:.1f}ms, 残差={info.pos_err_mm:.2f}mm")
+            else:
+                response.error_code.val = MoveItErrorCodes.NO_IK_SOLUTION
+                self.get_logger().warn(f"[WARN] MoveIt 10-DoF IK 服务求解未收敛 [{group_name}]: 残差={info.pos_err_mm:.2f}mm")
+
+        else:
+            self.get_logger().warn(f"未知的 MoveIt 规划组: {group_name}")
+            response.error_code.val = MoveItErrorCodes.INVALID_GROUP_NAME
+
+        return response
 
     # ─────────────────────────────────────────────────────────────
     # 核心解算与轨迹触发
@@ -356,7 +482,7 @@ class G1IKSolverNode(Node):
         # 立即发布诊断与安全信息
         self._publish_diagnostics()
 
-        status_icon = "✔️" if ok else "⚠️"
+        status_icon = "[OK]" if ok else "[WARN]"
         self.get_logger().info(
             f"{status_icon} IK 解算完成 | 耗时: {elapsed_ms:.2f}ms | 位置残差: {err_mm:.2f}mm | 姿态残差: {rot_err_deg:.2f}° | "
             f"步数: {info.get('iters', 0)} | 净空: {min_clearance:.1f}mm | 平衡: {self.com_status}"
@@ -422,12 +548,12 @@ class G1IKSolverNode(Node):
             }
 
         self._publish_diagnostics()
-        self.get_logger().info("✔️ 已执行直立预备就绪姿态复位")
+        self.get_logger().info("[OK] 已执行直立预备就绪姿态复位")
 
     def run_circle_demo(self, arm: Optional[str] = None):
         """启动后台线程执行连续空间圆周轨迹 (带平滑引入期、对称工作区适配与姿态定向)"""
         if self.is_demo_running:
-            self.get_logger().warn("⚠️ 轨迹演示正在执行中，忽略重复指令")
+            self.get_logger().warn("[WARN] 轨迹演示正在执行中，忽略重复指令")
             return
 
         exec_arm = arm if arm in ("left_arm", "right_arm") else self.active_arm
@@ -435,7 +561,7 @@ class G1IKSolverNode(Node):
         def _thread_circle():
             self.is_demo_running = True
             try:
-                self.get_logger().info(f"🌀 启动连续空间轨迹演示 (执行臂: {exec_arm}, 优雅平滑圆周)...")
+                self.get_logger().info(f"[TRAJ] 启动连续空间轨迹演示 (执行臂: {exec_arm}, 优雅平滑圆周)...")
 
                 # 左右臂对称中心与半径配置 (正前上方天然舒适工作区)
                 # 左臂 y = +0.22, 右臂 y = -0.22, x = 0.38, z = 0.82
@@ -465,9 +591,9 @@ class G1IKSolverNode(Node):
                 # ── 第三阶段：闭环微步收尾 ──
                 self.solve_target(p_start, target_rot=R_target, duration=0.2)
                 time.sleep(0.25)
-                self.get_logger().info("✔️ 连续平滑空间轨迹演示完美完成！")
+                self.get_logger().info("[OK] 连续平滑空间轨迹演示完美完成！")
             except Exception as e:
-                self.get_logger().error(f"❌ 轨迹演示执行异常: {e}")
+                self.get_logger().error(f"[ERROR] 轨迹演示执行异常: {e}")
             finally:
                 self.is_demo_running = False
                 with self.lock:
@@ -496,14 +622,17 @@ class G1IKSolverNode(Node):
                         q1 = self.target_joints.get(k, 0.0)
                         self.current_joints[k] = q0 + alpha * (q1 - q0)
 
+            self._update_actual_fk()
+
             stamp = self.get_clock().now().to_msg()
 
-            # 1. 广播 JointState
-            js_msg = JointState()
-            js_msg.header.stamp = stamp
-            js_msg.name = list(self.current_joints.keys())
-            js_msg.position = [self.current_joints[k] for k in js_msg.name]
-            self.pub_joint_states.publish(js_msg)
+            # 1. 广播 JointState (仅当作为主状态源时广播)
+            if self.publish_joint_states:
+                js_msg = JointState()
+                js_msg.header.stamp = stamp
+                js_msg.name = list(self.current_joints.keys())
+                js_msg.position = [self.current_joints[k] for k in js_msg.name]
+                self.pub_joint_states.publish(js_msg)
 
             # 2. 广播实际末端空间位姿 (包含真实末端姿态四元数)
             quat = pin.Quaternion(self.actual_rot)
@@ -517,6 +646,28 @@ class G1IKSolverNode(Node):
 
             # 3. 广播 RViz 3D 标记
             self._publish_markers(stamp)
+
+    def _update_actual_fk(self):
+        """根据 self.current_joints 实时正运动学解算并同步手爪实际位姿 actual_pos 与 actual_rot"""
+        waist_q = np.array([
+            self.current_joints.get("waist_yaw_joint", 0.0),
+            self.current_joints.get("waist_roll_joint", 0.0),
+            self.current_joints.get("waist_pitch_joint", 0.0),
+        ], dtype=np.float64)
+        prefix = "left" if "left" in self.active_arm else "right"
+        arm_names = [
+            f"{prefix}_shoulder_pitch_joint",
+            f"{prefix}_shoulder_roll_joint",
+            f"{prefix}_shoulder_yaw_joint",
+            f"{prefix}_elbow_joint",
+            f"{prefix}_wrist_roll_joint",
+            f"{prefix}_wrist_pitch_joint",
+            f"{prefix}_wrist_yaw_joint",
+        ]
+        arm_q = np.array([self.current_joints.get(k, 0.0) for k in arm_names], dtype=np.float64)
+        act_p, act_r = self.solver.forward_kinematics_10dof(self.active_arm, waist_q, arm_q)
+        self.actual_pos = act_p
+        self.actual_rot = act_r
 
     def _publish_diagnostics(self):
         """广播算法诊断与安全雷达 JSON 消息"""
@@ -549,6 +700,56 @@ class G1IKSolverNode(Node):
         com_markers = create_com_markers(com_p, poly, stamp, status=com_st)
         ik_markers.markers.extend(com_markers.markers)
         self.pub_markers.publish(ik_markers)
+
+    def _on_joint_states_feedback(self, msg: JointState):
+        """当外部控制器广播 /joint_states 时，被动同步机身状态与真实末端 FK"""
+        with self.lock:
+            for name, pos in zip(msg.name, msg.position):
+                if name in self.current_joints:
+                    self.current_joints[name] = float(pos)
+            self._update_actual_fk()
+
+    def _on_display_planned_path_msg(self, msg: DisplayTrajectory):
+        """当 MoveIt 2 (包括 RViz2 GUI 点击 Plan) 广播规划轨迹时，提取终点位姿同步至目标球 (Target Marker)"""
+        try:
+            if not msg.trajectory:
+                return
+            traj = msg.trajectory[0].joint_trajectory
+            if not traj.points:
+                return
+            goal_pt = traj.points[-1]
+            names = traj.joint_names
+            positions = goal_pt.positions
+            joint_map = dict(zip(names, positions))
+
+            waist_q = np.array([
+                joint_map.get("waist_yaw_joint", self.current_joints.get("waist_yaw_joint", 0.0)),
+                joint_map.get("waist_roll_joint", self.current_joints.get("waist_roll_joint", 0.0)),
+                joint_map.get("waist_pitch_joint", self.current_joints.get("waist_pitch_joint", 0.0)),
+            ], dtype=np.float64)
+
+            prefix = "left" if any("left" in n for n in names) else "right"
+            arm_id = f"{prefix}_arm"
+            arm_names = [
+                f"{prefix}_shoulder_pitch_joint",
+                f"{prefix}_shoulder_roll_joint",
+                f"{prefix}_shoulder_yaw_joint",
+                f"{prefix}_elbow_joint",
+                f"{prefix}_wrist_roll_joint",
+                f"{prefix}_wrist_pitch_joint",
+                f"{prefix}_wrist_yaw_joint",
+            ]
+            arm_q = np.array([joint_map.get(k, self.current_joints.get(k, 0.0)) for k in arm_names], dtype=np.float64)
+
+            tgt_p, tgt_r = self.solver.forward_kinematics_10dof(arm_id, waist_q, arm_q)
+            with self.lock:
+                self.target_pos = tgt_p.copy()
+                self.target_rot = tgt_r.copy()
+                self.active_arm = arm_id
+                self.solver_metrics["success"] = True
+                self.solver_metrics["mode"] = "MOVEIT_PLANNED_GOAL"
+        except Exception as e:
+            self.get_logger().warn(f"解析 /display_planned_path 目标位姿异常: {e}")
 
 
 

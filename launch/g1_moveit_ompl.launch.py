@@ -13,8 +13,9 @@ Unitree G1 MoveIt 2 OMPL (Open Motion Planning Library) 标准调度启动文件
 """
 
 import os
+import sys
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -98,10 +99,31 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration("rviz")),
     )
 
+    # 8. 联动 Pink IK 解算与遥测服务节点 (作为 MoveIt 辅助逆解器，被动监听 /joint_states)
+    solver_arg = DeclareLaunchArgument(
+        name="solver",
+        default_value="true",
+        description="是否联动拉起 Pink IK 逆解服务节点 /g1/compute_ik (true/false)",
+    )
+    ik_solver_process = ExecuteProcess(
+        cmd=[
+            sys.executable,
+            os.path.join(dir_root, "core/solver/g1_ik_node.py"),
+            "--ros-args",
+            "-p",
+            "publish_joint_states:=false",
+        ],
+        output="screen",
+        name="g1_ik_solver",
+        condition=IfCondition(LaunchConfiguration("solver")),
+    )
+
     return LaunchDescription([
         launch_rviz_arg,
+        solver_arg,
         rsp_node,
         mock_controller_node,
         move_group_node,
         rviz_node,
+        ik_solver_process,
     ])

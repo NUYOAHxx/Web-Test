@@ -190,7 +190,6 @@ UNITREE-G1-ROBOT-MODEL/
 │   └── rviz/                       # ROS 2 RViz 3D 监控
 │       ├── __init__.py             # 导出 Marker 构造函数
 │       ├── markers.py              # RViz Marker 与几何图元构造工具
-│       ├── visualize_10dof_rviz.py # 交互式 10-DoF 解算终端监控控制台
 │       └── view_10dof_ik.rviz      # RViz2 预设可视化配置文件
 ├── simulation/                     # 物理仿真与强化学习策略
 │   ├── __init__.py                 # 导出仿真配置
@@ -206,32 +205,33 @@ UNITREE-G1-ROBOT-MODEL/
 │       ├── initial_positions.yaml  # 机器人各规划组预设初始位姿
 │       ├── moveit_controllers.yaml # MoveIt 控制器接口映射
 │       └── moveit.rviz             # MoveIt 2 官方 RViz 预设界面配置
-├── launch/                         # ROS 2 系统级调度启动入口
-│   ├── g1_telemetry_system.launch.py # 标准数字孪生全系统启动脚本
-│   └── g1_moveit_ompl.launch.py      # MoveIt 2 MoveGroup + OMPL 规划服务启动入口
+├── launch/                         # ROS 2 系统级调度启动入口 (统一生命周期管理)
+│   ├── g1_telemetry_system.launch.py # Web 遥测大屏 + IK 求解 + TF 树全系统
+│   ├── g1_moveit_ompl.launch.py      # MoveIt 2 MoveGroup + OMPL 规划服务入口
+│   └── g1_rviz.launch.py             # 纯可视化 TF 树与 10-DoF RViz 监控看板
 ├── resources/                      # 机器人描述资源
 │   └── g1/
 │       ├── g1_29dof.urdf           # 宇树 G1 29-DoF 机器人官方 URDF 模型
 │       ├── g1_29dof.srdf           # MoveIt SRDF 碰撞矩阵 (ACM) 配置文件
 │       ├── scene53.xml             # MuJoCo 53-DoF 全身物理仿真场景描述
 │       ├── meshes/                 # 官方高精度 STL CAD 3D 视觉网格 (36 个)
-│       └── images/                 # 项目展示图
-├── scripts/                        # 统一操作与服务一键启动脚本
-│   ├── run_web_dashboard.sh        # 启动 Web 数字孪生仪表盘 (默认端口 8080)
-│   ├── run_telemetry_system.sh     # 启动 ROS 2 Headless IK + Web 遥测系统
-│   ├── run_10dof_rviz.sh           # 启动 10-DoF RViz 3D 监控窗口与控制台
-│   ├── run_mujoco.sh               # 启动 MuJoCo 53-DoF 全身物理仿真
-│   └── run_moveit_ompl.sh          # 一键启动 MoveIt 2 OMPL 规划服务 (可选 --rviz)
-├── benchmarks/                     # 性能压测与轨迹规划基准测试
+│   └── images/                 # 项目展示图
+├── docs/                           # 算法设计与工程技术白皮书
+│   └── humanoid_ik_design_report.md# 10-DoF 躯干-手臂协同加权逆运动学设计报告
+├── benchmarks/                     # 性能压测、动态演示与轨迹规划基准测试
+│   ├── benchmark_moveit_pink_ik.py # MoveIt 2 链路 IK 服务与 OMPL 闭环评测
+│   ├── moveit_motion_demo.py       # MoveIt 2 + Pink IK 3D 模型连续动态运动演示
 │   ├── ik_benchmark.py             # 大规模随机逆解基准压力评测工具
 │   ├── ptp_planning.py             # 点对点 (PTP) 轨迹规划与灵敏度分析工具
 │   └── ompl_planning_demo.py       # MoveIt 2 OMPL 规划基准与动态避障演示脚本
 ├── tests/                          # 自动化单元测试套件 (pytest)
 │   ├── __init__.py
-│   ├── test_10dof_ik.py            # 10-DoF 协同逆解验证套件 (12 项测试)
+│   ├── test_10dof_ik.py            # 10-DoF 协同逆解验证套件
 │   ├── test_6dof_ik.py             # 6-DoF 全空间位姿逆解测试
 │   ├── test_collision_engine.py    # MoveIt SRDF ACM 碰撞安全引擎测试
-│   └── test_pinocchio_dynamics.py  # 动力学与正运动学等价性验证
+│   ├── test_moveit_ik_pipeline.py  # MoveIt 2 链路 GetPositionIK 协议专项测试
+│   ├── test_pinocchio_dynamics.py  # 动力学与正运动学等价性验证
+│   └── test_solver_capability_and_range.py # 求解器五大行为全维度测试
 ├── pyproject.toml                  # Python 工程构建与依赖配置
 └── requirements.txt                # Python 依赖清单
 ```
@@ -288,50 +288,49 @@ pip install -r requirements.txt
 
 ## 6. 快速上手与运行指南
 
-### 方式一：启动 Web 实时数字孪生监控仪表盘 (推荐)
+### 方式一：启动 Web 实时数字孪生监控仪表盘 (标准 ROS 2 Launch)
 
-此命令为日常开发与调试推荐方式，支持一键拉起后台 Headless IK 求解服务节点与 Web 前端数字孪生看板：
+日常开发与调试推荐方式，通过标准 ROS 2 Launch 协同拉起后台 Headless IK 求解服务节点与 Web 前端数字孪生看板：
 
 ```bash
-bash scripts/run_web_dashboard.sh [PORT]
+ros2 launch launch/g1_telemetry_system.launch.py port:=8080
 ```
-- 默认端口为 `8080`（例如指定端口：`bash scripts/run_web_dashboard.sh 9090`）。
+- 默认端口为 `8080`（支持通过 `port:=xxxx` 传入任意自定义端口）。
 - 启动后浏览器访问：**`http://localhost:8080`**。
-- 可直接在 3D 视口中进行三维拖拽交互，或通过预设点控制机器人手臂并实时监控各关节状态与防碰撞安全雷达。
+- 可在 3D 视口中进行三维拖拽交互，或通过预设点控制机器人手臂并实时监控各关节状态与防碰撞安全雷达。
 
 ---
 
-### 方式二：ROS 2 完整调度启动 (Headless IK + Web 大屏 + TF 广播)
+### 方式二：启动 MoveIt 2 运动规划与 RViz 3D 监控 (标准 ROS 2 Launch)
 
-在已配置好 ROS 2 环境的终端中，使用标准 ROS 2 Launch 调度一键启动整套系统：
-
-```bash
-bash scripts/run_telemetry_system.sh
-```
-
-或直接执行 ROS 2 Launch 命令：
+在 ROS 2 环境中启动 MoveIt 2 `move_group` 规划服务与 RViz 交互界面：
 
 ```bash
-ros2 launch launch/g1_telemetry_system.launch.py port:=8080 rviz:=false
+ros2 launch launch/g1_moveit_ompl.launch.py rviz:=true
 ```
 
 启动组件包含：
-1. `g1_ik_solver`：核心 10-DoF 协同求解与 28 对自碰撞安全门禁服务节点；
+1. `move_group`：OMPL 全局无碰撞轨迹规划服务流水线；
 2. `robot_state_publisher`：广播全机身 TF 坐标树；
-3. `g1_telemetry_hub`：Web 遥测监控大屏服务；
-4. `rviz2`（可选）：传入 `rviz:=true` 可同步启动桌面端 RViz2 监控。
+3. `mock_trajectory_server`：控制器 Action 服务端，支持轨迹平滑执行与 `/joint_states` 广播；
+4. `rviz2`：加载 MotionPlanning 官方插件，支持鼠标拖拽 6D 手柄交互规划。
+
+启动后若需运行连续 3D 运动演示，新终端执行：
+```bash
+python3 benchmarks/moveit_motion_demo.py
+```
 
 ---
 
-### 方式三：启动 RViz 3D 桌面端交互监控
+### 方式三：启动纯 RViz 3D 桌面端监控看板 (标准 ROS 2 Launch)
 
-若需要在 ROS 2 桌面环境中进行算法交互与调试，执行：
+若仅需要在 ROS 2 桌面环境中监控关节状态与 10-DoF 逆解，执行：
 
 ```bash
-bash scripts/run_10dof_rviz.sh
+ros2 launch launch/g1_rviz.launch.py solver:=true
 ```
 
-脚本将自动检查并拉起 `robot_state_publisher`、载入 `visualizer/rviz/view_10dof_ik.rviz` 预设，并打开终端数据交互控制台。
+自动拉起 `robot_state_publisher` 广播全机身 TF 树，并载入 `visualizer/rviz/view_10dof_ik.rviz`。
 
 ---
 
@@ -340,7 +339,7 @@ bash scripts/run_10dof_rviz.sh
 运行 53 自由度 MuJoCo 物理仿真，加载官方场景与预训练双足平衡运动控制策略：
 
 ```bash
-bash scripts/run_mujoco.sh
+python3 simulation/deploy_mujoco53.py
 ```
 
 - 仿真配置文件位于 `config/g1_53.yaml`。
@@ -348,16 +347,12 @@ bash scripts/run_mujoco.sh
 
 ---
 
-### 方式五：启动 MoveIt 2 OMPL 运动规划流水线 (RRTConnect / RRT* / PRM)
+### 方式五：无头 (Headless) 模式启动 MoveIt 2 规划服务
 
-在 ROS 2 环境中一键启动 MoveIt 2 `move_group` 运动规划服务与 OMPL 规划管道：
+若仅需要 MoveIt 2 后台服务与外部规划管道联动（无需 RViz2 GUI）：
 
 ```bash
-# 无头 Headless 模式 (推荐作为服务端或与其他节点联动时使用)
-bash scripts/run_moveit_ompl.sh
-
-# 带 RViz2 桌面端 3D 交互界面
-bash scripts/run_moveit_ompl.sh --rviz
+ros2 launch launch/g1_moveit_ompl.launch.py rviz:=false
 ```
 
 启动后提供标准 MoveIt 2 服务接口：
@@ -438,7 +433,7 @@ python3 benchmarks/ptp_planning.py --sweep-z --plot
 
 ### 7.4 MoveIt 2 OMPL 全局运动规划与动态避障基准评测
 
-在后台启动 MoveIt 2 服务后（`bash scripts/run_moveit_ompl.sh`），执行以下演示与性能基准脚本：
+在后台启动 MoveIt 2 服务后（`ros2 launch launch/g1_moveit_ompl.launch.py`），执行以下演示与性能基准脚本：
 
 ```bash
 python3 benchmarks/ompl_planning_demo.py
@@ -470,7 +465,7 @@ python3 benchmarks/ompl_planning_demo.py
 ## 8. 常见问题排查 (FAQ)
 
 ### Q1: 启动 Web 看板提示端口被占用 (Address already in use)？
-脚本 `run_web_dashboard.sh` 已内置自动检测与端口释放机制。若需要手动释放端口，可执行：
+`launch/g1_telemetry_system.launch.py` 已内置进程生命周期管理。若需要手动释放残留端口，可执行：
 ```bash
 fuser -k 8080/tcp
 ```

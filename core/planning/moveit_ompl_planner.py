@@ -35,8 +35,10 @@ import numpy as np
 # ROS 2 与 MoveIt 消息包
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionClient
 from geometry_msgs.msg import Pose, Point, Quaternion
 from trajectory_msgs.msg import JointTrajectory
+from control_msgs.action import FollowJointTrajectory
 from shape_msgs.msg import SolidPrimitive
 
 import moveit_msgs.msg
@@ -79,6 +81,8 @@ class PlanResult:
     timestamps: List[float] = field(default_factory=list)
     error_code: int = 1
     error_message: str = ""
+    ik_solution: Optional[Dict[str, float]] = None
+    ik_time_ms: float = 0.0
 
     def summary(self) -> str:
         """格式化输出规划指标摘要"""
@@ -86,8 +90,9 @@ class PlanResult:
             return f"[OMPL 规划失败] 错误码: {self.error_code} | 原因: {self.error_message}"
         num_pts = len(self.waypoints)
         total_time = self.timestamps[-1] if self.timestamps else 0.0
+        ik_str = f" | 前置 Pink IK: {self.ik_time_ms:.1f}ms" if self.ik_time_ms > 0 else ""
         return (
-            f"[OMPL 规划成功] 耗时: {self.planning_time * 1000.0:.2f}ms | "
+            f"[OMPL 规划成功] 耗时: {self.planning_time * 1000.0:.2f}ms{ik_str} | "
             f"路标点: {num_pts} 个 | 轨迹执行时长: {total_time:.2f}s | "
             f"受控关节数: {len(self.joint_names)}"
         )
@@ -131,6 +136,7 @@ class MoveItOMPLPlanner:
 
         # 场景中已添加障碍物缓存
         self._attached_obstacles: List[str] = []
+        self._pink_solver = None
 
         if wait_for_services:
             self._wait_for_services(timeout_sec)
@@ -140,11 +146,11 @@ class MoveItOMPLPlanner:
         self.node.get_logger().info("正在连接 MoveIt 2 规划服务 (/plan_kinematic_path)...")
         ready = self.plan_service_client.wait_for_service(timeout_sec=timeout_sec)
         if ready:
-            self.node.get_logger().info("✔️ 成功接入 MoveIt 2 OMPL 规划服务端！")
+            self.node.get_logger().info("[OK] 成功接入 MoveIt 2 OMPL 规划服务端！")
         else:
             self.node.get_logger().warn(
-                f"⚠️ 未检测到 /plan_kinematic_path 服务（等待超时 {timeout_sec}s）。"
-                "请确保已启动 MoveIt move_group 节点 (bash scripts/run_moveit_ompl.sh)。"
+                f"[WARN] 未检测到 /plan_kinematic_path 服务（等待超时 {timeout_sec}s）。"
+                "请确保已启动 MoveIt move_group 节点 (ros2 launch launch/g1_moveit_ompl.launch.py)。"
             )
 
     # ==========================================================================
@@ -244,8 +250,118 @@ class MoveItOMPLPlanner:
         # 发起调用并返回解析结果
         return self._call_motion_planner(req)
 
+    def _get_pink_solver(self):
+        """惰性加载 Pink 高精度凸优化求解器"""
+        if self._pink_solver is None:
+            from core.solver.g1_pink_ik import G1PinkIKSolver
+            self._pink_solver = G1PinkIKSolver()
+        return self._pink_solver
+
     # ==========================================================================
-    # 核心规划接口 2: 关节空间目标配置规划
+    # 核心规划接口 2: MoveIt 2 链路 + Pink IK 深度协同闭环规划
+    # ==========================================================================
+    def plan_to_pose_with_pink_ik(
+        self,
+        group_name: str,
+        target_pos: Union[List[float], np.ndarray],
+        target_rpy: Optional[Union[List[float], np.ndarray]] = None,
+        target_quat: Optional[Union[List[float], Tuple[float, ...]]] = None,
+        planner_id: str = "RRTConnectkConfigDefault",
+        allowed_planning_time: float = 5.0,
+        num_planning_attempts: int = 5,
+        start_joints: Optional[Dict[str, float]] = None,
+        tolerance: float = 0.01,
+        seed_waist: Optional[np.ndarray] = None,
+        seed_arm: Optional[np.ndarray] = None,
+    ) -> PlanResult:
+        """
+        【MoveIt 2 链路 + Pink IK 混合规划管道】
+        1. 首先通过 Pink 10-DoF/7-DoF 凸优化求解器求解最佳全局关节构型
+           （实现手臂优先、腰部辅助、CoM 质心稳定、关节硬限位 100% 遵守）；
+        2. 将精准目标构型作为关节空间目标注入 MoveIt 2 OMPL 规划管道；
+        3. 由 MoveIt 2 OMPL (RRTConnect / RRT*) 负责环境全局避障与时间最优平滑轨迹规划。
+        """
+        import pinocchio as pin
+        solver = self._get_pink_solver()
+        t0 = time.time()
+
+        pos = np.array(target_pos, dtype=np.float64)
+        rot = None
+        if target_quat is not None and len(target_quat) == 4:
+            qx, qy, qz, qw = [float(v) for v in target_quat]
+            if qx**2 + qy**2 + qz**2 + qw**2 > 1e-4:
+                rot = pin.Quaternion(qw, qx, qy, qz).normalized().toRotationMatrix()
+        elif target_rpy is not None and len(target_rpy) == 3:
+            rot = pin.rpy.rpyToMatrix(float(target_rpy[0]), float(target_rpy[1]), float(target_rpy[2]))
+
+        arm_id = "left_arm" if "left" in group_name else "right_arm"
+        arm_names = solver.left_arm_joint_names if arm_id == "left_arm" else solver.right_arm_joint_names
+
+        # 区分 7-DoF 与 10-DoF 规划组
+        if group_name in ("left_arm_torso", "right_arm_torso"):
+            ok, w_sol, a_sol, ik_info = solver.solve_10dof_ik(
+                arm=arm_id,
+                target_pos=pos,
+                target_rot=rot,
+                seed_waist=seed_waist,
+                seed_arm=seed_arm,
+            )
+            if not ok or ik_info.pos_err_mm > 5.0:
+                dt_ik = (time.time() - t0) * 1000.0
+                return PlanResult(
+                    success=False,
+                    planning_time=time.time() - t0,
+                    error_code=-31,
+                    error_message=f"Pink IK 10-DoF 前置逆解失败 (残差: {ik_info.pos_err_mm:.2f}mm, 耗时: {dt_ik:.1f}ms)",
+                )
+            target_joints = {}
+            for name, val in zip(solver.waist_joint_names, w_sol):
+                target_joints[name] = float(val)
+            for name, val in zip(arm_names, a_sol):
+                target_joints[name] = float(val)
+
+        elif group_name in ("left_arm", "right_arm"):
+            ok, a_sol, ik_info = solver.solve_ik(
+                arm=arm_id,
+                target_pos=pos,
+                target_rot=rot,
+                seed_chain=seed_arm,
+            )
+            if not ok or ik_info.pos_err_mm > 5.0:
+                dt_ik = (time.time() - t0) * 1000.0
+                return PlanResult(
+                    success=False,
+                    planning_time=time.time() - t0,
+                    error_code=-31,
+                    error_message=f"Pink IK 7-DoF 前置逆解失败 (残差: {ik_info.pos_err_mm:.2f}mm, 耗时: {dt_ik:.1f}ms)",
+                )
+            target_joints = {name: float(val) for name, val in zip(arm_names, a_sol)}
+        else:
+            return PlanResult(
+                success=False,
+                planning_time=0.0,
+                error_message=f"未知的规划组: {group_name}",
+            )
+
+        ik_time_ms = (time.time() - t0) * 1000.0
+
+        # 将 Pink IK 求解得到的精确实体构型交由 MoveIt 2 OMPL 生成无碰撞轨迹
+        plan_res = self.plan_to_joints(
+            group_name=group_name,
+            target_joints=target_joints,
+            planner_id=planner_id,
+            allowed_planning_time=allowed_planning_time,
+            num_planning_attempts=num_planning_attempts,
+            start_joints=start_joints,
+            tolerance=tolerance,
+        )
+
+        plan_res.ik_solution = target_joints
+        plan_res.ik_time_ms = ik_time_ms
+        return plan_res
+
+    # ==========================================================================
+    # 核心规划接口 3: 关节空间目标配置规划
     # ==========================================================================
     def plan_to_joints(
         self,
@@ -504,3 +620,36 @@ class MoveItOMPLPlanner:
             return Quaternion(x=x, y=y, z=z, w=w)
 
         return None
+
+    # ==========================================================================
+    # 轨迹执行控制器接口 (实时驱动 RViz2 中的 3D 模型平滑运动)
+    # ==========================================================================
+    def execute_plan(self, plan_res: PlanResult, group_name: str, timeout_sec: float = 10.0) -> bool:
+        """
+        将规划生成的无碰撞轨迹发送至 FollowJointTrajectory 控制器执行，
+        实时更新 /joint_states 并在 RViz2 桌面端驱动 3D 机器人模型动态平滑运动。
+        """
+        if not plan_res.success or plan_res.trajectory is None:
+            self.node.get_logger().error("无法执行轨迹：规划结果为空或规划失败")
+            return False
+
+        action_name = f"{group_name}_controller/follow_joint_trajectory"
+        action_client = ActionClient(self.node, FollowJointTrajectory, action_name)
+        if not action_client.wait_for_server(timeout_sec=3.0):
+            self.node.get_logger().error(f"控制器 Action Server 未就绪: {action_name}")
+            return False
+
+        goal_msg = FollowJointTrajectory.Goal()
+        goal_msg.trajectory = plan_res.trajectory
+
+        future = action_client.send_goal_async(goal_msg)
+        self._spin_until_future_complete(future, timeout_sec=2.0)
+        goal_handle = future.result()
+        if not goal_handle or not goal_handle.accepted:
+            self.node.get_logger().error("控制器拒绝了轨迹执行请求")
+            return False
+
+        res_future = goal_handle.get_result_async()
+        total_dur = plan_res.timestamps[-1] if plan_res.timestamps else 5.0
+        self._spin_until_future_complete(res_future, timeout_sec=total_dur + 5.0)
+        return True

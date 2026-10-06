@@ -51,7 +51,7 @@ def test_pinocchio_model_reduction():
     err_J = np.linalg.norm(J_red - J_full_sub)
     print(f"  Jacobian 矩阵残差: {err_J:.2e}")
     assert err_J < 1e-6, f"裁剪模型雅可比不一致: {err_J}"
-    print("  ✔️ 10-DoF 裁剪子模型验证完全通过！")
+    print("  [OK] 10-DoF 裁剪子模型验证完全通过！")
 
 
 def test_pinocchio_com_and_balance():
@@ -75,7 +75,7 @@ def test_pinocchio_com_and_balance():
     print(f"  过度前倾姿态质心: {bal_lean['com_pos']} m")
     print(f"  前倾平衡裕度: {bal_lean['margin_mm']} mm, 状态: {bal_lean['status']}")
     assert bal_lean["com_pos"][0] > bal["com_pos"][0], "弯腰前倾时质心 X 必须前移"
-    print("  ✔️ 全身质心与体态平衡评估验证通过！")
+    print("  [OK] 全身质心与体态平衡评估验证通过！")
 
 
 def test_pinocchio_gravity_and_dynamics():
@@ -91,7 +91,7 @@ def test_pinocchio_gravity_and_dynamics():
     assert len(tau_g) == 10
     # 腰部俯仰电机抵抗上半身重量，力矩应显著非零
     assert abs(tau_g[2]) > 0.5, f"腰部俯仰重力力矩过小: {tau_g[2]}"
-    print("  ✔️ 广义重力补偿力矩测试通过！")
+    print("  [OK] 广义重力补偿力矩测试通过！")
 
 
 def test_pinocchio_manipulability():
@@ -105,7 +105,7 @@ def test_pinocchio_manipulability():
     print(f"  可操作度指标 w: {manip['yoshikawa']}, 最小奇异值: {manip['min_singular_value']}")
     assert manip["yoshikawa"] > 0.01, f"就绪姿态可操作度异常: {manip['yoshikawa']}"
     assert not manip["is_singular"], "就绪姿态不应为奇异点"
-    print("  ✔️ 可操作度与奇异点分析测试通过！")
+    print("  [OK] 可操作度与奇异点分析测试通过！")
 
 
 def test_pink_ik_with_com_balance():
@@ -132,7 +132,7 @@ def test_pink_ik_with_com_balance():
         assert "gravity_torques" in info, "返回字典缺少 gravity_torques"
         assert "manipulability" in info, "返回字典缺少 manipulability"
 
-    print("  ✔️ Pink IK 求解与 CoM 平衡零空间约束验证完全通过！")
+    print("  [OK] Pink IK 求解与 CoM 平衡零空间约束验证完全通过！")
 
 
 if __name__ == "__main__":
@@ -142,5 +142,5 @@ if __name__ == "__main__":
     test_pinocchio_manipulability()
     test_pink_ik_with_com_balance()
     print("======================================================================")
-    print("🎉 所有 Pinocchio 动力学、平衡安全与求解器集成测试 100% 成功！")
+    print("[SUCCESS] 所有 Pinocchio 动力学、平衡安全与求解器集成测试 100% 成功！")
     print("======================================================================")

@@ -29,7 +29,7 @@ from core.planning.moveit_ompl_planner import MoveItOMPLPlanner
 
 def run_ompl_demo(use_home: bool = False):
     print("=" * 80)
-    print(" 🚀 Unitree G1 MoveIt 2 OMPL 全局运动规划基准演示")
+    print(" [START] Unitree G1 MoveIt 2 OMPL 全局运动规划基准演示")
     print("=" * 80)
 
     # 1. 初始化 ROS 2 客户端
@@ -40,12 +40,12 @@ def run_ompl_demo(use_home: bool = False):
     planner = MoveItOMPLPlanner(node=node, wait_for_services=True, timeout_sec=5.0)
 
     if not planner.plan_service_client.service_is_ready():
-        print("\n❌ 错误: MoveIt 规划服务 (/plan_kinematic_path) 未就绪！")
-        print("💡 请先在另一个终端窗口中启动 MoveIt 服务端：")
-        print("   bash scripts/run_moveit_ompl.sh\n")
+        print("\n[FAIL] 错误: MoveIt 规划服务 (/plan_kinematic_path) 未就绪！")
+        print("[INFO] 请先在另一个终端窗口中启动 MoveIt 服务端：")
+        print("   ros2 launch launch/g1_moveit_ompl.launch.py\n")
         return
 
-    print("✔️ MoveIt 2 OMPL 规划服务端已就绪，开始测试流水线...")
+    print("[OK] MoveIt 2 OMPL 规划服务端已就绪，开始测试流水线...")
 
     # 起始姿态选择：默认完全遵循 MoveIt 规范从 /joint_states 实时当前姿态规划；可选固定基准姿态
     ready_joints = {
@@ -83,11 +83,11 @@ def run_ompl_demo(use_home: bool = False):
     )
 
     if res1.success:
-        print(f"  ✔️ {res1.summary()}")
+        print(f"  [OK] {res1.summary()}")
         print(f"  • 第一路标点关节角: {np.round(res1.waypoints[0], 3)}")
         print(f"  • 终点路标点关节角: {np.round(res1.waypoints[-1], 3)}")
     else:
-        print(f"  ❌ 规划失败: {res1.error_message}")
+        print(f"  [FAIL] 规划失败: {res1.error_message}")
 
     # ──────────────────────────────────────────────────────────────────────────
     # 【测试 2】10-DoF 躯干-手臂协同大跨度规划 (left_arm_torso, RRTConnect)
@@ -106,10 +106,10 @@ def run_ompl_demo(use_home: bool = False):
     )
 
     if res2.success:
-        print(f"  ✔️ {res2.summary()}")
+        print(f"  [OK] {res2.summary()}")
         print(f"  • 受控关节列表 (含腰部): {res2.joint_names}")
     else:
-        print(f"  ❌ 规划失败: {res2.error_message}")
+        print(f"  [FAIL] 规划失败: {res2.error_message}")
 
     # ──────────────────────────────────────────────────────────────────────────
     # 【测试 3】动态注入障碍物并执行避障绕行规划 (Obstacle Avoidance)
@@ -177,7 +177,7 @@ def run_ompl_demo(use_home: bool = False):
     # 汇总输出性能对比表
     # ──────────────────────────────────────────────────────────────────────────
     print("\n" + "=" * 80)
-    print(" 📊 MoveIt 2 OMPL 规划性能总结报表")
+    print(" [METRICS] MoveIt 2 OMPL 规划性能总结报表")
     print("=" * 80)
     print(f"{'测试项':<32} | {'规划组':<16} | {'算法':<12} | {'成功':<6} | {'耗时(ms)':<10} | {'路标点数'}")
     print("-" * 90)
@@ -189,7 +189,7 @@ def run_ompl_demo(use_home: bool = False):
         ("渐进最优路径优化评测", "left_arm", "RRT*", res4_star.success, res4_star.planning_time * 1000.0, len(res4_star.waypoints)),
     ]
     for name, group, algo, succ, ms, pts in items:
-        status_str = "✔️ YES" if succ else "❌ NO"
+        status_str = "[OK] YES" if succ else "[FAIL] NO"
         print(f"{name:<32} | {group:<16} | {algo:<12} | {status_str:<6} | {ms:<10.2f} | {pts}")
     print("=" * 90)
 
