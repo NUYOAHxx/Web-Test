@@ -261,7 +261,8 @@ class HumanoidKinematicsAdapter:
             raise ValueError(f"腰部驱动轴必须严格为 2 自由度 (Yaw, Pitch)，当前检测到 {self.waist_dim} 轴")
 
         self.waist_q_indices: List[int] = [
-            self.model.getJointId(name) - 1 for name in self.waist_joint_names
+            self.model.joints[self.model.getJointId(name)].idx_q
+            for name in self.waist_joint_names
         ]
 
         # ── 2. 手臂关节定义 (左右臂各 7-DoF) ──
@@ -328,7 +329,7 @@ class HumanoidKinematicsAdapter:
         )
 
         self.arm_q_indices: Dict[str, List[int]] = {
-            arm: [self.model.getJointId(name) - 1 for name in jnames]
+            arm: [self.model.joints[self.model.getJointId(name)].idx_q for name in jnames]
             for arm, jnames in self.arm_joint_names.items()
         }
 
@@ -341,10 +342,6 @@ class HumanoidKinematicsAdapter:
         # ── 5. 9-DoF 协同链 (2-DoF 腰部 + 7-DoF 机械臂) ──
         self.chain_coord_joint_names: Dict[str, List[str]] = {
             arm: self.waist_joint_names + self.arm_joint_names[arm]
-            for arm in ["left_arm", "right_arm"]
-        }
-        self.chain_coord_indices: Dict[str, List[int]] = {
-            arm: self.waist_q_indices + self.arm_q_indices[arm]
             for arm in ["left_arm", "right_arm"]
         }
         self.limits_coord: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
@@ -485,7 +482,6 @@ class HumanoidPinkIKSolver:
         self.waist_joint_names: List[str] = self.kin.waist_joint_names
         self.waist_dim: int = self.kin.waist_dim  # 严格为 2
         self.waist_limits: Tuple[np.ndarray, np.ndarray] = self.kin.waist_limits
-        self.waist_q_indices: List[int] = self.kin.waist_q_indices
 
         self.arm_joint_names: Dict[str, List[str]] = self.kin.arm_joint_names
         self.ee_frame_names: Dict[str, str] = self.kin.ee_frame_names
@@ -587,14 +583,14 @@ class HumanoidPinkIKSolver:
     ) -> IKSolveStatus:
         """纯函数式状态分类机。"""
         if not within_limits:
-            return IKSolveStatus.JOINT_LIMIT_VIOLATION
+            return IKSolveStatus.JOINT_LIMIT_VIOLATION    # 关节限位违反
         if is_success:
-            return IKSolveStatus.CONVERGED
+            return IKSolveStatus.CONVERGED                # 成功收敛
         if allow_relaxation and has_rot and fin_ep < pos_tol and fin_er < relaxed_rot_tol:
-            return IKSolveStatus.RELAXED_ORIENTATION
+            return IKSolveStatus.RELAXED_ORIENTATION    # 允许放宽
         if fin_ep < pos_tol and has_rot and fin_er >= rot_tol:
-            return IKSolveStatus.POSITION_REACHED_ONLY
-        return IKSolveStatus.MAX_ITERATIONS_EXCEEDED
+            return IKSolveStatus.POSITION_REACHED_ONLY  # 位置已达到，方向未达到
+        return IKSolveStatus.MAX_ITERATIONS_EXCEEDED    # 达到最大迭代次数
 
     def _validate_target_pos(
         self,
@@ -764,7 +760,6 @@ class HumanoidPinkIKSolver:
         cost_posture: np.ndarray,
         lower_limit: np.ndarray,
         upper_limit: np.ndarray,
-        waist_q_base: np.ndarray,
         pos_tol: float,
         rot_tol: float,
         max_iters: int,
@@ -930,7 +925,7 @@ class HumanoidPinkIKSolver:
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
         # 分割腰部解与手臂解
-        w_q = best_q[:self.waist_dim] if is_coord else waist_q_base
+        w_q = best_q[:self.waist_dim] if is_coord else None
         a_q = best_q[self.waist_dim:] if is_coord else best_q
 
         telemetry = self._extract_solution_telemetry(
@@ -1044,7 +1039,6 @@ class HumanoidPinkIKSolver:
             cost_posture=cost_posture,
             lower_limit=lower_limit,
             upper_limit=upper_limit,
-            waist_q_base=np.zeros(self.waist_dim),
             pos_tol=pos_tol,
             rot_tol=rot_tol,
             max_iters=max_iters,
@@ -1145,8 +1139,8 @@ class HumanoidPinkIKSolver:
                 return True, waist_zero, q_arm_7, info_7
 
         # ── 连续过渡区域激活权重计算 (C2 Smoothstep) ──
-        d_near = 0.300
-        d_far = 0.385
+        d_near = 0.300      # 舒适区距离
+        d_far = 0.385       # 过渡区距离
         if dist_to_shoulder <= d_near:
             mu = 0.0
             stage_name = "ARM_COMFORT_ZONE"
@@ -1159,21 +1153,21 @@ class HumanoidPinkIKSolver:
             stage_name = "CASCADE_SMOOTH_TRANSITION"
 
         # 2-DoF 腰部各向异性动态阻尼刚度: [Yaw(偏航), Pitch(俯仰)]
-        w_lock = np.array([0.080, 0.120]) * (float(waist_weight) / 10.0)
-        w_assist = np.array([1.5e-4, 3.0e-4]) * float(waist_weight)
+        w_lock = np.array([0.080, 0.120]) * (float(waist_weight) / 10.0)      # 锁定腰部权重
+        w_assist = np.array([1.5e-4, 3.0e-4]) * (float(waist_weight) / 10.0)
         waist_weights = w_lock * (1.0 - mu) + w_assist * mu
 
         lower_limit, upper_limit = (
             custom_limits if custom_limits is not None else self.limits_coord[arm]
         )
 
-        ready_arm = self.ready_pose[arm]
-        ready_coord = np.concatenate([np.zeros(self.waist_dim), ready_arm])
+        ready_arm = self.ready_pose[arm]        # 准备姿态
+        ready_coord = np.concatenate([np.zeros(self.waist_dim), ready_arm]) 
         n = self.waist_dim + len(ready_arm)
 
-        seed_chain, seed_names = self._build_seed_chain(
-            is_coord=True,
-            arm=arm,
+        seed_chain, seed_names = self._build_seed_chain(        # 构建种子链
+            is_coord=True,      # 协调模式
+            arm=arm,            
             ready_q=ready_coord,
             lower_limit=lower_limit,
             upper_limit=upper_limit,
@@ -1181,30 +1175,29 @@ class HumanoidPinkIKSolver:
             seed_arm=seed_arm,
         )
 
-        cost_posture = np.ones(n) * 1e-4
-        cost_posture[:self.waist_dim] = waist_weights
+        cost_posture = np.ones(n) * 1e-4            # 姿态成本
+        cost_posture[:self.waist_dim] = waist_weights       # 腰部成本
 
-        ok_coord, q_sol, info_coord = self._solve_qp_core(
+        ok_coord, q_sol, info_coord = self._solve_qp_core(          # 核心 IK 求解过程
             arm=arm,
-            is_coord=True,
-            target_pos=pos_arr,
-            target_rot=target_rot,
-            seed_chain=seed_chain,
-            seed_names=seed_names,
-            ready_q=ready_coord,
-            cost_posture=cost_posture,
-            lower_limit=lower_limit,
-            upper_limit=upper_limit,
-            waist_q_base=np.zeros(self.waist_dim),
-            pos_tol=pos_tol,
-            rot_tol=rot_tol,
-            max_iters=max_iters,
-            max_step=max_step,
-            start_time=start_time,
+            is_coord=True,  
+            target_pos=pos_arr,             # 目标位置
+            target_rot=target_rot,          # 目标旋转
+            seed_chain=seed_chain,          # 种子链
+            seed_names=seed_names,          # 种子名称
+            ready_q=ready_coord,            # 准备姿态
+            cost_posture=cost_posture,      # 姿态成本
+            lower_limit=lower_limit,        # 下限
+            upper_limit=upper_limit,        # 上限
+            pos_tol=pos_tol,                # 位置容忍度
+            rot_tol=rot_tol,                # 旋转容忍度
+            max_iters=max_iters,            # 最大迭代次数
+            max_step=max_step,              # 最大步长
+            start_time=start_time,          # 开始时间
             allow_relaxation=allow_relaxation,
         )
 
-        waist_sol = q_sol[:self.waist_dim].copy()
+        waist_sol = q_sol[:self.waist_dim].copy()       
         arm_sol = q_sol[self.waist_dim:].copy()
         info_coord.cascade_stage = stage_name
         info_coord.waist_solution = waist_sol
@@ -1212,17 +1205,14 @@ class HumanoidPinkIKSolver:
 
         return ok_coord, waist_sol, arm_sol, info_coord
 
-    # 方法别名
-    solve_9dof_ik = solve_coordinated_ik
-
 
 __all__ = [
-    "HumanoidPinkIKSolver",
-    "HumanoidKinematicsAdapter",
-    "IKSolveStatus",
-    "IKResult",
-    "IK_PIPELINE_STAGES",
-    "DEFAULT_HUMANOID_WAIST_LIMITS",
-    "DEFAULT_HUMANOID_ARM_LIMITS",
-    "DEFAULT_HUMANOID_READY_POSE",
+    "HumanoidPinkIKSolver",             # 核心 IK 求解器类
+    "HumanoidKinematicsAdapter",      # 机械臂正逆运动学计算类
+    "IKSolveStatus",                  # IK 求解状态枚举
+    "IKResult",                         # IK 求解结果类
+    "IK_PIPELINE_STAGES",             # IK 求解流程阶段常量
+    "DEFAULT_HUMANOID_WAIST_LIMITS",    # 腰部 2-DoF 默认限位 (Yaw/Pitch)
+    "DEFAULT_HUMANOID_ARM_LIMITS",      # 标准 7-DoF 机械臂通用硬件限位参考
+    "DEFAULT_HUMANOID_READY_POSE",      # 人形机器人默认待机/准备姿态
 ]
