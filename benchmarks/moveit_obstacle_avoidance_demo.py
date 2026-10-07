@@ -36,7 +36,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 from moveit_msgs.msg import DisplayTrajectory, RobotTrajectory
 
 from core.planning.moveit_ompl_planner import MoveItOMPLPlanner, PlanResult
-from core.solver.g1_pink_ik import G1PinkIKSolver, G1_DEFAULT_STAND_JOINTS
+from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
+from core.kinematics.g1_model import G1_DEFAULT_STAND_JOINTS
 from visualizer.rviz.markers import create_sphere_marker, create_pose_stamped
 
 
@@ -46,11 +47,11 @@ class MoveItAvoidanceInspector:
     def __init__(self, node: Node):
         self.node = node
         print("─" * 80)
-        print(" [SYSTEM CHECK] 正在连接 MoveIt 2 与 Pink IK 核心通信总线...")
+        print(" [SYSTEM CHECK] 正在连接 MoveIt 2 与通用 Humanoid Pink IK 核心通信总线...")
         print("─" * 80)
 
         self.planner = MoveItOMPLPlanner(node=self.node, wait_for_services=True, timeout_sec=6.0)
-        self.solver = G1PinkIKSolver()
+        self.solver = HumanoidPinkIKSolver()
 
         # 3D 视觉标记与路径广播发布者
         self.pub_target_pose = self.node.create_publisher(PoseStamped, "/g1/kinematics/target_pose", 10)
@@ -176,11 +177,12 @@ class MoveItAvoidanceInspector:
             print("\n[阶段 1/4] [SCENE] 自由空间工况 (无动态障碍物)")
 
         # 步骤 2: 使用现有的 Pink IK 求解目标关节角度 (10-DoF / 7-DoF)
-        print("\n[阶段 2/4] [IK SOLVER] 调用现有的 Pink IK Solver 进行前置逆运动学解算...")
+        # 步骤 2: 使用通用的 Humanoid Pink IK 求解目标关节角度 (通用 9-DoF / 7-DoF)
+        print("\n[阶段 2/4] [IK SOLVER] 调用通用 Humanoid Pink IK 求解器进行前置逆运动学解算...")
         t_ik_start = time.perf_counter()
         arm_name = "left_arm"
         if "torso" in group_name:
-            ok_ik, waist_q, arm_q, ik_info = self.solver.solve_10dof_ik(
+            ok_ik, waist_q, arm_q, ik_info = self.solver.solve_coordinated_ik(
                 arm=arm_name,
                 target_pos=target_pos,
                 target_rpy=target_rpy,
@@ -190,13 +192,13 @@ class MoveItAvoidanceInspector:
             ik_time_ms = (time.perf_counter() - t_ik_start) * 1000.0
             if not ok_ik:
                 self._publish_target_visualization(target_pos, target_rpy, success=False)
-                print(f"  [FAIL] Pink IK 求解失败: 残差={ik_info.get('pos_err_mm', 0):.2f}mm (目标球已在 RViz2 标红显示不可达)")
+                print(f"  [FAIL] 通用 Pink IK (9-DoF) 求解失败: 残差={ik_info.get('pos_err_mm', 0):.2f}mm (目标球已在 RViz2 标红显示不可达)")
                 return False
 
             target_joint_dict = {
                 "waist_yaw_joint": float(waist_q[0]),
-                "waist_roll_joint": float(waist_q[1]),
-                "waist_pitch_joint": float(waist_q[2]),
+                "waist_roll_joint": 0.0,  # 通用 9-DoF 架构标准：腰部侧倾 Roll 严格锁定为 0.0，杜绝重心失稳
+                "waist_pitch_joint": float(waist_q[1]),
                 "left_shoulder_pitch_joint": float(arm_q[0]),
                 "left_shoulder_roll_joint": float(arm_q[1]),
                 "left_shoulder_yaw_joint": float(arm_q[2]),
@@ -205,10 +207,16 @@ class MoveItAvoidanceInspector:
                 "left_wrist_pitch_joint": float(arm_q[5]),
                 "left_wrist_yaw_joint": float(arm_q[6]),
             }
+            stage = ik_info.get("cascade_stage", "9DOF_COORDINATED")
             w_deg = [round(float(np.degrees(v)), 1) for v in waist_q]
-            print(f"  [OK] Pink IK 10-DoF 解算成功! 耗时: {ik_time_ms:.2f}ms")
-            print(f"  • 几何残差: 位置误差 = {ik_info.get('pos_err_mm', 0):.3f} mm, 姿态误差 = {ik_info.get('rot_err_deg', 0):.2f}°")
-            print(f"  • 腰部协同介入: Yaw={w_deg[0]}°, Roll={w_deg[1]}°, Pitch={w_deg[2]}° (阶段: {ik_info.get('cascade_stage', 'COORDINATED')})")
+            if stage == "ARM_UPRIGHT_PRIORITY":
+                print(f"  [OK] 通用 Pink IK 解算成功! 【阶段: 单臂直立优先 (7-DoF Arm Only)】 耗时: {ik_time_ms:.2f}ms")
+                print(f"  • 几何残差: 位置误差 = {ik_info.get('pos_err_mm', 0):.3f} mm, 姿态误差 = {ik_info.get('rot_err_deg', 0):.2f}°")
+                print(f"  • 腰部状态: 严格直立锁定 Yaw=0.0°, Roll=0.0°(锁定), Pitch=0.0° (零腰动、零质心扰动)")
+            else:
+                print(f"  [OK] 通用 Pink IK 9-DoF 解算成功! 【阶段: 躯干协同扩展 (9-DoF Coordinated)】 耗时: {ik_time_ms:.2f}ms")
+                print(f"  • 几何残差: 位置误差 = {ik_info.get('pos_err_mm', 0):.3f} mm, 姿态误差 = {ik_info.get('rot_err_deg', 0):.2f}°")
+                print(f"  • 腰部协同介入: Yaw={w_deg[0]}°, Roll=0.0°(通用防侧倾锁定), Pitch={w_deg[1]}°")
             print(f"  • 手臂肘部构型: Elbow = {np.degrees(arm_q[3]):.1f}°")
         else:
             ok_ik, arm_q, ik_info = self.solver.solve_ik(
@@ -291,19 +299,19 @@ class MoveItAvoidanceInspector:
 
 
 def get_preset_scenarios():
-    """定义经典的预置避障与协同测试工况库"""
+    """定义经典的预置避障与协同测试工况库 (适配通用人形 9-DoF 运动学流形)"""
     return [
         {
             "title": "工况 1: 前置立柱障碍物大弧度绕行抓取 (Cylinder Bypass)",
             "desc": "在机械臂行进正前方设置阻挡立柱，如果不避障将直接穿透撞击；OMPL 必须规划出绕开立柱的外侧弧形无碰撞轨迹",
-            "target_pos": [0.45, 0.22, 0.82],
+            "target_pos": [0.38, 0.22, 0.82],
             "target_rpy": [0.0, np.radians(15.0), 0.0],
             "group": "left_arm_torso",
             "obstacles": [
                 {
                     "type": "cylinder",
                     "id": "column_obstacle",
-                    "pos": [0.28, 0.22, 0.78],
+                    "pos": [0.26, 0.22, 0.78],
                     "radius": 0.045,
                     "height": 0.22,
                 }
@@ -311,23 +319,23 @@ def get_preset_scenarios():
         },
         {
             "title": "工况 2: 桌面障碍物跨越式高低位下探拾取 (Table Barricade)",
-            "desc": "在手臂正下方放置水平桌面隔板，机械臂必须从上方跨越桌面边缘俯身探入低位，躯干大角度前屈协同",
-            "target_pos": [0.42, 0.22, 0.68],
-            "target_rpy": [0.0, np.radians(35.0), 0.0],
+            "desc": "在手臂正下方放置水平桌面隔板，机械臂必须从上方跨越桌面边缘俯身探入低位，躯干俯仰前屈协同",
+            "target_pos": [0.35, 0.22, 0.76],
+            "target_rpy": None,
             "group": "left_arm_torso",
             "obstacles": [
                 {
                     "type": "box",
                     "id": "desktop_slab",
-                    "pos": [0.42, 0.22, 0.58],
+                    "pos": [0.35, 0.22, 0.64],
                     "size": [0.30, 0.40, 0.04],
                 }
             ],
         },
         {
             "title": "工况 3: 远距离极限探取无障碍对比 (Long Reach Extreme)",
-            "desc": "突破单臂 38cm 极限到达 54cm 远端，验证腰部最大偏航/倾转协同与 OMPL 快速平滑连贯轨迹",
-            "target_pos": [0.54, 0.20, 0.85],
+            "desc": "通用 9-DoF (2腰+7臂) 极限大臂展探取，验证腰部偏航/俯仰最大协同与 OMPL 快速平滑轨迹",
+            "target_pos": [0.41, 0.20, 0.82],
             "target_rpy": [0.0, 0.0, 0.0],
             "group": "left_arm_torso",
             "obstacles": [],
@@ -348,14 +356,14 @@ def sample_random_scenario(
     round_idx: int = 1,
     with_obstacle: bool = False,
 ) -> dict:
-    """在可达工作空间内采样一个随机点场景"""
+    """在可达工作空间内采样一个随机点场景 (基于通用 9-DoF 求解器有效范围)"""
     target_pos = None
-    for _ in range(30):
-        rx = np.random.uniform(0.28, 0.50)
-        ry = np.random.uniform(0.14, 0.30)
-        rz = np.random.uniform(0.68, 0.88)
+    for _ in range(40):
+        rx = np.random.uniform(0.25, 0.41)
+        ry = np.random.uniform(0.14, 0.28)
+        rz = np.random.uniform(0.72, 0.88)
         cand_p = np.array([rx, ry, rz], dtype=np.float64)
-        ok, _, _, info = inspector.solver.solve_10dof_ik(
+        ok, _, _, info = inspector.solver.solve_coordinated_ik(
             arm="left_arm", target_pos=cand_p, waist_weight=8.0
         )
         if ok and info.get("pos_err_mm", 999) < 2.0:
@@ -363,7 +371,7 @@ def sample_random_scenario(
             break
 
     if target_pos is None:
-        target_pos = np.array([0.40, 0.22, 0.80], dtype=np.float64)
+        target_pos = np.array([0.35, 0.22, 0.82], dtype=np.float64)
 
     # 随机微小旋转姿态
     rand_pitch = np.random.uniform(0.0, 25.0)
@@ -521,7 +529,7 @@ def main():
     else:
         while rclpy.ok():
             print("\n" + "=" * 65)
-            print("  Unitree G1 MoveIt 2 + Pink IK 避障轨迹联调控制台")
+            print("  通用人形机器人 Humanoid 9-DoF Pink IK + MoveIt 2 联调控制台")
             print("=" * 65)
             for idx, sc in enumerate(presets, 1):
                 print(f"  [{idx}] {sc['title']}")
