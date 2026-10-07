@@ -173,12 +173,14 @@ UNITREE-G1-ROBOT-MODEL/
 │   │   ├── __init__.py             # 导出碰撞检测器
 │   │   └── g1_collision.py         # 28 对全机身自碰撞检测与 ~40μs 极速降维门禁
 │   ├── solver/                     # 逆运动学算法与 ROS 2 服务节点
-│   │   ├── __init__.py             # 导出求解器
-│   │   ├── g1_pink_ik.py           # Pink + ProxQP 10-DoF 协同加权逆解与级联直立姿态
+│   │   ├── __init__.py             # 导出求解器 (G1 10-DoF 与通用 9-DoF)
+│   │   ├── g1_pink_ik.py           # Unitree G1 专用 10-DoF (3腰+7臂) 全局协同逆解器
+│   │   ├── humanoid_pink_ik.py     # 通用人形机器人 9-DoF (2腰+7臂防侧倾) 独立逆解器
 │   │   └── g1_ik_node.py           # ROS 2 Headless 核心逆解服务节点
 │   └── planning/                   # 空间路径与运动规划
-│       ├── __init__.py             # 导出规划器 (MoveItOMPLPlanner, RRTStar3D)
+│       ├── __init__.py             # 导出规划器与高阶插值器
 │       ├── moveit_ompl_planner.py  # MoveIt 2 OMPL 工业级规划客户端封装
+│       ├── trajectory_interpolator.py # S-Curve (五次埃尔米特多项式 C^2 连续) 稠密插值器
 │       └── rrt_star.py             # 三维空间 RRT* 路径规划算法
 ├── visualizer/                     # 可视化与监控系统
 │   ├── web/                        # Web 实时高精度数字孪生遥测看板
