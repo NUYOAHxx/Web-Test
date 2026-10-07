@@ -80,3 +80,23 @@ def test_right_arm_mirror_reach(solver):
     assert ok, f"右臂协同求解失败: {res}"
     assert res.status == IKSolveStatus.CONVERGED
     assert res.pos_err_mm < 2.0
+
+
+def test_adaptive_workspace_thresholds(solver):
+    """测试基于 URDF 运动学自省的无量纲自适应工作空间距离计算。"""
+    # 1. 验证臂长有效几何链长自动提取
+    reach = solver.arm_reach_lengths["left_arm"]
+    assert 0.38 < reach < 0.43, f"G1 理论臂长应在 ~0.41m 附近，当前检测为: {reach}"
+
+    # 2. 验证默认比率下的 d_near 和 d_far
+    d_near, d_far = solver.get_workspace_thresholds("left_arm")
+    assert 0.28 < d_near < 0.32, f"自适应 d_near 应为 ~0.30m，当前为: {d_near}"
+    assert 0.37 < d_far < 0.40, f"自适应 d_far 应为 ~0.385m，当前为: {d_far}"
+
+    # 3. 验证自定义外部覆盖 (例如传入微型或重型机器人阈值)
+    custom_solver = HumanoidPinkIKSolver(
+        workspace_thresholds={"left_arm": (0.50, 0.65)}
+    )
+    c_near, c_far = custom_solver.get_workspace_thresholds("left_arm")
+    assert c_near == 0.50
+    assert c_far == 0.65

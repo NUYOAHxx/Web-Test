@@ -358,6 +358,7 @@ class HumanoidKinematicsAdapter:
         self.model_7dof: Dict[str, pin.Model] = {}
         self.data_7dof: Dict[str, pin.Data] = {}
         self.ee_frame_ids_7dof: Dict[str, int] = {}
+        self.arm_reach_lengths: Dict[str, float] = {}
 
         self._build_submodels()
 
@@ -388,6 +389,14 @@ class HumanoidKinematicsAdapter:
             self.model_7dof[arm] = red_7
             self.data_7dof[arm] = red_7.createData()
             self.ee_frame_ids_7dof[arm] = red_7.getFrameId(self.ee_frame_names[arm])
+
+            # 3. 自省提取单臂全展几何物理链长 (用于自适应无量纲工作空间划分)
+            chain_len = sum(
+                np.linalg.norm(red_7.jointPlacements[i].translation)
+                for i in range(2, len(red_7.jointPlacements))
+            )
+            chain_len += np.linalg.norm(red_7.frames[self.ee_frame_ids_7dof[arm]].placement.translation)
+            self.arm_reach_lengths[arm] = float(chain_len)
 
     def forward_kinematics_coord(
         self,
@@ -457,6 +466,8 @@ class HumanoidPinkIKSolver:
         kinematics: Optional[HumanoidKinematicsAdapter] = None,
         waist_joint_names: Optional[List[str]] = None,
         ready_pose: Optional[Dict[str, np.ndarray]] = None,
+        reach_ratios: Optional[Tuple[float, float]] = None,
+        workspace_thresholds: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> None:
         """初始化通用人形机器人逆解求解器。
 
@@ -464,6 +475,8 @@ class HumanoidPinkIKSolver:
         :param kinematics: 可选的预建运动学引擎适配器
         :param waist_joint_names: 自定义 2-DoF 腰部关节名 (默认: ['waist_yaw_joint', 'waist_pitch_joint'])
         :param ready_pose: 自定义就绪姿态字典 {"left_arm": array(7), "right_arm": array(7)}
+        :param reach_ratios: 自适应工作空间比例系数 (舒适区比例, 极限区比例)，默认 (0.73, 0.94)
+        :param workspace_thresholds: 可选的手动工作空间绝对阈值覆盖 {"left_arm": (d_near, d_far)}
         """
         if kinematics is None:
             self.kin = HumanoidKinematicsAdapter(
@@ -474,6 +487,8 @@ class HumanoidPinkIKSolver:
             self.kin = kinematics
 
         self.ready_pose = ready_pose or DEFAULT_HUMANOID_READY_POSE
+        self.reach_ratios: Tuple[float, float] = reach_ratios or (0.73, 0.94)
+        self.workspace_thresholds: Optional[Dict[str, Tuple[float, float]]] = workspace_thresholds
 
         # 核心运动学属性委托
         self.urdf_path: str = self.kin.urdf_path
@@ -487,6 +502,18 @@ class HumanoidPinkIKSolver:
         self.ee_frame_names: Dict[str, str] = self.kin.ee_frame_names
         self.limits_arm: Dict[str, Tuple[np.ndarray, np.ndarray]] = self.kin.limits_arm
         self.limits_coord: Dict[str, Tuple[np.ndarray, np.ndarray]] = self.kin.limits_coord
+        self.arm_reach_lengths: Dict[str, float] = self.kin.arm_reach_lengths
+
+    def get_workspace_thresholds(self, arm: str) -> Tuple[float, float]:
+        """获取指定操作臂的自适应工作空间距离门限 (d_near, d_far)。
+
+        基于机器人手臂几何物理全展链长与无量纲特征比例自适应计算，完全解耦绝对数值硬编码。
+        """
+        if self.workspace_thresholds and arm in self.workspace_thresholds:
+            return self.workspace_thresholds[arm]
+        reach = self.arm_reach_lengths.get(arm, 0.410)
+        r_near, r_far = self.reach_ratios
+        return (float(reach * r_near), float(reach * r_far))
 
     # --------------------------------------------------------------------------
     # 状态自省与度量指标计算
@@ -1099,13 +1126,14 @@ class HumanoidPinkIKSolver:
         if target_rot is not None:
             target_rot = np.asarray(target_rot, dtype=np.float64)
 
-        # ── 连续自适应工作空间协调架构 ──
+        # ── 连续自适应工作空间协调架构 (自动基于机械臂链长解耦硬编码) ──
         sh_origin = self.kin.model_7dof[arm].jointPlacements[1].translation
         dist_to_shoulder = float(np.linalg.norm(pos_arr - sh_origin))
+        d_near, d_far = self.get_workspace_thresholds(arm)
 
         # 舒适区直立快速通道
         sw_norm = float(np.linalg.norm(seed_waist)) if seed_waist is not None else 0.0
-        if cascade_upright and dist_to_shoulder <= 0.300 and sw_norm < 0.02:
+        if cascade_upright and dist_to_shoulder <= d_near and sw_norm < 0.02:
             ok_7, q_arm_7, info_7 = self.solve_ik(
                 arm=arm,
                 target_pos=pos_arr,
@@ -1139,8 +1167,6 @@ class HumanoidPinkIKSolver:
                 return True, waist_zero, q_arm_7, info_7
 
         # ── 连续过渡区域激活权重计算 (C2 Smoothstep) ──
-        d_near = 0.300      # 舒适区距离
-        d_far = 0.385       # 过渡区距离
         if dist_to_shoulder <= d_near:
             mu = 0.0
             stage_name = "ARM_COMFORT_ZONE"
