@@ -356,26 +356,38 @@ def sample_random_scenario(
     round_idx: int = 1,
     with_obstacle: bool = False,
 ) -> dict:
-    """在可达工作空间内采样一个随机点场景 (基于通用 9-DoF 求解器有效范围)"""
+    """在可达工作空间内采样一个 6D 全位姿随机点场景 (XYZ 空间坐标与 RPY 三轴姿态全随机)"""
     target_pos = None
-    for _ in range(40):
-        rx = np.random.uniform(0.25, 0.41)
-        ry = np.random.uniform(0.14, 0.28)
-        rz = np.random.uniform(0.72, 0.88)
+    target_rpy = None
+    for _ in range(50):
+        # 笛卡尔空间 3 维坐标随机采样
+        rx = np.random.uniform(0.24, 0.42)
+        ry = np.random.uniform(0.12, 0.32)
+        rz = np.random.uniform(0.70, 0.88)
         cand_p = np.array([rx, ry, rz], dtype=np.float64)
+
+        # 真实 3 轴末端姿态全随机: Roll (手腕翻转), Pitch (手腕俯仰), Yaw (手腕偏转)
+        r_deg = np.random.uniform(-25.0, 25.0)
+        p_deg = np.random.uniform(-15.0, 30.0)
+        y_deg = np.random.uniform(-25.0, 25.0)
+        cand_rpy = [float(np.radians(r_deg)), float(np.radians(p_deg)), float(np.radians(y_deg))]
+
+        # 联合验证位置与 3 轴姿态的运动学真实可达性
         ok, _, _, info = inspector.solver.solve_coordinated_ik(
-            arm="left_arm", target_pos=cand_p, waist_weight=8.0
+            arm="left_arm",
+            target_pos=cand_p,
+            target_rpy=cand_rpy,
+            waist_weight=8.0,
+            allow_relaxation=True,
         )
         if ok and info.get("pos_err_mm", 999) < 2.0:
             target_pos = cand_p
+            target_rpy = cand_rpy
             break
 
     if target_pos is None:
         target_pos = np.array([0.35, 0.22, 0.82], dtype=np.float64)
-
-    # 随机微小旋转姿态
-    rand_pitch = np.random.uniform(0.0, 25.0)
-    target_rpy = [0.0, float(np.radians(rand_pitch)), 0.0]
+        target_rpy = [float(np.radians(10.0)), float(np.radians(15.0)), float(np.radians(-10.0))]
 
     obstacles = []
     if with_obstacle:
@@ -560,12 +572,20 @@ def main():
             except (ValueError, KeyboardInterrupt):
                 break
 
-    # 退出时清理场景与目标标记
-    inspector.planner.clear_all_obstacles()
-    inspector._clear_target_visualization()
+    # 退出时安全清理场景与目标标记
+    try:
+        if rclpy.ok():
+            inspector.planner.clear_all_obstacles()
+            inspector._clear_target_visualization()
+    except Exception:
+        pass
     print("\n[INFO] 联调结束，已清空场景障碍物与目标标记。")
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
