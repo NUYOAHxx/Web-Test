@@ -28,10 +28,14 @@ Unitree G1 10-DoF / 7-DoF 全身运动学逆解优化求解器 (Pink + ProxQP IK
 3. 严格多面体硬关节限位保证 (Hard Configuration Limits)：
    将 G1 硬件物理极限直接转化为 QP 不等式约束矩阵 (G v <= h)，
    从算法数学源头彻底杜绝关节越界，保障电机减速器与内部线束安全。
-4. 基于空间距离感知的自适应腰臂协同 (Smooth Waist-Arm Coordination)：
-   采用 C^2 连续 Smoothstep 激活函数调节腰部各向异性阻尼刚度矩阵：
-   - 近端舒适区 (d <= 30cm)：手臂优先伸展，腰部锁紧保持直立；
-   - 远端扩展区 (d > 38.5cm)：腰部非对称柔顺介入（偏航优先、限制侧倾），兼顾全身质心 (CoM) 平衡。
+4. 运动学收敛驱动的分层级联控制架构 (Convergence-Driven Cascade Architecture)：
+   摒弃基于人工经验标量球形距离与假想半径的粗糙分段判据，全面采用机器人机构学通用的
+   物理收敛性分层与李群零空间姿态正则化：
+   - 阶段 1 (单臂直立优先): 优先通过单臂 7-DoF 闭环探测。若目标在手臂几何与限位流形内，
+     腰部 100% 保持直立零位 [0, 0, 0]，毫秒级极速返回（零腰动、零能耗、维持双足绝对稳定）；
+   - 阶段 2 (躯干协同扩展): 当且仅当单臂物理不可达时，自动激活 10-DoF 凸二次规划。
+     在李群流形上通过各向异性零空间姿态惩罚（偏航优先、侧倾强力抑制、俯仰平衡），
+     驱动优化器自发寻找达成末端闭环所需的「最小必要躯干位移」。
 5. 二阶段李群高斯-牛顿微调抛光 (Two-Stage Gauss-Newton Polish)：
    在 QP 收敛至邻域后，执行 2 步无阻尼高斯-牛顿微调，消除正则化阻尼残差，
    实现亚毫米级 (<1.0 mm) 与亚度级 (<1.0°) 高精度收敛。
@@ -949,18 +953,21 @@ class G1PinkIKSolver:
         """
         10-DoF (3腰 + 7臂) 躯干-手臂协同逆运动学 — 基于 Pink 凸二次规划 (ProxQP)。
 
-        采用工业级级联直立优先与连续柔性过渡架构 (Continuous Waist-Arm Coordination Architecture)：
-        1. 阶段 1：手臂舒适区 (dist <= 30.0cm)：
-           - 若初始腰部接近零位，锁定腰部为 [0, 0, 0] 执行 7-DoF 单臂极速求解 (<0.5ms)，腰部保持 0.00°；
-        2. 阶段 2：连续柔性过渡与协同扩展 (30.0cm < dist < 38.5cm 及超展区)：
-           - 基于 C2 smoothstep 连续函数调制各向异性刚度，腰部随距离平滑介入，消除 ON/OFF 抖动。
+        采用运动学真实收敛性驱动的级联分层与李群零空间姿态正则化架构：
+        1. 阶段 1 (单臂直立优先):
+           若初始腰部接近零位，优先执行 7-DoF 单臂探测求解。若单臂物理可达且满足约束，
+           腰部保持 [0, 0, 0] 绝对直立零位，毫秒级极速返回 (<0.8ms)，零腰动、零冗余能耗。
+        2. 阶段 2 (10-DoF 躯干协同扩展):
+           当且仅当单臂物理不可达时，自动激活 10-DoF 凸二次规划。
+           通过各向异性李群零空间刚度（偏航优先、侧倾强力抑制、俯仰平衡），
+           优化器自发求解达成任务所需的「最小必要躯干移动」。
 
         :param arm: 操作臂 ("left_arm" 或 "right_arm")
         :param target_pos: 目标空间坐标 [x, y, z] (单位: 米)
         :param target_rot: 可选的 3x3 目标旋转矩阵
         :param target_rpy: 可选的欧拉角 [roll, pitch, yaw] (弧度)
         :param waist_weight: 腰部阻尼加权基准值 (默认 10.0，数值越大手臂越优先)
-        :param cascade_upright: 是否启用近距舒适区直立优先快速通道
+        :param cascade_upright: 是否启用单臂直立优先级联快速通道
         :param custom_limits: 可选的自定义/收紧 10-DoF 关节限位 (lower_limits, upper_limits)
         :return: (is_success, waist_solution, arm_solution, ik_result_info)
         """
@@ -977,13 +984,12 @@ class G1PinkIKSolver:
         if has_rot:
             target_rot = np.asarray(target_rot, dtype=np.float64)
 
-        # ── 连续自适应工作空间协调架构 (Smooth Continuous Waist-Arm Coordination) ──
-        sh_origin = self.kin.model_7dof[arm].jointPlacements[1].translation
-        dist_to_shoulder = float(np.linalg.norm(pos_arr - sh_origin))
-
-        # 舒适区内静态单次求解快速通道 (仅在当前腰部本就处于零位、且处于舒适区 <= 30cm 时秒级返回，避免无谓开销)
+        # ── 1. 级联分层直立优先探测 (Arm-First Priority by Physical Convergence) ──
+        # 若腰部初猜接近零位，优先尝试单臂 7-DoF 单独闭环求解。
+        # 只要目标位于单臂真实几何与限位流形内，腰部 100% 保持直立零位，毫秒级快速返回！
+        # 彻底摒弃任何人工经验标量球形距离与假想半径截断，纯靠运动学真实收敛性裁决。
         sw_norm = float(np.linalg.norm(seed_waist)) if seed_waist is not None else 0.0
-        if cascade_upright and dist_to_shoulder <= 0.300 and sw_norm < 0.02:
+        if cascade_upright and sw_norm < 0.02:
             ok_7, q_arm_7, info_7 = self.solve_ik(
                 arm=arm,
                 target_pos=pos_arr,
@@ -992,7 +998,7 @@ class G1PinkIKSolver:
                 q_full_base=q_full_base,
                 pos_tol=pos_tol,
                 rot_tol=rot_tol,
-                max_iters=min(18, max_iters),
+                max_iters=min(20, max_iters),
                 max_step=max_step,
                 check_collision=check_collision,
                 enable_collision_barrier=enable_collision_barrier,
@@ -1008,7 +1014,7 @@ class G1PinkIKSolver:
                 )
                 info_7.update({
                     "time_ms": elapsed_ms,
-                    "cascade_stage": "ARM_COMFORT_UPRIGHT",
+                    "cascade_stage": "ARM_UPRIGHT_PRIORITY",
                     "mode": "10DOF_6DOF_POSE" if has_rot else "10DOF_3DOF_POS",
                     "waist_solution": waist_zero.copy(),
                     "arm_solution": q_arm_7.copy(),
@@ -1017,24 +1023,13 @@ class G1PinkIKSolver:
                 })
                 return True, waist_zero, q_arm_7, info_7
 
-        # ── 连续过渡区域激活权重计算 ──
-        d_near = 0.300
-        d_far = 0.385
-        if dist_to_shoulder <= d_near:
-            mu = 0.0
-            stage_name = "ARM_COMFORT_ZONE"
-        elif dist_to_shoulder >= d_far:
-            mu = 1.0
-            stage_name = "10DOF_COORDINATED"
-        else:
-            s = (dist_to_shoulder - d_near) / (d_far - d_near)
-            mu = s * s * (3.0 - 2.0 * s)  # C2 smoothstep
-            stage_name = "CASCADE_SMOOTH_TRANSITION"
-
-        # 连续动态非对称刚度: 舒适区 (mu=0) 极高锁紧，超展区 (mu=1) 柔顺协同
-        w_lock = np.array([0.080, 0.250, 0.120]) * (float(waist_weight) / 10.0)
-        w_assist = np.array([1.5e-4, 8.0e-4, 3.0e-4]) * float(waist_weight)
-        waist_weights = w_lock * (1.0 - mu) + w_assist * mu
+        # ── 2. 10-DoF 躯干协同二次规划 (Coordinated Whole-Body QP) ──
+        # 当且仅当单臂物理不可达时，自动激活协同链。
+        # 在二次规划目标中，通过李群零空间姿态惩罚对腰部施加各向异性高刚度阻尼：
+        # 偏航轴阻尼优先 (0.080)，侧倾轴强力抑制倾覆 (0.250)，俯仰轴抗躬身 (0.120)，手臂灵巧轻量阻尼 (1e-4)。
+        # QP 优化器在数学上会自动寻找「能够达成末端闭环所需的最小必要躯干位移」。
+        stage_name = "10DOF_COORDINATED"
+        waist_weights = np.array([0.080, 0.250, 0.120]) * (float(waist_weight) / 10.0)
 
         if custom_limits is not None:
             lower_limit, upper_limit = custom_limits

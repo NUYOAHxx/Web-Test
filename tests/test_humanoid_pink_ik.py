@@ -82,21 +82,18 @@ def test_right_arm_mirror_reach(solver):
     assert res.pos_err_mm < 2.0
 
 
-def test_adaptive_workspace_thresholds(solver):
-    """测试基于 URDF 运动学自省的无量纲自适应工作空间距离计算。"""
-    # 1. 验证臂长有效几何链长自动提取
-    reach = solver.arm_reach_lengths["left_arm"]
-    assert 0.38 < reach < 0.43, f"G1 理论臂长应在 ~0.41m 附近，当前检测为: {reach}"
+def test_arm_first_cascade_upright(solver):
+    """测试基于运动学真实收敛性的级联分层架构：
+    1. 在单臂自然可达流形内，验证 Arm-First 阶段使腰部保持绝对直立零位 [0, 0]；
+    2. 验证阶段标记为 ARM_UPRIGHT_PRIORITY，达成零腰部冗余能耗与双足质心绝对稳定。
+    """
+    # 选取单臂就绪构型邻域内的真实可达目标 (正运动学解)
+    sample_arm_q = solver.ready_pose["left_arm"] + 0.08
+    target_reachable, _ = solver.forward_kinematics_arm("left_arm", sample_arm_q)
 
-    # 2. 验证默认比率下的 d_near 和 d_far
-    d_near, d_far = solver.get_workspace_thresholds("left_arm")
-    assert 0.28 < d_near < 0.32, f"自适应 d_near 应为 ~0.30m，当前为: {d_near}"
-    assert 0.37 < d_far < 0.40, f"自适应 d_far 应为 ~0.385m，当前为: {d_far}"
-
-    # 3. 验证自定义外部覆盖 (例如传入微型或重型机器人阈值)
-    custom_solver = HumanoidPinkIKSolver(
-        workspace_thresholds={"left_arm": (0.50, 0.65)}
-    )
-    c_near, c_far = custom_solver.get_workspace_thresholds("left_arm")
-    assert c_near == 0.50
-    assert c_far == 0.65
+    ok, w_q, a_q, res = solver.solve_coordinated_ik("left_arm", target_reachable)
+    assert ok, f"单臂可达区域协同求解失败: {res}"
+    assert res.status == IKSolveStatus.CONVERGED
+    assert res.cascade_stage == "ARM_UPRIGHT_PRIORITY"
+    # 腰部必须严格保持零位
+    np.testing.assert_allclose(w_q, np.zeros(2), atol=1e-5, err_msg="单臂可达目标时腰部未保持绝对直立")

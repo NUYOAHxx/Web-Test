@@ -25,24 +25,21 @@
    - 彻底去除侧倾 (Roll) 自由度（或将其刚性锁定为 0），杜绝躯干向左右大幅侧倾
      破坏双足支撑多边形的对称性与质心平衡。
 
-2. 工作空间三段式自适应协调 (Three-Stage Workspace Coordination):
-   以末端目标相对肩部原点的空间欧几里得距离 d = ||p_target - p_shoulder|| 为感知变量：
+2. 运动学收敛驱动的分层级联控制架构 (Convergence-Driven Hierarchical Cascade):
+   彻底摒弃基于人工经验标量球形距离 (如 ||p - p_sh|| <= 30cm) 的粗糙启发式判据，
+   全面采用机器人机构学通用的物理收敛性分层与零空间姿态惩罚：
    ┌───────────────────────┬─────────────────────────────────────────────────┐
-   │ 距离区间 (工作区)     │ 协同与介入行为                                  │
+   │ 级联阶段              │ 协同与介入控制行为                              │
    ├───────────────────────┼─────────────────────────────────────────────────┤
-   │ 近端舒适区            │ 触发 cascade_upright 快速通道：优先采用单臂 7-DoF│
-   │ (d <= 30.0 cm)        │ 求解，腰部 100% 锁定在直立零位 [0.0, 0.0]，     │
-   │                       │ 姿态阻尼权重最高 (w_lock)，抑制任何非必要腰动。 │
+   │ 阶段 1: 单臂直立优先  │ 触发级联优先探测：单臂 7-DoF 尝试以腰部直立零位 │
+   │ (Arm-First Priority)  │ 闭环求解。只要目标位于单臂真实几何与限位流形内，│
+   │                       │ 腰部 100% 保持直立零位 [0.0, 0.0]，毫秒级立即返回│
+   │                       │ （零腰动、零多余能耗、绝对维持双足质心稳定）。  │
    ├───────────────────────┼─────────────────────────────────────────────────┤
-   │ C^2 平滑过渡区        │ 采用 C^2 连续 Smoothstep 激活函数：             │
-   │ (30.0cm < d < 38.5cm) │ s = (d - 30cm) / (38.5cm - 30cm)                │
-   │                       │ mu = s^2 * (3 - 2s)                             │
-   │                       │ 权重由锁紧刚度 w_lock 向辅助刚度 w_assist 平滑  │
-   │                       │ 过渡，实现腰部无冲击、无抖动、连续可微柔顺介入。│
-   ├───────────────────────┼─────────────────────────────────────────────────┤
-   │ 远端极限区            │ 激活系数 mu = 1.0，手臂逼近展长极限，腰部全面   │
-   │ (d >= 38.5 cm)        │ 进入低阻尼协同状态 (w_assist)，主动旋转与俯仰， │
-   │                       │ 显著扩展操作半径 (外延 15~30cm)，支持大跨度拾取。│
+   │ 阶段 2: 躯干协同扩展  │ 当且仅当单臂物理不可达（或奇异）时，自动无缝激活│
+   │ (Coordinated Whole-   │ 9-DoF 协同二次规划 (QP)。在李群流形上通过零空间 │
+   │  Body QP)             │ 姿态任务对腰部施加高惩罚阻尼，驱动腰部仅做出    │
+   │                       │ 满足末端闭环所需的「最小必要躯干移动」。        │
    └───────────────────────┴─────────────────────────────────────────────────┘
 
 3. 各向异性动态阻尼刚度配置 (Anisotropic Dynamic Damping):
@@ -114,9 +111,6 @@ DEFAULT_HUMANOID_READY_POSE: Dict[str, np.ndarray] = {
     "left_arm": np.array([0.2, 0.2, 0.0, 0.5, 0.0, 0.0, 0.0], dtype=np.float64),
     "right_arm": np.array([0.2, -0.2, 0.0, 0.5, 0.0, 0.0, 0.0], dtype=np.float64),
 }
-
-# 通用双足人形机器人自适应工作空间无量纲比率: (近端舒适区比例 73%, 远端物理极限区比例 94%)
-DEFAULT_WORKSPACE_REACH_RATIOS: Tuple[float, float] = (0.73, 0.94)
 
 # 逆运动学算法五大计算流水线阶段定义
 IK_PIPELINE_STAGES = [
@@ -361,7 +355,6 @@ class HumanoidKinematicsAdapter:
         self.model_7dof: Dict[str, pin.Model] = {}
         self.data_7dof: Dict[str, pin.Data] = {}
         self.ee_frame_ids_7dof: Dict[str, int] = {}
-        self.arm_reach_lengths: Dict[str, float] = {}
 
         self._build_submodels()
 
@@ -392,14 +385,6 @@ class HumanoidKinematicsAdapter:
             self.model_7dof[arm] = red_7
             self.data_7dof[arm] = red_7.createData()
             self.ee_frame_ids_7dof[arm] = red_7.getFrameId(self.ee_frame_names[arm])
-
-            # 3. 自省提取单臂全展几何物理链长 (用于自适应无量纲工作空间划分)
-            chain_len = sum(
-                np.linalg.norm(red_7.jointPlacements[i].translation)
-                for i in range(2, len(red_7.jointPlacements))
-            )
-            chain_len += np.linalg.norm(red_7.frames[self.ee_frame_ids_7dof[arm]].placement.translation)
-            self.arm_reach_lengths[arm] = float(chain_len)
 
     def forward_kinematics_coord(
         self,
@@ -469,8 +454,6 @@ class HumanoidPinkIKSolver:
         kinematics: Optional[HumanoidKinematicsAdapter] = None,
         waist_joint_names: Optional[List[str]] = None,
         ready_pose: Optional[Dict[str, np.ndarray]] = None,
-        reach_ratios: Tuple[float, float] = DEFAULT_WORKSPACE_REACH_RATIOS,
-        workspace_thresholds: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> None:
         """初始化通用人形机器人逆解求解器。
 
@@ -478,8 +461,6 @@ class HumanoidPinkIKSolver:
         :param kinematics: 可选的预建运动学引擎适配器
         :param waist_joint_names: 自定义 2-DoF 腰部关节名 (默认: ['waist_yaw_joint', 'waist_pitch_joint'])
         :param ready_pose: 自定义就绪姿态字典 {"left_arm": array(7), "right_arm": array(7)}
-        :param reach_ratios: 自适应工作空间比例系数 (舒适区比例, 极限区比例)，默认 (0.73, 0.94)
-        :param workspace_thresholds: 可选的手动工作空间绝对阈值覆盖 {"left_arm": (d_near, d_far)}
         """
         if kinematics is None:
             self.kin = HumanoidKinematicsAdapter(
@@ -490,8 +471,6 @@ class HumanoidPinkIKSolver:
             self.kin = kinematics
 
         self.ready_pose = ready_pose or DEFAULT_HUMANOID_READY_POSE
-        self.reach_ratios: Tuple[float, float] = tuple(reach_ratios)
-        self.workspace_thresholds: Optional[Dict[str, Tuple[float, float]]] = workspace_thresholds
 
         # 核心运动学属性委托
         self.urdf_path: str = self.kin.urdf_path
@@ -505,18 +484,6 @@ class HumanoidPinkIKSolver:
         self.ee_frame_names: Dict[str, str] = self.kin.ee_frame_names
         self.limits_arm: Dict[str, Tuple[np.ndarray, np.ndarray]] = self.kin.limits_arm
         self.limits_coord: Dict[str, Tuple[np.ndarray, np.ndarray]] = self.kin.limits_coord
-        self.arm_reach_lengths: Dict[str, float] = self.kin.arm_reach_lengths
-
-    def get_workspace_thresholds(self, arm: str) -> Tuple[float, float]:
-        """获取指定操作臂的自适应工作空间距离门限 (d_near, d_far)。
-
-        基于机器人手臂几何物理全展链长与无量纲特征比例自适应计算，完全解耦绝对数值硬编码。
-        """
-        if self.workspace_thresholds and arm in self.workspace_thresholds:
-            return self.workspace_thresholds[arm]
-        reach = self.arm_reach_lengths.get(arm, 0.410)
-        r_near, r_far = self.reach_ratios
-        return (float(reach * r_near), float(reach * r_far))
 
     # --------------------------------------------------------------------------
     # 状态自省与度量指标计算
@@ -1129,14 +1096,12 @@ class HumanoidPinkIKSolver:
         if target_rot is not None:
             target_rot = np.asarray(target_rot, dtype=np.float64)
 
-        # ── 连续自适应工作空间协调架构 (自动基于机械臂链长解耦硬编码) ──
-        sh_origin = self.kin.model_7dof[arm].jointPlacements[1].translation
-        dist_to_shoulder = float(np.linalg.norm(pos_arr - sh_origin))
-        d_near, d_far = self.get_workspace_thresholds(arm)
-
-        # 舒适区直立快速通道
+        # ── 1. 级联分层直立优先探测 (Arm-First Priority by Physical Convergence) ──
+        # 若腰部初猜接近零位，优先尝试单臂 7-DoF 单独闭环求解。
+        # 只要目标位于单臂真实几何与限位流形内，腰部 100% 保持直立零位，毫秒级快速返回！
+        # 绝不使用任何人工经验标量球形距离截断，纯靠运动学真实收敛性裁决。
         sw_norm = float(np.linalg.norm(seed_waist)) if seed_waist is not None else 0.0
-        if cascade_upright and dist_to_shoulder <= d_near and sw_norm < 0.02:
+        if cascade_upright and sw_norm < 0.02:
             ok_7, q_arm_7, info_7 = self.solve_ik(
                 arm=arm,
                 target_pos=pos_arr,
@@ -1144,7 +1109,7 @@ class HumanoidPinkIKSolver:
                 seed_q=seed_arm,
                 pos_tol=pos_tol,
                 rot_tol=rot_tol,
-                max_iters=min(18, max_iters),
+                max_iters=min(20, max_iters),
                 max_step=max_step,
                 allow_relaxation=allow_relaxation,
             )
@@ -1160,7 +1125,7 @@ class HumanoidPinkIKSolver:
                 )
                 info_7.update({
                     "time_ms": elapsed_ms,
-                    "cascade_stage": "ARM_COMFORT_UPRIGHT",
+                    "cascade_stage": "ARM_UPRIGHT_PRIORITY",
                     "mode": "9DOF_6DOF_POSE" if target_rot is not None else "9DOF_3DOF_POS",
                     "waist_solution": waist_zero.copy(),
                     "arm_solution": q_arm_7.copy(),
@@ -1169,22 +1134,13 @@ class HumanoidPinkIKSolver:
                 })
                 return True, waist_zero, q_arm_7, info_7
 
-        # ── 连续过渡区域激活权重计算 (C2 Smoothstep) ──
-        if dist_to_shoulder <= d_near:
-            mu = 0.0
-            stage_name = "ARM_COMFORT_ZONE"
-        elif dist_to_shoulder >= d_far:
-            mu = 1.0
-            stage_name = "9DOF_COORDINATED"
-        else:
-            s = (dist_to_shoulder - d_near) / (d_far - d_near)
-            mu = s * s * (3.0 - 2.0 * s)
-            stage_name = "CASCADE_SMOOTH_TRANSITION"
-
-        # 2-DoF 腰部各向异性动态阻尼刚度: [Yaw(偏航), Pitch(俯仰)]
-        w_lock = np.array([0.080, 0.120]) * (float(waist_weight) / 10.0)      # 锁定腰部权重
-        w_assist = np.array([1.5e-4, 3.0e-4]) * (float(waist_weight) / 10.0)
-        waist_weights = w_lock * (1.0 - mu) + w_assist * mu
+        # ── 2. 9-DoF 躯干协同二次规划 (Coordinated Whole-Body QP) ──
+        # 当且仅当单臂物理不可达时，自动激活协同链。
+        # 在二次规划目标中，通过李群零空间姿态惩罚对腰部施加各向异性高刚度阻尼：
+        # 偏航轴阻尼优先 (0.080)，俯仰轴强阻尼抑制躬身失稳 (0.120)，手臂维持灵巧轻量阻尼 (1e-4)。
+        # QP 优化器在数学上会自动寻找「能够达成末端闭环所需的最小必要躯干位移」。
+        stage_name = "9DOF_COORDINATED"
+        waist_weights = np.array([0.080, 0.120]) * (float(waist_weight) / 10.0)
 
         lower_limit, upper_limit = (
             custom_limits if custom_limits is not None else self.limits_coord[arm]
