@@ -115,6 +115,9 @@ DEFAULT_HUMANOID_READY_POSE: Dict[str, np.ndarray] = {
     "right_arm": np.array([0.2, -0.2, 0.0, 0.5, 0.0, 0.0, 0.0], dtype=np.float64),
 }
 
+# 通用双足人形机器人自适应工作空间无量纲比率: (近端舒适区比例 73%, 远端物理极限区比例 94%)
+DEFAULT_WORKSPACE_REACH_RATIOS: Tuple[float, float] = (0.73, 0.94)
+
 # 逆运动学算法五大计算流水线阶段定义
 IK_PIPELINE_STAGES = [
     {
@@ -466,7 +469,7 @@ class HumanoidPinkIKSolver:
         kinematics: Optional[HumanoidKinematicsAdapter] = None,
         waist_joint_names: Optional[List[str]] = None,
         ready_pose: Optional[Dict[str, np.ndarray]] = None,
-        reach_ratios: Optional[Tuple[float, float]] = None,
+        reach_ratios: Tuple[float, float] = DEFAULT_WORKSPACE_REACH_RATIOS,
         workspace_thresholds: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> None:
         """初始化通用人形机器人逆解求解器。
@@ -487,7 +490,7 @@ class HumanoidPinkIKSolver:
             self.kin = kinematics
 
         self.ready_pose = ready_pose or DEFAULT_HUMANOID_READY_POSE
-        self.reach_ratios: Tuple[float, float] = reach_ratios or (0.73, 0.94)
+        self.reach_ratios: Tuple[float, float] = tuple(reach_ratios)
         self.workspace_thresholds: Optional[Dict[str, Tuple[float, float]]] = workspace_thresholds
 
         # 核心运动学属性委托
@@ -1241,4 +1244,5 @@ __all__ = [
     "DEFAULT_HUMANOID_WAIST_LIMITS",    # 腰部 2-DoF 默认限位 (Yaw/Pitch)
     "DEFAULT_HUMANOID_ARM_LIMITS",      # 标准 7-DoF 机械臂通用硬件限位参考
     "DEFAULT_HUMANOID_READY_POSE",      # 人形机器人默认待机/准备姿态
+    "DEFAULT_WORKSPACE_REACH_RATIOS",   # 自适应工作空间默认无量纲比例 (0.73, 0.94)
 ]
