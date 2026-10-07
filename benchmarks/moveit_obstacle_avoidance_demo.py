@@ -343,13 +343,12 @@ def get_preset_scenarios():
     ]
 
 
-def generate_random_scenario(inspector: MoveItAvoidanceInspector) -> dict:
-    """在可达工作空间内随机采样生成目标点，并可选择是否在中间放置阻挡障碍物"""
-    print("\n--- [随机目标点生成] ---")
-    obs_opt = input("是否在起点与随机目标之间生成阻挡立柱障碍物? (y/n, 默认 y): ").strip().lower()
-    with_obstacle = obs_opt != "n"
-
-    # 在机械臂/躯干前方舒适与扩展区域采样 (X: 0.28~0.50, Y: 0.14~0.32, Z: 0.68~0.88)
+def sample_random_scenario(
+    inspector: MoveItAvoidanceInspector,
+    round_idx: int = 1,
+    with_obstacle: bool = False,
+) -> dict:
+    """在可达工作空间内采样一个随机点场景"""
     target_pos = None
     for _ in range(30):
         rx = np.random.uniform(0.28, 0.50)
@@ -378,20 +377,49 @@ def generate_random_scenario(inspector: MoveItAvoidanceInspector) -> dict:
         mid_z = 0.5 * (0.75 + target_pos[2])
         obstacles.append({
             "type": "cylinder",
-            "id": "random_column",
+            "id": f"random_column_{round_idx}",
             "pos": [round(float(mid_x), 3), round(float(mid_y), 3), round(float(mid_z), 3)],
             "radius": 0.045,
             "height": 0.20,
         })
 
     return {
-        "title": f"随机目标测试 (X={target_pos[0]:.3f}, Y={target_pos[1]:.3f}, Z={target_pos[2]:.3f})",
-        "desc": f"在工作空间内自动随机采样生成目标点{'并在路径中间设置立柱障碍物' if with_obstacle else ' (自由空间)'}",
+        "title": f"持续随机点 #{round_idx} (X={target_pos[0]:.3f}, Y={target_pos[1]:.3f}, Z={target_pos[2]:.3f})",
+        "desc": f"在工作空间内自动随机采样目标点{'并在路径中间设置立柱障碍物' if with_obstacle else ' (自由空间)'}",
         "target_pos": target_pos,
         "target_rpy": target_rpy,
         "group": "left_arm_torso",
         "obstacles": obstacles,
     }
+
+
+def run_continuous_random_mode(inspector: MoveItAvoidanceInspector) -> None:
+    """持续随机目标测试模式：按 Enter 持续生成并执行下一个随机目标点，直到输入 q/0 退出"""
+    print("\n" + "=" * 65)
+    print("  [持续随机目标测试模式 (Continuous Random Testing)]")
+    print("  - 默认自由空间随机采样，自动探索工作空间多构型")
+    print("  - 每次按 [Enter] 即生成下一个随机点并规划执行")
+    print("  - 输入 [q] 或 [0] 随时退出返回主菜单")
+    print("=" * 65)
+
+    obs_opt = input("是否在每次随机路径中生成阻挡立柱障碍物? (y/n, 默认 n): ").strip().lower()
+    with_obstacle = obs_opt == "y"
+
+    round_idx = 1
+    while rclpy.ok():
+        print(f"\n>>> 正在生成并规划第 #{round_idx} 个随机目标点...")
+        sc = sample_random_scenario(inspector, round_idx=round_idx, with_obstacle=with_obstacle)
+        inspector.run_scenario(sc)
+        round_idx += 1
+
+        try:
+            prompt = input("\n[随机循环] 直接按 [Enter] 继续下一个随机点，输入 [q] 或 [0] 退出: ").strip().lower()
+            if prompt in ("q", "0", "exit", "quit"):
+                print("[INFO] 已退出持续随机测试模式，返回主菜单。")
+                break
+        except (KeyboardInterrupt, EOFError):
+            print("\n[INFO] 收到中断信号，返回主菜单。")
+            break
 
 
 def get_custom_scenario() -> dict:
@@ -498,7 +526,7 @@ def main():
             for idx, sc in enumerate(presets, 1):
                 print(f"  [{idx}] {sc['title']}")
             print("  -------------------------------------------------------------")
-            print("  [5] 随机目标点测试 (Random Point) - 可选是否生成动态阻挡障碍物")
+            print("  [5] 持续随机目标测试 (Continuous Random) - 按 Enter 持续生成，输入 q 退出")
             print("  [6] 自定义空间目标 (Custom Pose)  - 手动输入 X Y Z 坐标与朝向")
             print("  [7] 自动连续执行所有预置工况 (Auto Run All)")
             print("  [0] 退出联调程序")
@@ -511,8 +539,7 @@ def main():
                     idx = int(choice) - 1
                     inspector.run_scenario(presets[idx])
                 elif choice == "5":
-                    rand_sc = generate_random_scenario(inspector)
-                    inspector.run_scenario(rand_sc)
+                    run_continuous_random_mode(inspector)
                 elif choice == "6":
                     cust_sc = get_custom_scenario()
                     inspector.run_scenario(cust_sc)
