@@ -20,3 +20,24 @@
 7.很多临时凑功能的脚本里，经常会写只被调用一次、逻辑又能直接合并到主流程里的多余函数。专门识别这类仅单次调用、功能可内联或可并入已有公共函数的冗余定义，直接删掉空壳或多余函数，把逻辑归位，这样就能把这类漏网的多余函数也清掉。
 8.明确说不要为了兼容旧逻辑留冗余别名、过渡函数或者兼容分支，要求彻底重构到新的规范写法，只保留当前业务必需的实现，删掉所有仅为兼容旧方案存在的别名、空转兼容层，输出最终干净无历史包袱的版本，不用保留向后兼容的过渡代码。避免为了求稳偷偷留兼容尾巴。
 9.要求按功能模块对函数做就近归组，把同一业务域、互相调用的相关函数集中放在连续代码块里，按逻辑顺序排列，不要零散散落在脚本各处，同时去掉无关联的穿插代码，让同职责函数形成清晰的代码区块。
+
+HumanoidPinkIKSolver
+├── 模块 1: 初始化与正向运动学接口 (Initialization & Forward Kinematics)
+│   ├── __init__                   (行 450: 算法初始化、模型与限位缓存)
+│   ├── forward_kinematics_arm     (行 492: 7-DoF 单臂正运动学查询)
+│   └── forward_kinematics_coord   (行 496: 9-DoF 协同正运动学查询)
+│
+├── 模块 2: 输入校验、兜底响应与求解上下文预处理 (Validation & Preparation)
+│   ├── _normalize_target_pose     (行 507: 校验与转换目标位置、RPY、旋转矩阵)
+│   ├── _create_invalid_input_result (行 538: 校验失败时的快速失败与兜底响应生成)
+│   ├── _prepare_solver_context    (行 562: 限位边界、就绪姿态与各轴代价权重装配)
+│   └── _build_seed_chain          (行 582: Warm Start -> Ready Pose -> 4组 QMC 网格种子生成)
+│
+├── 模块 3: 二次规划求解内核、微调抛光与解算遥测 (Numerical QP Core, Polish & Telemetry)
+│   ├── _polish_gauss_newton       (行 646: 二阶段李群高斯-牛顿微调抛光器)
+│   ├── _extract_solution_telemetry (行 727: 空间误差度量、四元数解析与关节限位裕度计算)
+│   └── _solve_qp_core             (行 794: 多起点 ProxQP 核心求解引擎与自适应步长阻尼驱动)
+│
+└── 模块 4: 对外高阶逆运动学求解接口 (Public Inverse Kinematics APIs)
+    ├── solve_ik                   (行 1020: 7-DoF 单臂逆运动学高阶入口)
+    └── solve_coordinated_ik       (行 1096: 9-DoF 级联直立优先 + 躯干协同逆解高阶入口)
