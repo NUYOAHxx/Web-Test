@@ -240,7 +240,129 @@ ls -lh models/omts_enclosure/omts_enclosure.glb
 
 ---
 
+### 踩坑 9: Gazelle 拉取 Go 模块超时与国内代理配置 (TLS handshake timeout / unexpected EOF)
+
+#### 1. 故障现象
+拉取依赖过程中报错中断，常见两种形态：
+1. **握手超时**：
+   > `Error in fail: gazelle++go_deps+org_golang_x_sync: fetch_repo: golang.org/x/sync@v0.23.0: Get "https://proxy.golang.org/...": net/http: TLS handshake timeout`
+2. **连接瞬断**：
+   > `Error in fail: gazelle++go_deps+com_github_opencontainers_image_spec: fetch_repo: ...: read "https://goproxy.cn/...": unexpected EOF`
+
+#### 2. 根因剖析
+- Bazel Gazelle 规则通过 Go 工具链在仓库规则（Repository Rules）中并发拉取 Go 语言依赖包。
+- 默认向 `proxy.golang.org` 发起请求，在国内直连时会被墙或严重丢包导致握手超时。
+- 若仅指定单个国内代理（如 `goproxy.cn`），在 Bazel 触发数十个 Go 模块高并发拉取时，国内 CDN 边缘节点容易触发速率限制或 TCP 连接意外中断（`unexpected EOF`）。
+
+#### 3. 修复方案
+在 `intrinsic-omts/.bazelrc.local` 中配置系统本地正向代理（例如 Clash Verge 默认端口 `127.0.0.1:7897`）以及双重高可用 Go 镜像链，并设置局域网与 K8s 服务绕行：
+```bash
+# 传递正向代理给 Bazel 外部依赖下载环境
+common --repo_env=http_proxy=http://127.0.0.1:7897
+common --repo_env=https_proxy=http://127.0.0.1:7897
+common --repo_env=HTTP_PROXY=http://127.0.0.1:7897
+common --repo_env=HTTPS_PROXY=http://127.0.0.1:7897
+common --repo_env=no_proxy=localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16
+common --repo_env=NO_PROXY=localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16
+
+# Go 代理：官方源（走代理加速）优先，国内源备用，直连兜底
+common --repo_env=GOPROXY=https://proxy.golang.org,https://goproxy.cn,direct
+```
+
+---
+
+### 踩坑 10: Intrinsic 镜像源 404 告警 (commondatastorage.googleapis.com 404 Not Found)
+
+#### 1. 故障现象
+在 Bazel 解析依赖时，终端大量打印类似 Warning：
+> `WARNING: Download from https://commondatastorage.googleapis.com/intrinsic-mirror/bazel/... failed: class java.io.FileNotFoundException GET returned 404 Not Found`
+
+#### 2. 根因剖析
+这是 Intrinsic 内部的正常回退机制，**并非致命错误**。Intrinsic 在其 Bazel 下载逻辑中配置了 Google Cloud Storage（`commondatastorage.googleapis.com`）作为首选镜像缓存。当镜像缓存未收录某个第三方资源或新版本时，Bazel 会输出 404 告警并自动 Fallback 到真实源站（如 GitHub Release、GitHub Raw 或 BCR 官方源）。
+
+#### 3. 应对措施
+无需干预。只要后续能够成功回退到 GitHub 等主数据源下载，即可正常完成构建。
+
+---
+
+### 踩坑 11: GB 级大型二进制组件包网络抖动中断 (Premature EOF)
+
+#### 1. 故障现象
+拉取依赖时出现大型归档文件中断：
+> `WARNING: Download from https://github.com/.../hand_e_gripper_service.bundle.tar failed: class java.io.IOException Premature EOF`
+
+#### 2. 根因剖析
+OMTS 依赖数个体积巨大的预编译 Asset Bundle 和工具链（如 `hand_e_gripper_service.bundle.tar` 约 1.6GB、`LLVM 19.1.0` 约 1.5GB）。在跨境下载大型文件时，网络长连接可能遭遇抖动而提前终止。
+
+#### 3. 修复方案
+在 `intrinsic-omts/.bazelrc.local` 中增加重试次数配置：
+```bash
+common --experimental_repository_downloader_retries=10
+```
+配合本地代理加速后，Bazel 在遇到连接异常时会自动重试并恢复下载。
+
+### 踩坑 12: NVIDIA 镜像拉取超时与 NVCR 鉴权令牌失效 (404 Not Found on blobs / JWT Token Expired)
+
+#### 1. 故障现象
+在拉取 `rules_oci` 的 Triton 推理服务器镜像（`tritonserver-onprem`，约 8.0GB）时，在经历了较长的多分片下载后突然报错退出：
+> `ERROR: An error occurred during the fetch of repository 'rules_oci++oci+tritonserver-onprem_linux_amd64'`
+> `Error downloading [https://nvcr.io/v2/nvidia/tritonserver/blobs/sha256:c9574a8ebce6..., https://commondatastorage.googleapis.com/...] to ...: GET returned 404 Not Found`
+
+#### 2. 根因剖析
+- `nvcr.io`（NVIDIA NGC Container Registry）采用 OAuth2/JWT 认证机制，向 `https://nvcr.io/proxy_auth` 申请的 Bearer Token 有严格的 **10 分钟 (600 秒) 寿命 (TTL)**。
+- `tritonserver` 镜像包含 20 余个 Layer，其中单个巨型分片即达 **2.68 GB**。
+- `rules_oci` 规则在拉取镜像前仅申请一次 Auth Token 并复用于所有 Layer 的下载；当大镜像在全网拉取耗时超过 10 分钟时，后续 Layer 携带已过期的 Token 发起请求，`nvcr.io` 直接返回 401/404，导致整体构建中断。
+
+#### 3. 修复方案
+利用 Bazel 全局下载缓存（`content_addressable`）的断点续传特性：
+1. 已成功下载的 Layer 均已固化保存在本地 ext4 虚拟盘的缓存池中。
+2. 针对失败的镜像目标单独执行拉取命令：
+   ```bash
+   bazel fetch @@rules_oci++oci+tritonserver-onprem_linux_amd64//...
+   ```
+3. 单独触发时 Bazel 会重新获取全新的 10 分钟 Token，且已缓存的 20+ 个 Layer 瞬间命中本地磁盘缓存，网络带宽 100% 聚焦于剩余的未下载大 Layer，顺利突破 10 分钟时限并写入全局缓存。
+
+### 踩坑 13: 代理客户端 TUN 模式劫持 K3s 集群 DNS (Fake-IP 28.0.0.x 导致 Istio 与 K8s 内部通信瘫痪)
+
+#### 1. 故障现象
+- 运行在本地 K3s 集群中的 `istio-ingressgateway` 无法变为 Ready 状态（一直处于 `0/1 Running`），健康检查探针报 connection refused：
+  > `Readiness probe failed: Get "http://...:15021/healthz/ready": connect: connection refused`
+- Ingress Gateway 日志显示 gRPC 握手异常并指向 `28.0.0.x` 地址：
+  > `transport: authentication handshake failed: read tcp 10.42.0.55:...->28.0.0.12:15012: connection reset by peer`
+- 导致宿主机无法连通 `localhost:17080` 网关端口。
+
+#### 2. 根因剖析
+- 本地代理客户端（如 Clash Verge / Mihomo）在开启 **TUN 模式** 时，会创建虚拟网卡接管操作系统的全部网络层流量，并在 `systemd-resolved` 中将所有域名的默认 DNS 路由指向其内部虚拟 DNS 服务器。
+- Mihomo 启用了 Fake-IP 模式（分配 `28.0.0.x` 网段的虚拟伪装 IP）。
+- K3s 容器内的 CoreDNS 在向上游查询时，或者容器直接向宿主机解析域名时，Kubernetes 内部域名（如 `istiod.app-ingress.svc`、`*.cluster.local`）被 Mihomo 误判为外部流量，并强行返回了 `28.0.0.x` 的伪装 IP。
+- 容器将加密 gRPC 流量发送至 `28.0.0.x`，直接撞上了本地代理内核，导致连接被就地 Reset，K8s 控制面与数据面彻底失联。
+
+#### 3. 修复方案
+在当前阶段，所有依赖项（包括 8GB 的 Triton 镜像和所有 Go/C++ 模块）均已 **100% 离线缓存完毕**，构建与运行不再依赖 TUN 模式。
+
+两种处置方式（任选其一，推荐方式 1）：
+1. **方式 1 (最简)：关闭 Clash Verge 的 TUN 模式**
+   - 在 Clash Verge 图形界面中，将 **TUN 模式 (TUN Mode)** 关闭。
+   - 保留普通代理或系统代理即可（我们在 `.bazelrc.local` 中配置了 `127.0.0.1:7897` 显式代理，Bazel 拉取不会受任何影响）。
+   - 关闭后，Kubernetes 内部 DNS 解析瞬间恢复原生路由。
+2. **方式 2：在 Clash 配置中放行 K8s 集群域名与网段**
+   - 在 Clash/Mihomo 配置文件的 `dns.fake-ip-filter` 列表中增加忽略规则：
+     ```yaml
+     fake-ip-filter:
+       - "+.cluster.local"
+       - "+.svc"
+       - "+.local"
+       - "localhost"
+     ```
+   - 并在规则中确保 `10.0.0.0/8`, `192.168.0.0/16`, `127.0.0.0/8` 为 `DIRECT` 直连。
+
+---
+
+
 ## 4. 端到端标准上线时序与运行闭环指南
+
+
+
 
 在所有排坑工作完成后，方案的正式运行严格按照**多终端协作时序**推进：
 
