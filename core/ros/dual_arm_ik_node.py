@@ -8,7 +8,7 @@
   返回 solution.joint_state = 16 个关节 (waist_yaw, waist_pitch, 左7, 右7)
 上层拿到后用 MoveIt 的 joint-space goal 规划(碰撞检测/OMPL 均由 MoveIt 负责)。
 
-运行: python3 core/ros/dual_arm_ik_node.py --ros-args -p urdf_path:=/abs/g1_29dof.urdf
+运行: python3 core/ros/dual_arm_ik_node.py --ros-args -p urdf_path:=/abs/humanoid_29dof.urdf
 """
 import os
 import sys

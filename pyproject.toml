@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "humanoid-ik"
+version = "1.0.0"
+description = "通用人形机器人 9-DoF 6D 位姿逆运动学与自碰撞安全引擎 (Pink + ProxQP)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+# 版本约束与 requirements.txt 保持一致, 详见该文件顶部的耦合性说明。
+dependencies = [
+    "pin==3.9.0",
+    "coal==3.0.2",
+    "pin-pink>=4.4.0",
+    "proxsuite>=0.7.3",
+    "numpy>=2.3,<2.4",
+    "scipy>=1.15",
+    "qpsolvers>=4.13",
+    "matplotlib>=3.10",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# MuJoCo 全身物理仿真 (simulation/deploy_mujoco53.py)
+simulation = ["mujoco>=3.15"]
+# 预训练策略权重加载所需, 体积约 200MB+, 按需安装
+policy = ["torch>=2.0"]
+test = ["pytest>=7.4"]
+
+[tool.setuptools]
+# 仅打包 Python 代码; 机器人描述资源与前端资源保持在仓库原位, 由运行时按相对路径读取
+packages = [
+    "core",
+    "core.kinematics",
+    "core.collision",
+    "core.solver",
+    "core.planning",
+    "core.ros",
+    "visualizer",
+    "visualizer.rviz",
+    "simulation",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# MoveIt 链路集成测试依赖运行中的 move_group 服务, 未就绪时自动跳过
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

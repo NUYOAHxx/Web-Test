@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unitree G1 机械臂点对点 (PTP) 轨迹规划与起始位姿敏感度诊断工具
+人形机器人 机械臂点对点 (PTP) 轨迹规划与起始位姿敏感度诊断工具
 
 功能：
 1. 笛卡尔直线点对点规划 (MoveL)：起点到终点直线插补并逐点闭环 IK 跟踪；
@@ -25,21 +25,21 @@ root_dir = os.path.abspath(os.path.join(current_dir, ".."))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from core.solver.g1_pink_ik import G1PinkIKSolver
+from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
 
 # G1 机械臂物理几何常数 (单位: 米)
-G1_UPPER_ARM_LEN = 0.193   # 大臂长 (肩到肘)
-G1_FORE_ARM_LEN = 0.184    # 小臂长 (肘到腕)
-G1_MAX_REACH = G1_UPPER_ARM_LEN + G1_FORE_ARM_LEN  # 0.377 m (37.7 cm)
+UPPER_ARM_LEN = 0.193   # 大臂长 (肩到肘)
+FORE_ARM_LEN = 0.184    # 小臂长 (肘到腕)
+MAX_REACH = UPPER_ARM_LEN + FORE_ARM_LEN  # 0.377 m (37.7 cm)
 
 
-class G1PointToPointPlanner:
+class PointToPointPlanner:
     """
     G1 机械臂点对点运动规划与诊断分析器
     """
 
     def __init__(self, urdf_path: str = None):
-        self.solver = G1PinkIKSolver(urdf_path)
+        self.solver = HumanoidPinkIKSolver(urdf_path)
         self.model = self.solver.model
         self.data = self.solver.data
         
@@ -108,15 +108,15 @@ class G1PointToPointPlanner:
             "errors_mm": [],
         }
 
-        if dist_start_sh > G1_MAX_REACH:
+        if dist_start_sh > MAX_REACH:
             res["failure_reason"] = (
-                f"起点超出臂长极限！距肩部 {dist_start_sh*100:.1f} cm > 最大臂长 {G1_MAX_REACH*100:.1f} cm"
+                f"起点超出臂长极限！距肩部 {dist_start_sh*100:.1f} cm > 最大臂长 {MAX_REACH*100:.1f} cm"
             )
             return res
 
-        if dist_goal_sh > G1_MAX_REACH:
+        if dist_goal_sh > MAX_REACH:
             res["failure_reason"] = (
-                f"终点超出臂长极限！距肩部 {dist_goal_sh*100:.1f} cm > 最大臂长 {G1_MAX_REACH*100:.1f} cm"
+                f"终点超出臂长极限！距肩部 {dist_goal_sh*100:.1f} cm > 最大臂长 {MAX_REACH*100:.1f} cm"
             )
             return res
 
@@ -208,7 +208,7 @@ class G1PointToPointPlanner:
 
 
 def diagnose_starts_comparison(
-    planner: G1PointToPointPlanner,
+    planner: PointToPointPlanner,
     arm: str,
     start_A: np.ndarray,
     start_B: np.ndarray,
@@ -226,7 +226,7 @@ def diagnose_starts_comparison(
     print(f"起始位置 B (Start B): [X={start_B[0]:.3f}, Y={start_B[1]:.3f}, Z={start_B[2]:.3f}]")
     sh = planner.shoulder_pos[arm]
     print(f"肩关节原点参考位置   : [X={sh[0]:.3f}, Y={sh[1]:.3f}, Z={sh[2]:.3f}]")
-    print(f"机械臂物理最大伸展   : {G1_MAX_REACH*100:.1f} cm (大臂 19.3cm + 小臂 18.4cm)")
+    print(f"机械臂物理最大伸展   : {MAX_REACH*100:.1f} cm (大臂 19.3cm + 小臂 18.4cm)")
     print("-" * 80)
 
     # 1. 运行笛卡尔直线插补规划
@@ -264,8 +264,8 @@ def diagnose_starts_comparison(
     print("=" * 80)
     
     # 判据 1: 几何物理极限越界
-    if res_A["start_dist_to_shoulder"] > G1_MAX_REACH and res_B["start_dist_to_shoulder"] <= G1_MAX_REACH:
-        diff_cm = (res_A["start_dist_to_shoulder"] - G1_MAX_REACH) * 100.0
+    if res_A["start_dist_to_shoulder"] > MAX_REACH and res_B["start_dist_to_shoulder"] <= MAX_REACH:
+        diff_cm = (res_A["start_dist_to_shoulder"] - MAX_REACH) * 100.0
         print("[原因 1 - 绝对几何不可达 (Geometric Reach Limit)]")
         print(f"  * 起点 A (Z={start_A[2]:.2f}) 到肩部距离达 {res_A['start_dist_to_shoulder']*100:.1f} cm，已超过手臂物理极限 {diff_cm:.1f} cm！")
         print("    在空间上机器人即使完全伸直手臂也绝不可能触及，因此任何 IK 解算器都会被限位阻断。")
@@ -295,7 +295,7 @@ def diagnose_starts_comparison(
         print(f"[图表生成] 诊断分析图已保存至: {plot_path}")
 
 
-def sweep_z_coordinates(planner: G1PointToPointPlanner, arm: str, x: float, y: float, goal: np.ndarray):
+def sweep_z_coordinates(planner: PointToPointPlanner, arm: str, x: float, y: float, goal: np.ndarray):
     """
     Z 坐标连续扫描：自动测试从高到低各 Z 高度下的 PTP 直线规划可行性
     """
@@ -311,7 +311,7 @@ def sweep_z_coordinates(planner: G1PointToPointPlanner, arm: str, x: float, y: f
     for z in z_candidates:
         st = np.array([x, y, z])
         dist_sh = np.linalg.norm(st - sh)
-        geom_ok = dist_sh <= G1_MAX_REACH
+        geom_ok = dist_sh <= MAX_REACH
 
         res = planner.plan_cartesian_linear(arm, st, goal, num_steps=20)
         
@@ -320,8 +320,8 @@ def sweep_z_coordinates(planner: G1PointToPointPlanner, arm: str, x: float, y: f
             reason_str = f"最小可操控度: {min(res['manipulability']):.4f}"
         else:
             status_str = "\033[91m失败\033[0m"
-            if dist_sh > G1_MAX_REACH:
-                reason_str = f"超长 {(dist_sh - G1_MAX_REACH)*100:.1f} cm (超出最大 37.7 cm 臂展)"
+            if dist_sh > MAX_REACH:
+                reason_str = f"超长 {(dist_sh - MAX_REACH)*100:.1f} cm (超出最大 37.7 cm 臂展)"
             elif res["failed_step"] == -1:
                 reason_str = "起点逆解不存在 (受关节物理限位阻挡)"
             else:
@@ -387,7 +387,7 @@ def main():
 
     args = parser.parse_args()
 
-    planner = G1PointToPointPlanner()
+    planner = PointToPointPlanner()
 
     if args.sweep_z:
         sweep_z_coordinates(planner, args.arm, x=args.start_b[0], y=args.start_b[1], goal=np.array(args.goal))

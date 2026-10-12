@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Unitree G1 MoveIt 2 OMPL 运动规划演示与基准测试套件
-(MoveIt 2 OMPL Planning Demo & Benchmark for Unitree G1)
+人形机器人 MoveIt 2 OMPL 运动规划演示与基准测试套件
+(MoveIt 2 OMPL Planning Demo & Benchmark for 人形机器人)
 ================================================================================
 
 测试与演示内容：
 1. 7-DoF 单臂快速无障碍规划 (left_arm, RRTConnect)；
-2. 10-DoF 躯干-手臂协同远距离规划 (left_arm_torso, RRTConnect)；
+2. 9-DoF 躯干-手臂协同远距离规划 (left_arm_torso, RRTConnect)；
 3. 动态注入环境障碍物，验证 OMPL 全局避障绕行规划能力；
 4. 对比 RRTConnect 与 RRT* 的规划耗时与路标点质量。
 """
@@ -29,7 +29,7 @@ from core.planning.moveit_ompl_planner import MoveItOMPLPlanner
 
 def run_ompl_demo(use_home: bool = False):
     print("=" * 80)
-    print(" [START] Unitree G1 MoveIt 2 OMPL 全局运动规划基准演示")
+    print(" [START] 人形机器人 MoveIt 2 OMPL 全局运动规划基准演示")
     print("=" * 80)
 
     # 1. 初始化 ROS 2 客户端
@@ -42,7 +42,7 @@ def run_ompl_demo(use_home: bool = False):
     if not planner.plan_service_client.service_is_ready():
         print("\n[FAIL] 错误: MoveIt 规划服务 (/plan_kinematic_path) 未就绪！")
         print("[INFO] 请先在另一个终端窗口中启动 MoveIt 服务端：")
-        print("   ros2 launch launch/g1_moveit_ompl.launch.py\n")
+        print("   ros2 launch launch/moveit_ompl.launch.py\n")
         return
 
     print("[OK] MoveIt 2 OMPL 规划服务端已就绪，开始测试流水线...")
@@ -90,10 +90,10 @@ def run_ompl_demo(use_home: bool = False):
         print(f"  [FAIL] 规划失败: {res1.error_message}")
 
     # ──────────────────────────────────────────────────────────────────────────
-    # 【测试 2】10-DoF 躯干-手臂协同大跨度规划 (left_arm_torso, RRTConnect)
+    # 【测试 2】9-DoF 躯干-手臂协同大跨度规划 (left_arm_torso, RRTConnect)
     # ──────────────────────────────────────────────────────────────────────────
     print("\n" + "-" * 80)
-    print("▶ 【测试 2】10-DoF 躯干-手臂协同大跨度目标规划 (left_arm_torso | 算法: RRTConnect)")
+    print("▶ 【测试 2】9-DoF 躯干-手臂协同大跨度目标规划 (left_arm_torso | 算法: RRTConnect)")
     target_pos_2 = [0.42, 0.32, 0.95]
     print(f"  • 远距离目标坐标: {target_pos_2} (需要腰部 3-DoF 旋转倾斜介入协同)")
 
@@ -141,8 +141,8 @@ def run_ompl_demo(use_home: bool = False):
     )
     print(f"    • {res3_arm.summary()}")
 
-    # 3.2 10-DoF 躯干-手臂协同大冗余极速避障 (left_arm_torso | 算法: RRTConnect)
-    print("  [3.2] 10-DoF 躯干-手臂协同大冗余极速避障 (left_arm_torso | 算法: RRTConnect)...")
+    # 3.2 9-DoF 躯干-手臂协同大冗余极速避障 (left_arm_torso | 算法: RRTConnect)
+    print("  [3.2] 9-DoF 躯干-手臂协同大冗余极速避障 (left_arm_torso | 算法: RRTConnect)...")
     res3_torso = planner.plan_to_pose(
         group_name="left_arm_torso",
         target_pos=target_pos_3,
@@ -183,9 +183,9 @@ def run_ompl_demo(use_home: bool = False):
     print("-" * 90)
     items = [
         ("7-DoF 自由空间快速规划", "left_arm", "RRTConnect", res1.success, res1.planning_time * 1000.0, len(res1.waypoints)),
-        ("10-DoF 躯干协同大目标规划", "left_arm_torso", "RRTConnect", res2.success, res2.planning_time * 1000.0, len(res2.waypoints)),
+        ("9-DoF 躯干协同大目标规划", "left_arm_torso", "RRTConnect", res2.success, res2.planning_time * 1000.0, len(res2.waypoints)),
         ("7-DoF 动态障碍物绕行避障", "left_arm", "RRTConnect", res3_arm.success, res3_arm.planning_time * 1000.0, len(res3_arm.waypoints)),
-        ("10-DoF 躯干协同极速避障", "left_arm_torso", "RRTConnect", res3_torso.success, res3_torso.planning_time * 1000.0, len(res3_torso.waypoints)),
+        ("9-DoF 躯干协同极速避障", "left_arm_torso", "RRTConnect", res3_torso.success, res3_torso.planning_time * 1000.0, len(res3_torso.waypoints)),
         ("渐进最优路径优化评测", "left_arm", "RRT*", res4_star.success, res4_star.planning_time * 1000.0, len(res4_star.waypoints)),
     ]
     for name, group, algo, succ, ms, pts in items:
@@ -195,7 +195,7 @@ def run_ompl_demo(use_home: bool = False):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Unitree G1 MoveIt 2 OMPL 运动规划演示与基准评测")
+    parser = argparse.ArgumentParser(description="人形机器人 MoveIt 2 OMPL 运动规划演示与基准评测")
     parser.add_argument(
         "--use-home",
         action="store_true",

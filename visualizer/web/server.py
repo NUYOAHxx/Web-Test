@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Unitree G1 实时高精度数字孪生与遥测监控大屏服务端 (Pure Telemetry & Command Dispatcher)
+人形机器人 实时高精度数字孪生与遥测监控大屏服务端 (Pure Telemetry & Command Dispatcher)
 ================================================================================
 
 定位：纯被动遥测展示 + 目标指令下发中枢 (Zero IK Calculation · Pure Telemetry & Dispatcher)
@@ -34,25 +34,36 @@ if DIR_ROOT not in sys.path:
 import numpy as np
 import pinocchio as pin
 
-from core.kinematics.g1_model import (
-    G1KinematicsModel,
-    G1_JOINT_LIMITS,
-    G1_WAIST_LIMITS,
-    G1_DEFAULT_STAND_JOINTS,
+from core.kinematics.humanoid_model import (
+    HumanoidKinematicsModel,
+    JOINT_LIMITS,
+    WAIST_LIMITS,
+    DEFAULT_STAND_JOINTS,
 )
-from core.collision.g1_collision import G1CollisionChecker
-from core.solver.g1_pink_ik import IK_PIPELINE_STAGES
+from core.collision.humanoid_collision import HumanoidCollisionChecker
+from core.solver.humanoid_pink_ik import IK_PIPELINE_STAGES
 
 # 检查 ROS 2 是否可用
 HAS_ROS2 = False
 try:
     import rclpy
+    from rclpy.executors import ExternalShutdownException
     from sensor_msgs.msg import JointState
     from geometry_msgs.msg import PoseStamped
     from std_msgs.msg import String
     HAS_ROS2 = True
 except ImportError:
     HAS_ROS2 = False
+
+# 9-DoF (2 腰 + 7 臂) 末端执行器实测可达包络 (世界坐标系, 米)。
+# 依据: 前向最大伸展约 0.45m, 侧向约 ±0.30m, 高度区间约 [0.70, 1.30]m。
+# 该包络比理论关节极限保守得多 —— 超出的目标不是"算得慢", 而是根本无解,
+# 提前在指令入口拒绝, 避免用户面对无法收敛的指令却不知原因。
+SAFE_REACH_ENVELOPE = {
+    "x": (0.05, 0.45),
+    "y": (-0.30, 0.30),
+    "z": (0.70, 1.30),
+}
 
 
 class RobotTelemetryManager:
@@ -61,8 +72,8 @@ class RobotTelemetryManager:
     def __init__(self, enable_ros: bool = True):
         self.lock = threading.Lock()
         print("[Web 纯遥测后端] 正在加载 G1 运动学引擎与 28 对安全碰撞检测雷达...")
-        self.kin = G1KinematicsModel()
-        self.collision = G1CollisionChecker(self.kin)
+        self.kin = HumanoidKinematicsModel()
+        self.collision = HumanoidCollisionChecker(self.kin)
 
         # 加载 36 个 3D 官方 CAD STL 视觉网格拓扑
         self.visual_model = None
@@ -79,7 +90,7 @@ class RobotTelemetryManager:
 
         # 计算就绪姿态下末端手爪初始世界坐标
         q_init = pin.neutral(self.kin.model)
-        for k, v in G1_DEFAULT_STAND_JOINTS.items():
+        for k, v in DEFAULT_STAND_JOINTS.items():
             if self.kin.model.existJointName(k):
                 q_init[self.kin.model.joints[self.kin.model.getJointId(k)].idx_q] = v
         pin.forwardKinematics(self.kin.model, self.kin.data, q_init)
@@ -90,7 +101,7 @@ class RobotTelemetryManager:
 
         # 遥测数据缓存 (初始目标与手爪精准贴合，初始误差 0.0mm，姿态 0.0°)
         self.active_arm = "left_arm"
-        self.joint_positions = dict(G1_DEFAULT_STAND_JOINTS)
+        self.joint_positions = dict(DEFAULT_STAND_JOINTS)
         self.target_pos = init_hand_p.copy()
         self.target_rot = init_hand_rot.copy()
 
@@ -110,7 +121,7 @@ class RobotTelemetryManager:
             "convergence_trace": [],
             "step_details": [],
             "pipeline_stages": IK_PIPELINE_STAGES,
-            "algorithm": "10-DoF Weighted DLS (W_waist=8.0) + 28-Pair Barrier",
+            "algorithm": "9-DoF Weighted DLS (W_waist=8.0) + 28-Pair Barrier",
             "actual_rpy_deg": init_rpy_deg,
             "target_rpy_deg": init_rpy_deg,
         }
@@ -132,6 +143,8 @@ class RobotTelemetryManager:
         self.ros_node = None
         self.pub_target_pose = None
         self.pub_command = None
+        # 最近一次由本节点自行发布的目标位姿，用于识别并丢弃 DDS 自回环消息
+        self._last_published_pose = None
         if enable_ros and HAS_ROS2:
             try:
                 if not rclpy.ok():
@@ -140,7 +153,11 @@ class RobotTelemetryManager:
 
                 # 订阅标准遥测话题 (标准话题，不作冗余兼容)
                 self.ros_node.create_subscription(JointState, "/joint_states", self._on_joint_state, 10)
-                self.ros_node.create_subscription(PoseStamped, "/g1/kinematics/target_pose", self._on_target_pose, 10)
+                # 订阅节点回显的"当前目标位姿"用于遥测显示。
+                # 注意: 与指令话题 /g1/kinematics/target_pose 分离 —— 后者由本节点发布、
+                # 供 IK 节点订阅解算; 若在此订阅它, 会把自身发布的指令当成外部新指令,
+                # 再叠加 IK 节点曾经的自回环, 共同造成持续重解。
+                self.ros_node.create_subscription(PoseStamped, "/g1/kinematics/target_status", self._on_target_pose, 10)
                 self.ros_node.create_subscription(String, "/g1/kinematics/solver_metrics", self._on_solver_metrics, 10)
 
                 # 发布目标控制指令话题
@@ -174,8 +191,14 @@ class RobotTelemetryManager:
             t0 = time.time()
             try:
                 self._compute_and_cache_state()
-            except Exception:
-                pass
+            except Exception as exc:
+                # 不能静默: 该线程是全部遥测数据的唯一生产者, 异常一旦被吞,
+                # 缓存将永久停留在最后一帧, 表现为"大屏数据卡死不动"且无任何线索。
+                # 节流记录, 避免高频异常刷屏拖垮服务。
+                now = time.time()
+                if now - getattr(self, "_last_state_error_log", 0.0) > 5.0:
+                    self._last_state_error_log = now
+                    print(f"[遥测线程] 状态计算异常 (已节流): {type(exc).__name__}: {exc}")
             elapsed = time.time() - t0
             sleep_time = max(0.001, interval - elapsed)
             time.sleep(sleep_time)
@@ -199,8 +222,19 @@ class RobotTelemetryManager:
         while self.running and rclpy.ok():
             try:
                 rclpy.spin_once(self.ros_node, timeout_sec=0.05)
-            except Exception:
+            except ExternalShutdownException:
                 break
+            except Exception as exc:
+                # 瞬时异常不应永久终止 ROS 监听: 直接 break 会让遥测中枢从此
+                # 收不到任何 /joint_states 与求解指标, 且无任何日志线索。
+                # 此处节流告警后继续循环, 仅在 context 确实失效时才退出。
+                now = time.time()
+                if now - getattr(self, "_last_spin_error_log", 0.0) > 5.0:
+                    self._last_spin_error_log = now
+                    print(f"[ROS 线程] spin_once 异常 (已节流, 继续监听): {type(exc).__name__}: {exc}")
+                if not rclpy.ok():
+                    break
+                time.sleep(0.05)
 
     def _update_freq_counter(self):
         now = time.time()
@@ -238,8 +272,25 @@ class RobotTelemetryManager:
             qy = float(msg.pose.orientation.y)
             qz = float(msg.pose.orientation.z)
             qw = float(msg.pose.orientation.w)
+            quat = np.array([qx, qy, qz, qw], dtype=np.float64)
+
+            # 本节点既发布又订阅 /g1/kinematics/target_pose，DDS 会把自身消息回环回来。
+            # 若不拦截，自行发布的位姿会把 target_pos/target_rot 覆盖成同一份快照；
+            # 更严重的是 rpy=None 时发布的 identity 四元数会污染这里维护的姿态。
+            # 通过比对"最近一次自行发布的内容"识别并丢弃回环消息。
+            if self._last_published_pose is not None:
+                last_pos, last_quat = self._last_published_pose
+                if (
+                    np.allclose(new_pos, last_pos, atol=1e-6)
+                    and np.allclose(quat, last_quat, atol=1e-6)
+                ):
+                    return
+
             if qx**2 + qy**2 + qz**2 + qw**2 > 1e-4:
                 new_rot = pin.Quaternion(qw, qx, qy, qz).normalized().toRotationMatrix()
+                # 姿态变化同样必须置脏，否则大屏会永久显示旧姿态
+                if self.target_rot is None or not np.allclose(new_rot, self.target_rot, atol=1e-6):
+                    self._fk_dirty = True
                 self.target_rot = new_rot
             if self.target_pos is None or not np.allclose(new_pos, self.target_pos, atol=1e-4):
                 self._fk_dirty = True
@@ -256,7 +307,7 @@ class RobotTelemetryManager:
                 self.add_event_log(
                     "IK_SOLVER",
                     f"IK 解算收敛 ({data.get('time_ms', 0):.1f}ms)",
-                    f"位置残差: {data.get('pos_err_mm', 0):.2f}mm{rot_str} | 步数: {data.get('iters', 0)}{seed_desc} | 模式: {data.get('mode', '10-DoF')}"
+                    f"位置残差: {data.get('pos_err_mm', 0):.2f}mm{rot_str} | 步数: {data.get('iters', 0)}{seed_desc} | 模式: {data.get('mode', '9-DoF')}"
                 )
         except Exception:
             pass
@@ -278,12 +329,25 @@ class RobotTelemetryManager:
     def dispatch_target_command(self, x: float, y: float, z: float, rpy: Optional[List[float]] = None, arm: str = "left_arm", preset_name: str = "自定义目标"):
         """向 ROS 2 广播 6-DoF 目标位姿指令，交由 IK 求解器计算"""
         target_rot = None
-        target_quat = [0.0, 0.0, 0.0, 1.0]
+        target_quat = None
         if rpy is not None and len(rpy) == 3:
             rpy_rad = np.radians([float(v) for v in rpy])
             target_rot = pin.rpy.rpyToMatrix(float(rpy_rad[0]), float(rpy_rad[1]), float(rpy_rad[2]))
             q_pin = pin.Quaternion(target_rot)
             target_quat = [float(q_pin.x), float(q_pin.y), float(q_pin.z), float(q_pin.w)]
+        else:
+            # rpy 缺省时语义是"只控位置、保持当前姿态"。
+            # 必须下发当前保持的姿态；若下发 identity 四元数，
+            # IK 节点会把它当成合法的 6-DoF 目标姿态，把手腕强行扭到世界坐标系 identity，
+            # 造成不可预期的姿态跳变（甚至自碰撞）。
+            with self.lock:
+                cur_rot = self.target_rot
+            if cur_rot is not None:
+                q_pin = pin.Quaternion(cur_rot)
+                target_quat = [float(q_pin.x), float(q_pin.y), float(q_pin.z), float(q_pin.w)]
+            else:
+                # 尚无保持姿态时退回 identity，并显式标记为纯位置指令
+                target_quat = [0.0, 0.0, 0.0, 1.0]
 
         with self.lock:
             self.active_arm = arm
@@ -323,13 +387,19 @@ class RobotTelemetryManager:
             p_msg.pose.orientation.y = float(target_quat[1])
             p_msg.pose.orientation.z = float(target_quat[2])
             p_msg.pose.orientation.w = float(target_quat[3])
+            # 登记本次发布内容，供 _on_target_pose 识别并丢弃 DDS 自回环
+            with self.lock:
+                self._last_published_pose = (
+                    np.array([float(x), float(y), float(z)], dtype=np.float64),
+                    np.array(target_quat, dtype=np.float64),
+                )
             self.pub_target_pose.publish(p_msg)
 
         print(f"[Web 目标中枢] 🚀 成功向 ROS 2 发布 6D 目标指令: [{x:.3f}, {y:.3f}, {z:.3f}] (执行臂: {arm}, RPY: {rpy})")
 
     def _compute_ee_pose_fk(self, arm: str, joint_dict: Optional[Dict[str, float]] = None) -> Tuple[np.ndarray, np.ndarray]:
         """计算指定关节配置下末端手爪的笛卡尔空间坐标与旋转矩阵"""
-        joints = joint_dict if joint_dict is not None else G1_DEFAULT_STAND_JOINTS
+        joints = joint_dict if joint_dict is not None else DEFAULT_STAND_JOINTS
         q_full = pin.neutral(self.kin.model)
         for jname, val in joints.items():
             if self.kin.model.existJointName(jname):
@@ -360,7 +430,7 @@ class RobotTelemetryManager:
         with self.lock:
             self.add_event_log("COMMAND", "下达复位指令", "恢复官方对称微屈直立就绪姿态")
             # 重新计算就绪姿态下手爪真实位置与姿态并重置目标
-            self.target_pos, self.target_rot = self._compute_ee_pose_fk(self.active_arm, G1_DEFAULT_STAND_JOINTS)
+            self.target_pos, self.target_rot = self._compute_ee_pose_fk(self.active_arm, DEFAULT_STAND_JOINTS)
             self._fk_dirty = True
 
         stand_quat = pin.Quaternion(self.target_rot)
@@ -396,8 +466,8 @@ class RobotTelemetryManager:
 
     def reset_to_stand_local(self):
         with self.lock:
-            self.joint_positions = dict(G1_DEFAULT_STAND_JOINTS)
-            self.target_pos, self.target_rot = self._compute_ee_pose_fk(self.active_arm, G1_DEFAULT_STAND_JOINTS)
+            self.joint_positions = dict(DEFAULT_STAND_JOINTS)
+            self.target_pos, self.target_rot = self._compute_ee_pose_fk(self.active_arm, DEFAULT_STAND_JOINTS)
             self._fk_dirty = True
 
     # ─────────────────────────────────────────────────────────────
@@ -411,7 +481,9 @@ class RobotTelemetryManager:
             # 1. 运动学脏检查：若机器人未发生关节位移且目标未变，直接复用静态几何与碰撞计算结果
             if not self._fk_dirty and self._cached_kinematics_payload is not None:
                 state = dict(self._cached_kinematics_payload)
-                state["solver_diagnostics"] = self.solver_metrics
+                # 必须拷贝快照: self.solver_metrics 会被回调线程就地 update, 直接引用会让
+                # 序列化线程读到更新中途的结构 (键存在但值未刷新), 表现为遥测字段随机缺失
+                state["solver_diagnostics"] = dict(self.solver_metrics)
                 state["telemetry_link"] = {
                     "is_connected": is_connected,
                     "dds_rate_hz": round(self.current_hz, 1),
@@ -480,13 +552,13 @@ class RobotTelemetryManager:
 
             # 5.1 Pinocchio 全身刚体动力学计算 (CoM 双足平衡安全、广义重力补偿力矩与可操作度)
             bal_metrics = self.kin.evaluate_balance(q_full)
-            tau_g = self.kin.compute_gravity_torques(q_full, arm=self.active_arm, is_10dof=True)
-            active_10dof_jnames = self.kin.chain_10dof_joint_names[self.active_arm]
-            q_10 = np.array([self.joint_positions.get(jn, 0.0) for jn in active_10dof_jnames], dtype=np.float64)
+            tau_g = self.kin.compute_gravity_torques(q_full, arm=self.active_arm, is_9dof=True)
+            active_9dof_jnames = self.kin.chain_9dof_joint_names[self.active_arm]
+            q_10 = np.array([self.joint_positions.get(jn, 0.0) for jn in active_9dof_jnames], dtype=np.float64)
             manip_metrics = self.kin.compute_manipulability(self.active_arm, q_10, has_rot=True)
 
             gravity_torques_data = []
-            for idx, jname in enumerate(active_10dof_jnames):
+            for idx, jname in enumerate(active_9dof_jnames):
                 val_nm = float(tau_g[idx])
                 clean_lbl = jname.replace("left_", "").replace("right_", "").replace("_joint", "")
                 gravity_torques_data.append({
@@ -506,10 +578,13 @@ class RobotTelemetryManager:
             for name in self.kin.waist_joint_names:
                 val_rad = float(self.joint_positions.get(name, 0.0))
                 val_deg = round(math.degrees(val_rad), 1)
-                lim_min, lim_max = G1_WAIST_LIMITS[name]
+                lim_min, lim_max = WAIST_LIMITS[name]
                 min_deg = round(math.degrees(lim_min), 1)
                 max_deg = round(math.degrees(lim_max), 1)
-                offset_pct = (val_rad / lim_max * 100.0) if val_rad >= 0 else (val_rad / abs(lim_min) * 100.0)
+                # 除零防护: URDF 中允许某关节限位端点为 0 (单侧行程), 此前直接除会抛
+                # ZeroDivisionError; 该函数运行在遥测线程, 一旦抛出将导致大屏数据永久冻结。
+                _denom = lim_max if val_rad >= 0 else abs(lim_min)
+                offset_pct = (val_rad / _denom * 100.0) if _denom > 1e-9 else 0.0
                 offset_pct = max(-100.0, min(100.0, offset_pct))
                 meta = waist_metadata.get(name, {"label": name, "symbol": "q"})
 
@@ -539,10 +614,13 @@ class RobotTelemetryManager:
             for name in arm_jnames:
                 val_rad = float(self.joint_positions.get(name, 0.0))
                 val_deg = round(math.degrees(val_rad), 1)
-                lim_min, lim_max = G1_JOINT_LIMITS[name]
+                lim_min, lim_max = JOINT_LIMITS[name]
                 min_deg = round(math.degrees(lim_min), 1)
                 max_deg = round(math.degrees(lim_max), 1)
-                offset_pct = (val_rad / lim_max * 100.0) if val_rad >= 0 else (val_rad / abs(lim_min) * 100.0)
+                # 除零防护: URDF 中允许某关节限位端点为 0 (单侧行程), 此前直接除会抛
+                # ZeroDivisionError; 该函数运行在遥测线程, 一旦抛出将导致大屏数据永久冻结。
+                _denom = lim_max if val_rad >= 0 else abs(lim_min)
+                offset_pct = (val_rad / _denom * 100.0) if _denom > 1e-9 else 0.0
                 offset_pct = max(-100.0, min(100.0, offset_pct))
                 clean_key = name.replace("left_", "").replace("right_", "").replace("_joint", "")
                 meta = arm_metadata.get(clean_key, {"label": clean_key, "symbol": "q"})
@@ -589,7 +667,9 @@ class RobotTelemetryManager:
 
             # 组装完整返回报文
             state = dict(self._cached_kinematics_payload)
-            state["solver_diagnostics"] = self.solver_metrics
+            # 必须拷贝快照: self.solver_metrics 会被回调线程就地 update, 直接引用会让
+            # 序列化线程读到更新中途的结构 (键存在但值未刷新), 表现为遥测字段随机缺失
+            state["solver_diagnostics"] = dict(self.solver_metrics)
             state["telemetry_link"] = {
                 "is_connected": is_connected,
                 "dds_rate_hz": round(self.current_hz, 1),
@@ -612,6 +692,18 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         web_dir = os.path.dirname(os.path.abspath(__file__))
         super().__init__(*args, directory=web_dir, **kwargs)
+
+    def end_headers(self):
+        # 静态资源禁用缓存。
+        # SimpleHTTPRequestHandler 默认带 Last-Modified 并返回 304, 浏览器据此复用旧
+        # style.css / js/ —— 改动前端后刷新仍看到旧布局, 排查时极具迷惑性。
+        # 这里对前端资产强制 no-cache, 保证每次刷新都取到当前版本。
+        path = self.path.split("?")[0]
+        if not path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+        super().end_headers()
 
     def do_GET(self):
         if self.path == "/api/state":
@@ -677,15 +769,19 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                     raise ValueError("Target coordinates cannot contain NaN or Infinity")
 
                 # 2. 机械臂执行空间物理安全包络防御校验 (Safe Reach Envelope)
-                # G1 左/右臂 10-DoF 工作空间实测边界 (5000点蒙特卡洛采样验证):
-                #   X: [0.0, 1.0]  Y: [-0.8, 0.8]  Z: [0.64, 1.5]
-                # Z < 0.64m 超出关节极限，任何 IK 解算器均无法收敛！
-                z_min = 0.64
-                if not (0.0 <= x <= 1.0 and -0.8 <= y <= 0.8 and z_min <= z <= 1.5):
+                # 9-DoF (2 腰 + 7 臂) 实测可达包络。早期版本使用了明显偏大的理论包络
+                # (X≤1.0 / Y≤0.8 / Z∈[0.64,1.5]), 结果是"校验通过但 IK 无法收敛",
+                # 用户只能在遥测表上看到上百毫米的残差却不知原因。现按实测边界收紧,
+                # 越界目标在入口即被明确拒绝。
+                env = SAFE_REACH_ENVELOPE
+                if not (env["x"][0] <= x <= env["x"][1]
+                        and env["y"][0] <= y <= env["y"][1]
+                        and env["z"][0] <= z <= env["z"][1]):
                     raise ValueError(
-                        f"目标 [{x:.3f}, {y:.3f}, {z:.3f}] 超出 G1 物理工作空间: "
-                        f"X:[0.0, 1.0]m, Y:[-0.8, 0.8]m, Z:[{z_min}, 1.5]m. "
-                        f"G1 左臂最低可达高度约 0.64m，Z={z:.3f}m 不可达！"
+                        f"目标 [{x:.3f}, {y:.3f}, {z:.3f}] 超出 9-DoF 可达工作空间: "
+                        f"X:[{env['x'][0]:.2f}, {env['x'][1]:.2f}]m, "
+                        f"Y:[{env['y'][0]:.2f}, {env['y'][1]:.2f}]m, "
+                        f"Z:[{env['z'][0]:.2f}, {env['z'][1]:.2f}]m"
                     )
 
                 # 3. 操作臂合法性校验
@@ -697,14 +793,22 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                 if rpy_raw is None and any(k in data for k in ("roll", "pitch", "yaw")):
                     rpy_raw = [float(data.get("roll", 0.0)), float(data.get("pitch", 0.0)), float(data.get("yaw", 0.0))]
                 rpy = None
-                if rpy_raw is not None and isinstance(rpy_raw, (list, tuple)) and len(rpy_raw) == 3:
+                if rpy_raw is not None:
+                    # 显式给出的 rpy 必须是长度 3 的合法序列。
+                    # 旧实现对长度不等于 3 的输入静默丢弃，退化为 identity 姿态的 6-DoF 指令，
+                    # 把"脏数据"伪装成"合法指令"下发到真机，这里改为明确拒绝。
+                    if not isinstance(rpy_raw, (list, tuple)) or len(rpy_raw) != 3:
+                        raise ValueError(
+                            f"'rpy' must be a list/tuple of 3 angles (roll, pitch, yaw), got {rpy_raw!r}"
+                        )
                     rpy = [float(rpy_raw[0]), float(rpy_raw[1]), float(rpy_raw[2])]
                     for angle in rpy:
                         if math.isnan(angle) or math.isinf(angle):
                             raise ValueError("RPY angles cannot contain NaN or Infinity")
 
-                if MANAGER:
-                    MANAGER.dispatch_target_command(x, y, z, rpy=rpy, arm=arm, preset_name=preset)
+                if MANAGER is None:
+                    raise RuntimeError("ROS 2 调度中枢未就绪 (MANAGER 未初始化)，指令未下发")
+                MANAGER.dispatch_target_command(x, y, z, rpy=rpy, arm=arm, preset_name=preset)
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -735,8 +839,9 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                 if arm not in ("left_arm", "right_arm"):
                     raise ValueError(f"Invalid arm '{arm}', must be 'left_arm' or 'right_arm'")
 
-                if MANAGER:
-                    MANAGER.dispatch_set_arm(arm)
+                if MANAGER is None:
+                    raise RuntimeError("ROS 2 调度中枢未就绪 (MANAGER 未初始化)，指令未下发")
+                MANAGER.dispatch_set_arm(arm)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
@@ -751,23 +856,39 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
             return
 
         elif self.path == "/api/reset_stand":
-            if MANAGER:
+            try:
+                if MANAGER is None:
+                    raise RuntimeError("ROS 2 调度中枢未就绪 (MANAGER 未初始化)，指令未下发")
                 MANAGER.dispatch_reset_stand()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "RESET_DISPATCHED", "message": "已发布就绪复位指令"}, ensure_ascii=False).encode("utf-8"))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "RESET_DISPATCHED", "message": "已发布就绪复位指令"}, ensure_ascii=False).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
             return
 
         elif self.path == "/api/demo_circle":
-            if MANAGER:
+            try:
+                if MANAGER is None:
+                    raise RuntimeError("ROS 2 调度中枢未就绪 (MANAGER 未初始化)，指令未下发")
                 MANAGER.dispatch_circle_demo()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "DEMO_DISPATCHED", "message": "已触发连续空间轨迹演示"}, ensure_ascii=False).encode("utf-8"))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "DEMO_DISPATCHED", "message": "已触发连续空间轨迹演示"}, ensure_ascii=False).encode("utf-8"))
+            except Exception as e:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
             return
 
         super().do_POST()
@@ -791,13 +912,13 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 def main():
     global MANAGER
-    parser = argparse.ArgumentParser(description="Unitree G1 纯被动遥测与指令分发服务端")
+    parser = argparse.ArgumentParser(description="人形机器人 纯被动遥测与指令分发服务端")
     parser.add_argument("--port", type=int, default=8080, help="Web 监控端口 (默认 8080)")
     parser.add_argument("--no-ros", action="store_true", help="禁用 ROS 2 订阅")
     args = parser.parse_args()
 
     print("\n" + "=" * 80)
-    print(" 📡 Unitree G1 实时高精度数字孪生与遥测监控大屏 (Pure Telemetry & Dispatcher)")
+    print(" 📡 人形机器人 实时高精度数字孪生与遥测监控大屏 (Pure Telemetry & Dispatcher)")
     print("=" * 80)
     print(" 架构原则：零 IK 计算 · 纯被动遥测 · 笛卡尔目标指令一键分发")
 

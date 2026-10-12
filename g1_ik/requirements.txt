@@ -1,0 +1,8 @@
+pin==3.8.0          # pinocchio (pip wheel "pin"), includes Coal 3.0.2
+casadi==3.8.1
+placo==0.10.1
+numpy==2.3.5
+scipy
+trimesh
+matplotlib
+pyyaml

@@ -1,0 +1,80 @@
+# 通用人形机器人 MoveIt 2 规划配置 (OmplPlanningPipeline)
+#
+# 说明:
+#   * 规划管线使用 OMPL (RRTConnect / RRT* / PRM / RRTConnectkConfigDefault 等)
+#   * 本文件原先作为孤儿配置存在 (从未被任何代码加载), 现正式接入 move_group。
+#   * 规划组与 SRDF (resources/humanoid/humanoid_29dof.srdf) 中的 group 定义严格一致:
+#       left_arm / right_arm / left_arm_torso / right_arm_torso / both_arms
+
+planning_plugins:
+  - ompl_interface/OMPLPlanner
+request_adapters:
+  - default_planning_request_adapters/ResolveConstraintFrames
+  - default_planning_request_adapters/ValidateWorkspaceBounds
+  - default_planning_request_adapters/CheckStartStateBounds
+  - default_planning_request_adapters/CheckStartStateCollision
+  # 注: Jazzy 的 default_planning_request_adapters 不提供 CheckGoalStateBounds /
+  # CheckGoalStateCollision, 声明它们会导致 move_group 启动时 pluginlib 抛
+  # LibraryLoadException 而 FATAL 退出。目标侧校验由 response_adapters/ValidateSolution 覆盖。
+response_adapters:
+  - default_planning_response_adapters/AddTimeOptimalParameterization
+  - default_planning_response_adapters/ValidateSolution
+  - default_planning_response_adapters/DisplayMotionPath
+
+# 规划投影器 (关节空间规划无需投影器)
+# 注: 关节限值不在此处配置 —— TOTG 时间参数化阶段读取的是
+#     robot_description_planning.joint_limits.<joint>.*, 由 launch 注入。
+#     放在 ompl 命名空间下不会生效, 会导致 "No acceleration limit was defined" 报错。
+
+planner_configs:
+  RRTConnectkConfigDefault:
+    type: geometric::RRTConnect
+    range: 0.0
+  RRTstarkConfigDefault:
+    type: geometric::RRTstar
+    range: 0.0
+    goal_bias: 0.05
+    delay_collision_checking: 1
+  PRMkConfigDefault:
+    type: geometric::PRM
+    max_nearest_neighbors: 10
+
+left_arm:
+  planner_configs:
+    - RRTConnectkConfigDefault
+    - RRTstarkConfigDefault
+    - PRMkConfigDefault
+  projection_evaluator: joints(left_arm,right_arm)
+  longest_valid_segment_fraction: 0.005
+
+right_arm:
+  planner_configs:
+    - RRTConnectkConfigDefault
+    - RRTstarkConfigDefault
+    - PRMkConfigDefault
+  projection_evaluator: joints(left_arm,right_arm)
+  longest_valid_segment_fraction: 0.005
+
+left_arm_torso:
+  planner_configs:
+    - RRTConnectkConfigDefault
+    - RRTstarkConfigDefault
+    - PRMkConfigDefault
+  projection_evaluator: joints(waist_yaw_joint,waist_roll_joint,waist_pitch_joint,left_shoulder_pitch_joint,left_shoulder_roll_joint,left_shoulder_yaw_joint,left_elbow_joint,left_wrist_roll_joint,left_wrist_pitch_joint,left_wrist_yaw_joint)
+  longest_valid_segment_fraction: 0.005
+
+right_arm_torso:
+  planner_configs:
+    - RRTConnectkConfigDefault
+    - RRTstarkConfigDefault
+    - PRMkConfigDefault
+  projection_evaluator: joints(waist_yaw_joint,waist_roll_joint,waist_pitch_joint,right_shoulder_pitch_joint,right_shoulder_roll_joint,right_shoulder_yaw_joint,right_elbow_joint,right_wrist_roll_joint,right_wrist_pitch_joint,right_wrist_yaw_joint)
+  longest_valid_segment_fraction: 0.005
+
+both_arms:
+  planner_configs:
+    - RRTConnectkConfigDefault
+    - RRTstarkConfigDefault
+    - PRMkConfigDefault
+  projection_evaluator: joints(left_arm,right_arm)
+  longest_valid_segment_fraction: 0.005

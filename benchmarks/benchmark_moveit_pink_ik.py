@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Unitree G1 MoveIt 2 链路逆运动学 (IK) 评测与端到端闭环规划基准程序
+人形机器人 MoveIt 2 链路逆运动学 (IK) 评测与端到端闭环规划基准程序
 (Benchmark: MoveIt 2 Kinematics Pipeline with Pink IK Integration)
 ================================================================================
 
 功能：
 1. 测试 MoveIt 2 标准 GetPositionIK 服务接口 (/g1/compute_ik)；
-2. 对比 MoveIt 2 原生 KDL 插件 vs Pink 求解器在 10-DoF 腰臂协同下的表现；
+2. 对比 MoveIt 2 原生 KDL 插件 vs Pink 求解器在 9-DoF 腰臂协同下的表现；
 3. 验证“笛卡尔位姿 -> Pink IK 最优构型求解 -> MoveIt 2 OMPL 全局避障轨迹”闭环链路。
 """
 
@@ -27,13 +27,14 @@ from moveit_msgs.srv import GetPositionIK
 from moveit_msgs.msg import MoveItErrorCodes
 import pinocchio as pin
 
-from core.solver.g1_pink_ik import G1PinkIKSolver, G1_READY_POSE
+from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
+from core.kinematics.humanoid_model import READY_POSE
 from core.planning.moveit_ompl_planner import MoveItOMPLPlanner
 
 
 def run_moveit_ik_benchmark():
     print("=" * 80)
-    print(" [START] Unitree G1 MoveIt 2 链路逆运动学 (IK) 模块专项评测与基准对比")
+    print(" [START] 人形机器人 MoveIt 2 链路逆运动学 (IK) 模块专项评测与基准对比")
     print("=" * 80)
 
     if not rclpy.ok():
@@ -46,7 +47,7 @@ def run_moveit_ik_benchmark():
     print("[COMM] 正在探测 MoveIt 2 链路 IK 服务 (/g1/compute_ik)...")
     ready = client.wait_for_service(timeout_sec=3.0)
     if not ready:
-        print("[FAIL] 错误: /g1/compute_ik 服务未就绪，请先启动 core/solver/g1_ik_node.py！")
+        print("[FAIL] 错误: /g1/compute_ik 服务未就绪，请先启动 core/solver/ik_node.py！")
         return
 
     print("[OK] 成功接入 MoveIt 2 链路 IK 服务！开始测试...\n")
@@ -61,28 +62,28 @@ def run_moveit_ik_benchmark():
             "desc": "单臂舒适操作区间，验证纯手臂快速收敛",
         },
         {
-            "name": "10-DoF 舒适区手臂优先",
+            "name": "9-DoF 舒适区手臂优先",
             "group": "left_arm_torso",
             "pos": [0.26, 0.21, 0.80],
             "quat": [0.0919, 0.3401, 0.0417, 0.9349],
-            "desc": "10-DoF 下验证手臂优先，腰部是否保持锁定直立",
+            "desc": "9-DoF 下验证手臂优先，腰部是否保持锁定直立",
         },
         {
-            "name": "10-DoF 远端大跨度抓取",
+            "name": "9-DoF 远端大跨度抓取",
             "group": "left_arm_torso",
             "pos": [0.52, 0.22, 0.85],
             "quat": [0.0, 0.0, 0.0, 1.0],
             "desc": "单臂不可达超限区域，验证腰臂协同扩展工作空间",
         },
         {
-            "name": "10-DoF 低位俯身下探",
+            "name": "9-DoF 低位俯身下探",
             "group": "left_arm_torso",
             "pos": [0.30, 0.20, 0.65],
             "quat": [0.0, 0.3827, 0.0, 0.9239],
             "desc": "地面/低位物体捡拾，验证腰部俯仰前屈协助",
         },
         {
-            "name": "10-DoF 右臂镜像抓取",
+            "name": "9-DoF 右臂镜像抓取",
             "group": "right_arm_torso",
             "pos": [0.35, -0.22, 0.85],
             "quat": [0.0, 0.0, 0.0, 1.0],
@@ -157,14 +158,14 @@ def run_moveit_ik_benchmark():
         else:
             print(f"  [WARN] OMPL 规划未收敛: {plan_res.error_message}")
     else:
-        print("[INFO] MoveIt move_group 后台服务当前未启动（可通过 `ros2 launch launch/g1_moveit_ompl.launch.py` 启动）。")
+        print("[INFO] MoveIt move_group 后台服务当前未启动（可通过 `ros2 launch launch/moveit_ompl.launch.py` 启动）。")
         print("   本地 Pink IK 求解逻辑已独立就绪，支持通过 plan_to_pose_with_pink_ik 无缝接入 OMPL 规划管道。")
 
     print("\n" + "=" * 80)
     print("[BEST] MoveIt 2 链路 IK 模块集成测试与评测结论")
     print("=" * 80)
     print("1. 协议兼容性: 完美兼容 MoveIt 2 GetPositionIK 标准服务协议与 MoveItErrorCodes 状态体系；")
-    print("2. 冗余协调性: 10-DoF 腰臂协同在 MoveIt 消息链路上严格保持“手臂优先、腰部辅助”设计准则；")
+    print("2. 冗余协调性: 9-DoF 腰臂协同在 MoveIt 消息链路上严格保持“手臂优先、腰部辅助”设计准则；")
     print("3. 端到端链路: 成功实现“6D 空间目标 -> Pink IK 求解关节构型 -> MoveIt 2 OMPL 避障规划”闭环架构。")
     print("=" * 80 + "\n")
 

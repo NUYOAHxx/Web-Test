@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Unitree G1 MoveIt 2 OMPL (Open Motion Planning Library) 全局运动规划客户端
-(MoveIt 2 OMPL Motion Planning Client for Unitree G1 Humanoid Robot)
+人形机器人 MoveIt 2 OMPL (Open Motion Planning Library) 全局运动规划客户端
+(MoveIt 2 OMPL Motion Planning Client for 人形机器人 Humanoid Robot)
 ================================================================================
 
 定位：高层宏观全局避障路径规划客户端
@@ -10,8 +10,8 @@ Unitree G1 MoveIt 2 OMPL (Open Motion Planning Library) 全局运动规划客户
 2. 支持规划组：
    - left_arm (7-DoF 单臂)
    - right_arm (7-DoF 单臂)
-   - left_arm_torso (10-DoF 躯干-手臂协同)
-   - right_arm_torso (10-DoF 躯干-手臂协同)
+   - left_arm_torso (9-DoF 躯干-手臂协同)
+   - right_arm_torso (9-DoF 躯干-手臂协同)
    - both_arms (14-DoF 双臂协同)
 3. 支持经典 OMPL 采样算法切换：
    - RRTConnect (RRTConnectkConfigDefault, 毫秒级双向扩展，推荐宏观避障)
@@ -45,7 +45,7 @@ import moveit_msgs.msg
 import moveit_msgs.srv
 
 
-# 规划组末端执行器 Link 映射 (与 resources/g1/g1_29dof.srdf 严格一致)
+# 规划组末端执行器 Link 映射 (与 resources/humanoid/humanoid_29dof.srdf 严格一致)
 PLANNING_GROUP_EE_LINKS: Dict[str, str] = {
     "left_arm": "left_wrist_yaw_link",
     "right_arm": "right_wrist_yaw_link",
@@ -100,7 +100,7 @@ class PlanResult:
 
 class MoveItOMPLPlanner:
     """
-    Unitree G1 MoveIt 2 OMPL 规划引擎高层客户端接口
+    人形机器人 MoveIt 2 OMPL 规划引擎高层客户端接口
     """
 
     def __init__(self, node: Optional[Node] = None, wait_for_services: bool = True, timeout_sec: float = 5.0):
@@ -150,7 +150,7 @@ class MoveItOMPLPlanner:
         else:
             self.node.get_logger().warn(
                 f"[WARN] 未检测到 /plan_kinematic_path 服务（等待超时 {timeout_sec}s）。"
-                "请确保已启动 MoveIt move_group 节点 (ros2 launch launch/g1_moveit_ompl.launch.py)。"
+                "请确保已启动 MoveIt move_group 节点 (ros2 launch launch/moveit_ompl.launch.py)。"
             )
 
     # ==========================================================================
@@ -253,8 +253,8 @@ class MoveItOMPLPlanner:
     def _get_pink_solver(self):
         """惰性加载 Pink 高精度凸优化求解器"""
         if self._pink_solver is None:
-            from core.solver.g1_pink_ik import G1PinkIKSolver
-            self._pink_solver = G1PinkIKSolver()
+            from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
+            self._pink_solver = HumanoidPinkIKSolver()
         return self._pink_solver
 
     # ==========================================================================
@@ -276,7 +276,7 @@ class MoveItOMPLPlanner:
     ) -> PlanResult:
         """
         【MoveIt 2 链路 + Pink IK 混合规划管道】
-        1. 首先通过 Pink 10-DoF/7-DoF 凸优化求解器求解最佳全局关节构型
+        1. 首先通过 Pink 9-DoF/7-DoF 凸优化求解器求解最佳全局关节构型
            （实现手臂优先、腰部辅助、CoM 质心稳定、关节硬限位 100% 遵守）；
         2. 将精准目标构型作为关节空间目标注入 MoveIt 2 OMPL 规划管道；
         3. 由 MoveIt 2 OMPL (RRTConnect / RRT*) 负责环境全局避障与时间最优平滑轨迹规划。
@@ -297,9 +297,9 @@ class MoveItOMPLPlanner:
         arm_id = "left_arm" if "left" in group_name else "right_arm"
         arm_names = solver.left_arm_joint_names if arm_id == "left_arm" else solver.right_arm_joint_names
 
-        # 区分 7-DoF 与 10-DoF 规划组
+        # 区分 7-DoF 与 9-DoF 规划组
         if group_name in ("left_arm_torso", "right_arm_torso"):
-            ok, w_sol, a_sol, ik_info = solver.solve_10dof_ik(
+            ok, w_sol, a_sol, ik_info = solver.solve_coordinated_ik(
                 arm=arm_id,
                 target_pos=pos,
                 target_rot=rot,
@@ -312,7 +312,7 @@ class MoveItOMPLPlanner:
                     success=False,
                     planning_time=time.time() - t0,
                     error_code=-31,
-                    error_message=f"Pink IK 10-DoF 前置逆解失败 (残差: {ik_info.pos_err_mm:.2f}mm, 耗时: {dt_ik:.1f}ms)",
+                    error_message=f"Pink IK 9-DoF 前置逆解失败 (残差: {ik_info.pos_err_mm:.2f}mm, 耗时: {dt_ik:.1f}ms)",
                 )
             target_joints = {}
             for name, val in zip(solver.waist_joint_names, w_sol):

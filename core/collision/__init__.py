@@ -1,3 +1,3 @@
-from core.collision.g1_collision import G1CollisionChecker
+from core.collision.humanoid_collision import HumanoidCollisionChecker
 
-__all__ = ["G1CollisionChecker"]
+__all__ = ["HumanoidCollisionChecker"]

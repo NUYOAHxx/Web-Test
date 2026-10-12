@@ -1,0 +1,30 @@
+# MoveIt 2 关节速度 / 加速度限位
+#
+# 键前缀: robot_description_planning.joint_limits.<joint>
+# 注入方式: launch/moveit_ompl.launch.py 以
+#           {"robot_description_planning.joint_limits": <本文件内容>} 传入 move_group
+#
+# 必要性: TOTG (AddTimeOptimalParameterization) 在做时间参数化时需要每个关节的
+#         加速度上限。若缺失, move_group 会报
+#             "No acceleration limit was defined for joint X!"
+#         并导致规划管线直接失败 —— 即路径搜到了也无法输出可执行轨迹。
+
+left_shoulder_pitch_joint:  {has_velocity_limits: true,  max_velocity: 1.75, has_acceleration_limits: true, max_acceleration: 2.5}
+left_shoulder_roll_joint:   {has_velocity_limits: true,  max_velocity: 1.75, has_acceleration_limits: true, max_acceleration: 2.5}
+left_shoulder_yaw_joint:    {has_velocity_limits: true,  max_velocity: 1.75, has_acceleration_limits: true, max_acceleration: 2.5}
+left_elbow_joint:           {has_velocity_limits: true,  max_velocity: 1.75, has_acceleration_limits: true, max_acceleration: 2.5}
+left_wrist_roll_joint:      {has_velocity_limits: true,  max_velocity: 3.0,  has_acceleration_limits: true, max_acceleration: 3.0}
+left_wrist_pitch_joint:     {has_velocity_limits: true,  max_velocity: 3.0,  has_acceleration_limits: true, max_acceleration: 3.0}
+left_wrist_yaw_joint:       {has_velocity_limits: true,  max_velocity: 3.0,  has_acceleration_limits: true, max_acceleration: 3.0}
+
+right_shoulder_pitch_joint: {has_velocity_limits: true,  max_velocity: 1.75, has_acceleration_limits: true, max_acceleration: 2.5}
+right_shoulder_roll_joint:  {has_velocity_limits: true,  max_velocity: 1.75, has_acceleration_limits: true, max_acceleration: 2.5}
+right_shoulder_yaw_joint:   {has_velocity_limits: true,  max_velocity: 1.75, has_acceleration_limits: true, max_acceleration: 2.5}
+right_elbow_joint:          {has_velocity_limits: true,  max_velocity: 1.75, has_acceleration_limits: true, max_acceleration: 2.5}
+right_wrist_roll_joint:     {has_velocity_limits: true,  max_velocity: 3.0,  has_acceleration_limits: true, max_acceleration: 3.0}
+right_wrist_pitch_joint:    {has_velocity_limits: true,  max_velocity: 3.0,  has_acceleration_limits: true, max_acceleration: 3.0}
+right_wrist_yaw_joint:      {has_velocity_limits: true,  max_velocity: 3.0,  has_acceleration_limits: true, max_acceleration: 3.0}
+
+waist_yaw_joint:            {has_velocity_limits: true,  max_velocity: 2.6,  has_acceleration_limits: true, max_acceleration: 4.0}
+waist_roll_joint:           {has_velocity_limits: true,  max_velocity: 0.52, has_acceleration_limits: true, max_acceleration: 1.0}
+waist_pitch_joint:          {has_velocity_limits: true,  max_velocity: 0.52, has_acceleration_limits: true, max_acceleration: 1.0}

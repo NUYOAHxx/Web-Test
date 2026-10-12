@@ -1,47 +1,46 @@
 """
-Unitree G1 / 通用人形机器人运动学逆解求解器模块 (core.solver)
+通用人形机器人逆运动学求解器 (core.solver)
 ==============================================================
-本模块提供分层的 Pink + ProxQP 凸优化逆运动学解算体系：
+**IK 解算实现完整地集中在单一文件 `humanoid_pink_ik.py`**，不再拆分。
 
-1. 通用算法层 (Generic Humanoid Layer):
-   - HumanoidPinkIKSolver: 通用标准人形机器人独立求解器
-     * 架构: 2-DoF 腰部 (Yaw, Pitch 防侧倾锁定) + 7-DoF 机械臂 (9-DoF 协同)
-     * 特性: 纯净零 ROS/MoveIt 依赖、自包含、支持跨机型 URDF
-     * 适用: 跨人形机型移植、单双臂/通用双足算法基准与学术验证
+HumanoidPinkIKSolver —— 通用人形机器人求解器
+    * 架构: 2-DoF 腰部 (waist_yaw, waist_pitch, 不含侧倾) + 7-DoF 机械臂 = 9-DoF
+    * 求解任务: 6D 位姿 (位置 + 姿态, SE(3))，亦支持纯位置退化模式
+    * 底层: Inria Pink 流形优化器 + ProxQP 凸二次规划
+    * 可移植: HumanoidKinematicsAdapter 接受任意 URDF/SRDF，默认使用本仓参考模型
+    * 安全层: 自碰撞二值门禁 (惰性求值)，可选 SelfCollisionBarrier
 
-2. G1 机型特化层 (Unitree G1 Tailored Layer):
-   - G1PinkIKSolver: Unitree G1 专用 10-DoF 全局协同求解器
-     * 架构: 3-DoF 腰部 (Yaw, Roll, Pitch 全轴开放) + 7-DoF 机械臂
-     * 特性: 深度释放 G1 侧向倾角工作空间，深度绑定 MoveIt 2、RViz 与实机控制器
-     * 适用: G1 避障轨迹规划、大跨度拾取工况与实机动态伺服
+对外接口:
+    solve_ik()            —— 7-DoF 单臂解算 (腰部锁定直立)
+    solve_coordinated_ik() —— 9-DoF 腰臂协同解算
 """
 
-from core.solver.g1_pink_ik import (
-    G1PinkIKSolver,
-    IKSolveStatus,
-    IKResult,
-    IK_PIPELINE_STAGES,
-    G1_READY_POSE,
-    G1_DEFAULT_STAND_JOINTS,
-)
 from core.solver.humanoid_pink_ik import (
     HumanoidPinkIKSolver,
     HumanoidKinematicsAdapter,
+    IKSolveStatus,
+    IKResult,
+    IK_PIPELINE_STAGES,
     DEFAULT_HUMANOID_WAIST_LIMITS,
     DEFAULT_HUMANOID_ARM_LIMITS,
     DEFAULT_HUMANOID_READY_POSE,
 )
 
 __all__ = [
-    "G1PinkIKSolver",
     "HumanoidPinkIKSolver",
     "HumanoidKinematicsAdapter",
     "IKSolveStatus",
     "IKResult",
     "IK_PIPELINE_STAGES",
-    "G1_READY_POSE",
-    "G1_DEFAULT_STAND_JOINTS",
     "DEFAULT_HUMANOID_WAIST_LIMITS",
     "DEFAULT_HUMANOID_ARM_LIMITS",
     "DEFAULT_HUMANOID_READY_POSE",
+    "DualArmIKSolver",
 ]
+
+# 双臂 16-DoF 求解器使用独立算法 (分阶段 QP 精修, 非 pink 路线), 单独成文件。
+# 依赖 qpsolvers / scipy 稀疏运算, 为可选依赖: 缺失时静默跳过而非阻断主求解器导入。
+try:  # pragma: no cover - 取决于本地可选依赖是否安装
+    from core.solver.dual_arm_ik import DualArmIKSolver
+except ImportError:  # pragma: no cover
+    DualArmIKSolver = None  # type: ignore[assignment,misc]

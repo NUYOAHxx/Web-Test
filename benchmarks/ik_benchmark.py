@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Unitree G1 机械臂逆运动学 (G1PinkIKSolver) 工业级大规模基准压力测试套件
+人形机器人 机械臂逆运动学 (HumanoidPinkIKSolver) 工业级大规模基准压力测试套件
 
 功能：
 1. 全局可达工作空间超大规模压力测试 (默认 10,000 样本)；
 2. 随机起点-终点对点规划对比评测 (Pairwise Start-to-Goal Benchmark, 默认 10,000 对)：
    - 起点与终点均严格在 7 自由度物理限位内随机采样生成，100% 确保几何可达；
    - 沿空间位移距离划分为：超短距离 (<5cm)、中短距离 (5-15cm)、中长距离 (15-30cm)、大跨度 (>=30cm)；
-   - 验证并对比：纯单种子局部梯度下降 (Pure Local DLS) vs Pink 凸优化求解器 (G1PinkIKSolver)；
+   - 验证并对比：纯单种子局部梯度下降 (Pure Local DLS) vs Pink 凸优化求解器 (HumanoidPinkIKSolver)；
    - 统计成功率、迭代步数、耗时分布与限位越界率。
 """
 
@@ -22,7 +22,7 @@ dir_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if dir_root not in sys.path:
     sys.path.insert(0, dir_root)
 
-from core.solver.g1_pink_ik import G1PinkIKSolver
+from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
 
 
 def run_pure_local_dls(solver, arm: str, seed_q: np.ndarray, target_pos: np.ndarray, max_iters: int = 35):
@@ -56,7 +56,7 @@ def run_pure_local_dls(solver, arm: str, seed_q: np.ndarray, target_pos: np.ndar
     return False, max_iters, err_norm * 1000.0, q
 
 
-def run_global_benchmark(solver: G1PinkIKSolver, num_samples: int = 10000, arm: str = "left_arm"):
+def run_global_benchmark(solver: HumanoidPinkIKSolver, num_samples: int = 10000, arm: str = "left_arm"):
     """
     测试 1: 全局 10,000 样本独立可达性与算力延迟评测
     """
@@ -127,7 +127,7 @@ def run_global_benchmark(solver: G1PinkIKSolver, num_samples: int = 10000, arm: 
     print("-" * 70)
 
 
-def run_pairwise_distance_benchmark(solver: G1PinkIKSolver, num_pairs: int = 10000, arm: str = "left_arm"):
+def run_pairwise_distance_benchmark(solver: HumanoidPinkIKSolver, num_pairs: int = 10000, arm: str = "left_arm"):
     """
     测试 2: 随机起点-终点对点规划基准评测 (验证距离长短与解算失败率关系)
     """
@@ -238,7 +238,7 @@ def run_pairwise_distance_benchmark(solver: G1PinkIKSolver, num_pairs: int = 100
     print("1. [短距离验证]: 在 < 5cm 的微小位移下，正运动学高度线性，纯局部 DLS 成功率高达 99.5%，平均仅需 3 次迭代即可秒解！")
     print("2. [大距离失败验证]: 当两点间距扩大到 >= 30cm 时，纯局部单初猜解法成功率直接腰斩暴跌至 ~47%！哪怕起点终点均在可达区域内，")
     print("   也极易陷入非线性局部极小值死锁或被关节限位阻断，这精确印证了为什么‘起点离终点远时常常解不出’！")
-    print("3. [Pink 求解器优势]: 我们的 G1PinkIKSolver 依靠多级精选种子与零空间姿态引导，在 >= 30cm 的极限跨度下仍保持 98.7% 的极高解出率！\n")
+    print("3. [Pink 求解器优势]: 我们的 HumanoidPinkIKSolver 依靠多级精选种子与零空间姿态引导，在 >= 30cm 的极限跨度下仍保持 98.7% 的极高解出率！\n")
 
 
 def main():
@@ -248,7 +248,7 @@ def main():
     parser.add_argument("--mode", choices=["all", "global", "pairwise"], default="all", help="测试模式")
     args = parser.parse_args()
 
-    solver = G1PinkIKSolver()
+    solver = HumanoidPinkIKSolver()
 
     if args.mode in ["all", "global"]:
         run_global_benchmark(solver, num_samples=args.samples, arm=args.arm)

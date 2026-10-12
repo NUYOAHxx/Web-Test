@@ -1,0 +1,159 @@
+# =====================================================================
+# 机器人相关配置（移植到自己的机器人时只需改这个文件 + 重新生成碰撞对/胶囊）
+# Robot-specific configuration for the IK prototype (Unitree G1 29-DOF rev_1_0)
+# 所有长度单位 m，角度 rad，力矩 N·m，质量 kg
+# =====================================================================
+robot:
+  name: g1_29dof_rev_1_0
+  urdf: assets/g1_description/g1_29dof_rev_1_0.urdf
+  mesh_dir: assets/g1_description
+  # 基座：pelvis 视为固定基座（世界坐标系 = pelvis 坐标系，z 轴朝上）
+  gravity: [0.0, 0.0, -9.81]
+
+  # 被锁定的关节及其锁定值（不在 active 集合中的关节都会被锁定；未列出的锁定在 0）
+  # 腿：站立名义姿态；waist_roll 锁 0，以模拟用户机器人（腰只有 yaw + pitch）
+  locked_joint_values:
+    left_hip_pitch_joint: -0.1
+    left_knee_joint: 0.3
+    left_ankle_pitch_joint: -0.2
+    right_hip_pitch_joint: -0.1
+    right_knee_joint: 0.3
+    right_ankle_pitch_joint: -0.2
+    waist_roll_joint: 0.0
+
+  # 求解器使用的关节（构成 16-DOF 统一模型），顺序即求解器内部顺序
+  waist_joints: [waist_yaw_joint, waist_pitch_joint]
+  arms:
+    left:
+      joints: [left_shoulder_pitch_joint, left_shoulder_roll_joint, left_shoulder_yaw_joint,
+               left_elbow_joint, left_wrist_roll_joint, left_wrist_pitch_joint, left_wrist_yaw_joint]
+      hand_link: left_rubber_hand          # 末端所在 link
+      ee_offset_xyz: [0.08, 0.0, 0.0]      # 抓取点（TCP）相对 hand_link 的偏移
+      # 以下用于「臂角（swivel）引导种子」：肩中心 / 肘 / 腕中心 所在的关节
+      shoulder_joint: left_shoulder_pitch_joint
+      elbow_joint: left_elbow_joint
+      wrist_joint: left_wrist_pitch_joint
+    right:
+      joints: [right_shoulder_pitch_joint, right_shoulder_roll_joint, right_shoulder_yaw_joint,
+               right_elbow_joint, right_wrist_roll_joint, right_wrist_pitch_joint, right_wrist_yaw_joint]
+      hand_link: right_rubber_hand
+      ee_offset_xyz: [0.08, 0.0, 0.0]
+      shoulder_joint: right_shoulder_pitch_joint
+      elbow_joint: right_elbow_joint
+      wrist_joint: right_wrist_pitch_joint
+
+  # 初始/名义构型（未列出的关节为 0）
+  nominal_q:
+    left_shoulder_pitch_joint: 0.3
+    left_shoulder_roll_joint: 0.25
+    left_elbow_joint: 0.9
+    right_shoulder_pitch_joint: 0.3
+    right_shoulder_roll_joint: -0.25
+    right_elbow_joint: 0.9
+
+  # 力矩极限：默认取 URDF <limit effort>，此处可覆盖；torque_margin 为安全系数 rho
+  torque_limit_override: {}
+  torque_margin: 0.9
+  # 只对这些关节做力矩约束/校验（被锁定的 waist_roll 在用户机器人上不存在，不检查）
+  torque_check: all_active
+
+# =====================================================================
+# 碰撞模型
+# =====================================================================
+collision:
+  # 胶囊近似：从 visual/collision mesh 自动拟合（PCA 主轴 + 包络半径）。n>1 表示沿主轴切分成多段
+  capsule_links:
+    head_link: {n: 1}
+    pelvis_contour_link: {n: 1}
+    left_hip_yaw_link: {n: 1}
+    right_hip_yaw_link: {n: 1}
+    left_knee_link: {n: 1}
+    right_knee_link: {n: 1}
+    left_shoulder_roll_link: {n: 1}
+    left_shoulder_yaw_link: {n: 1}
+    left_elbow_link: {n: 1}
+    left_wrist_roll_link: {n: 1}
+    left_wrist_pitch_link: {n: 1}
+    left_wrist_yaw_link: {n: 1}
+    left_rubber_hand: {n: 4, axis_pca: 1}   # 扁平手掌：沿长轴切 4 段，每段胶囊轴沿手掌宽度方向
+    right_shoulder_roll_link: {n: 1}
+    right_shoulder_yaw_link: {n: 1}
+    right_elbow_link: {n: 1}
+    right_wrist_roll_link: {n: 1}
+    right_wrist_pitch_link: {n: 1}
+    right_wrist_yaw_link: {n: 1}
+    right_rubber_hand: {n: 4, axis_pca: 1}
+  # 手工胶囊（link 坐标系），会覆盖同名 link 的自动拟合。G1 躯干接近长方体
+  # (x[-0.067,0.084], y[+-0.108], z[0,0.31])，自动单胶囊过胖，改为 4 根沿 y 轴的水平胶囊叠放
+  manual_capsules:
+    torso_link:
+      - {p0: [0.008, -0.030, 0.05], p1: [0.008, 0.030, 0.05], r: 0.072}
+      - {p0: [0.008, -0.030, 0.12], p1: [0.008, 0.030, 0.12], r: 0.076}
+      - {p0: [0.008, -0.030, 0.19], p1: [0.008, 0.030, 0.19], r: 0.078}
+      - {p0: [0.000, -0.030, 0.25], p1: [0.000, 0.030, 0.25], r: 0.070}
+  capsule_padding: 0.0          # 拟合半径额外加厚
+  # 在名义构型下就已重叠的胶囊对（近似几何的伪碰撞，例如肩部与躯干）在胶囊层自动禁用（同 MoveIt 的 "Default"），
+  # 这些对仍由校验层的 mesh 精确检查兜底
+  disable_capsule_pairs_overlapping_at_nominal: true
+  # (可选) nominal 时就重叠的胶囊对在 NLP 中保留为「距离 >= nominal 值 - slack」。实测过于保守
+  # （几乎锁死肩部内收），默认关闭 (null)，改用下面的 joint_tables。
+  nominal_overlap_slack: null
+  # 只依赖 <=2 个关节的、被胶囊层跳过的 link 对（肩窝：torso/head <-> shoulder_roll_link，只依赖
+  # shoulder_pitch + shoulder_roll）：离线在关节空间网格上计算精确 mesh 距离，B-spline 插值后作为 NLP 约束。
+  joint_tables:
+    enabled: true
+    resolution: 0.04      # rad
+    inside_scale: 0.05    # 碰撞区内部：-(到自由区的关节空间距离 rad) * scale  [m/rad]
+    margin: 0.005         # 约束 d_table >= margin [m]
+    cache: generated/joint_tables.npz
+  # 胶囊近似过于保守、在整个关节空间几乎恒定贴近的 link 对：只在胶囊层 (QP/NLP) 关闭，
+  # 最终 mesh 校验层仍然检查。G1 的 head 胶囊与 shoulder_roll 胶囊在 nominal 时只有 ~15 mm，
+  # 400 个随机左臂姿态中位数 -2.4 mm（而凸包距离中位数 61 mm）。
+  capsule_disabled_link_pairs:
+    - [head_link, left_shoulder_roll_link]
+    - [head_link, right_shoulder_roll_link]
+  hull_refine_below: 0.02       # 凸包距离 < 该值的 pair 再用精确 BVH mesh 距离复核
+  capsule_cache: generated/g1_capsules.json
+
+  # 这些 link 的 URDF 中没有 <collision>，校验时用 visual mesh 代替
+  collision_from_visual: [left_rubber_hand, right_rubber_hand]
+
+  # 碰撞对白名单的来源：MoveIt 风格 SRDF（<disable_collisions>），可直接换成用户 MoveIt 配置包里的 .srdf
+  srdf: generated/g1_collision.srdf
+
+  # QP 层（placo）参数
+  qp_margin: 0.008              # self_collisions_margin
+  qp_trigger: 0.06              # self_collisions_trigger
+  # NLP 层参数
+  nlp_d_safe: 0.008             # 胶囊距离下界
+  nlp_activation: 0.20          # 只把初值处胶囊距离 < 该值的对放进 NLP（其余在校验层兜底）
+  # 校验层：mesh 最小距离阈值（>0 表示要求不接触）
+  validate_min_mesh_distance: 0.0
+
+# =====================================================================
+# 求解器参数
+# =====================================================================
+solver:
+  pos_tol: 0.002                # 校验：位置误差 [m]
+  rot_tol: 0.0175               # 校验：姿态误差 [rad] (1 deg)
+  nlp_pos_tol: 0.0002
+  nlp_rot_tol: 0.002
+  n_random_seeds: 4
+  swivel_angles_deg: [-60, -20, 20, 60, 100]
+  qp_iters: 60
+  n_refine: 4                   # 进入 NLP 精修的候选数
+  top_k: 3
+  ipopt_max_iter: 150
+  # 代价权重
+  w_waist: 20.0                 # 腰部位移（相对当前值）
+  w_reg: 0.1                    # 手臂靠近当前构型
+  w_torque: 0.05                # sum (tau/tau_max)^2
+  # auto 模式：先 M1，若不可行或力矩利用率超过阈值则放开腰（M2），腰位移上界逐级放宽
+  auto_torque_util_threshold: 0.8
+  waist_seed_grid: {yaw: [-0.5, 0.0, 0.5], pitch: [0.0, 0.3]}   # M2/M3 额外腰部种子（手臂取 nominal）
+  waist_bounds_schedule: [null]   # 每级允许的 |q_waist - q_waist_cur| 上界（null = 只受关节极限约束）
+  # 排序代价
+  rank_w_waist: 5.0
+  rank_w_torque: 1.0
+  rank_w_dist_cur: 0.2
+  rank_w_clearance: 0.002       # 乘以 1/min_distance

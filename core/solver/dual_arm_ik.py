@@ -23,7 +23,7 @@ import scipy.sparse as sp
 ARM_NAMES = ["shoulder_pitch", "shoulder_roll", "shoulder_yaw", "elbow",
              "wrist_roll", "wrist_pitch", "wrist_yaw"]
 DEFAULT_URDF = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../resources/g1/g1_29dof.urdf"))
+    os.path.join(os.path.dirname(__file__), "../../resources/humanoid/humanoid_29dof.urdf"))
 
 
 class IKFailureReason(str, Enum):
@@ -101,6 +101,31 @@ class DualArmIKSolver:
         self.cfg = config or IKConfig()
         self.model = pin.buildModelFromUrdf(urdf_path)
         self.data = self.model.createData()
+
+        # QP 后端可用性校验与自动回退。
+        # 旧实现直接把 cfg.qp_solver 传给 qpsolvers, 而默认值为 "osqp"。
+        # 在只安装了 proxqp 的环境 (本项目依赖链即是如此) 中, 每次求解都会抛
+        # SolverNotFound —— 双臂 IK 完全不可用, 且报错信息与真实原因(依赖缺失)毫无关联。
+        # 此处按可用性回退到首选后端, 并在完全无可用后端时给出明确报错。
+        try:
+            import qpsolvers as _qps
+            available = set(_qps.available_solvers)
+        except Exception:  # pragma: no cover - qpsolvers 缺失
+            available = set()
+        if self.cfg.qp_solver not in available:
+            for fallback in ("proxqp", "osqp", "quadprog", "daqp"):
+                if fallback in available:
+                    print(
+                        f"[双臂IK] 配置的 QP 求解器 {self.cfg.qp_solver!r} 不可用, "
+                        f"已自动回退到 {fallback!r} (可用: {sorted(available) or '无'})"
+                    )
+                    self.cfg.qp_solver = fallback
+                    break
+            else:
+                raise RuntimeError(
+                    f"未找到任何可用的 QP 求解器 (已安装: {sorted(available) or '无'})。"
+                    f"请安装 proxsuite 或 osqp: pip install proxsuite osqp"
+                )
 
         self.joint_names: List[str] = (
             list(self.cfg.waist_joints)

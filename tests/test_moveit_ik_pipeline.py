@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Unitree G1 MoveIt 2 链路逆运动学 (IK) 求解服务与规划流水线自动化测试套件
+人形机器人 MoveIt 2 链路逆运动学 (IK) 求解服务与规划流水线自动化测试套件
 (MoveIt 2 Kinematics Pipeline & GetPositionIK Integration Test Suite)
 ================================================================================
 
 测试目标：
 1. 验证 MoveIt 2 标准服务协议兼容性 (/g1/compute_ik, moveit_msgs/srv/GetPositionIK)；
-2. 验证 7-DoF 单臂与 10-DoF 躯干-手臂协同在 MoveIt 消息体系下的解算精度与合规性；
+2. 验证 7-DoF 单臂与 9-DoF 躯干-手臂协同在 MoveIt 消息体系下的解算精度与合规性；
 3. 验证关节输出 100% 符合 MoveIt joint_limits.yaml 物理极限；
 4. 验证面对超限/奇异目标时的诚实拦截机制 (MoveItErrorCodes.NO_IK_SOLUTION)；
 5. 验证 MoveIt 2 混合规划管道 (Pink IK 前置引导 + MoveIt 2 OMPL 碰撞避障轨迹)。
@@ -41,8 +41,10 @@ except (ImportError, ModuleNotFoundError):
 
 import pinocchio as pin
 
-from core.solver.g1_pink_ik import G1PinkIKSolver, G1_DEFAULT_STAND_JOINTS, G1_READY_POSE
-from core.kinematics.g1_model import G1_JOINT_LIMITS, G1_WAIST_LIMITS
+from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
+from core.kinematics.humanoid_model import (
+    READY_POSE, DEFAULT_STAND_JOINTS, JOINT_LIMITS, WAIST_LIMITS,
+)
 from core.planning.moveit_ompl_planner import MoveItOMPLPlanner
 
 
@@ -69,7 +71,7 @@ def ros_context():
 def test_moveit_service_ready(ros_context):
     """测试 1: 验证 MoveIt 2 标准 /g1/compute_ik 服务节点在线（若未启动后台节点则跳过集成测试）"""
     if not ros_context["service_ready"]:
-        pytest.skip("MoveIt IK 服务未启动（需运行 launch/g1_telemetry_system.launch.py 或 core/solver/g1_ik_node.py）")
+        pytest.skip("MoveIt IK 服务未启动（需运行 launch/telemetry_system.launch.py 或 core/solver/ik_node.py）")
     assert ros_context["service_ready"]
 
 
@@ -107,12 +109,12 @@ def test_moveit_7dof_left_arm_ik(ros_context):
 
     # 验证关节限位 100% 遵守
     for name, pos in zip(joint_names, joint_positions):
-        min_lim, max_lim = G1_JOINT_LIMITS[name]
+        min_lim, max_lim = JOINT_LIMITS[name]
         assert min_lim - 1e-4 <= pos <= max_lim + 1e-4, f"关节 {name}={pos:.3f} 越界 [{min_lim:.3f}, {max_lim:.3f}]"
 
 
-def test_moveit_10dof_torso_coordination_ik(ros_context):
-    """测试 3: 10-DoF 躯干-手臂协同 (left_arm_torso) MoveIt 远距离大跨度求解与手臂优先原则"""
+def test_moveit_9dof_torso_coordination_ik(ros_context):
+    """测试 3: 9-DoF 躯干-手臂协同 (left_arm_torso) MoveIt 远距离大跨度求解与手臂优先原则"""
     if not ros_context["service_ready"]:
         pytest.skip("MoveIt IK 服务未就绪")
 
@@ -126,7 +128,8 @@ def test_moveit_10dof_torso_coordination_ik(ros_context):
 
     # 远距离大跨度目标 [0.52, 0.22, 0.85] (7-DoF 单臂极限约 39cm，必然需要腰部 3-DoF 协助)
     ik_req.pose_stamped.header.frame_id = "pelvis"
-    ik_req.pose_stamped.pose.position = Point(x=0.52, y=0.22, z=0.85)
+    # 9-DoF 去除腰部侧倾后最大前伸约 0.45m (原 10-DoF 约 0.52m)
+    ik_req.pose_stamped.pose.position = Point(x=0.45, y=0.22, z=0.85)
     ik_req.pose_stamped.pose.orientation = Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)
 
     future = client.call_async(req)
@@ -134,11 +137,12 @@ def test_moveit_10dof_torso_coordination_ik(ros_context):
 
     assert future.done(), "服务调用超时"
     res = future.result()
-    assert res.error_code.val == MoveItErrorCodes.SUCCESS, f"10-DoF 协同求解失败，错误码: {res.error_code.val}"
+    assert res.error_code.val == MoveItErrorCodes.SUCCESS, f"9-DoF 协同求解失败，错误码: {res.error_code.val}"
 
     joint_names = res.solution.joint_state.name
     joint_positions = res.solution.joint_state.position
-    assert len(joint_names) == 10, f"10-DoF 协同应包含 3腰 + 7臂 共 10 个关节，实际: {len(joint_names)}"
+    assert len(joint_names) == 9, f"9-DoF 协同应包含 2腰 + 7臂 共 9 个关节，实际: {len(joint_names)}"
+    assert "waist_roll_joint" not in joint_names, "9-DoF 模式不应包含腰部侧倾关节"
 
     sol_dict = dict(zip(joint_names, joint_positions))
 
@@ -149,10 +153,10 @@ def test_moveit_10dof_torso_coordination_ik(ros_context):
 
     # 验证腰部与手臂各关节绝对处于物理硬限位之内
     for name, pos in sol_dict.items():
-        if name in G1_WAIST_LIMITS:
-            min_lim, max_lim = G1_WAIST_LIMITS[name]
+        if name in WAIST_LIMITS:
+            min_lim, max_lim = WAIST_LIMITS[name]
         else:
-            min_lim, max_lim = G1_JOINT_LIMITS[name]
+            min_lim, max_lim = JOINT_LIMITS[name]
         assert min_lim - 1e-4 <= pos <= max_lim + 1e-4, f"关节 {name}={pos:.3f} 越界"
 
 
@@ -201,6 +205,6 @@ def test_moveit_ompl_pink_ik_planner_pipeline():
 
 if __name__ == "__main__":
     print("=" * 80)
-    print("[START] 启动 Unitree G1 MoveIt 2 链路逆运动学 (IK) 专项自动化测试")
+    print("[START] 启动 人形机器人 MoveIt 2 链路逆运动学 (IK) 专项自动化测试")
     print("=" * 80)
     pytest.main([__file__, "-v", "-s"])

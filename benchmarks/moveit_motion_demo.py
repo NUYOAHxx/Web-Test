@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Unitree G1 MoveIt 2 + Pink IK 桌面端可视化实时运动演示程序
+人形机器人 MoveIt 2 + Pink IK 桌面端可视化实时运动演示程序
 (Live 3D Motion Demo: Pink IK + MoveIt 2 OMPL Pipeline in RViz2)
 ================================================================================
 
@@ -30,7 +30,7 @@ from core.planning.moveit_ompl_planner import MoveItOMPLPlanner
 
 def run_live_motion_demo():
     print("=" * 80)
-    print(" [DEMO] Unitree G1 MoveIt 2 + Pink IK 实时 3D 运动演示")
+    print(" [DEMO] 人形机器人 MoveIt 2 + Pink IK 实时 3D 运动演示")
     print("   (请观察屏幕上的 RViz2 桌面端窗口，机器人模型将开始执行轨迹运动)")
     print("=" * 80)
 

@@ -326,11 +326,11 @@ class ArmBaseController:
         # 初始化高精度 Pinocchio Pink + ProxQP 逆运动学求解器
         self.arm_name = f"{arm_side}_arm"
         try:
-            from core.solver.g1_pink_ik import G1PinkIKSolver
-            self.ik_solver = G1PinkIKSolver()
-            print(f"[{arm_side}臂] 成功加载 G1PinkIKSolver (Pink + ProxQP) 逆运动学求解器")
+            from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
+            self.ik_solver = HumanoidPinkIKSolver()
+            print(f"[{arm_side}臂] 成功加载 HumanoidPinkIKSolver (Pink + ProxQP) 逆运动学求解器")
         except Exception as e:
-            print(f"[{arm_side}臂] G1PinkIKSolver 初始化失败: {e}, 将使用原生阻尼最小二乘法")
+            print(f"[{arm_side}臂] HumanoidPinkIKSolver 初始化失败: {e}, 将使用原生阻尼最小二乘法")
             self.ik_solver = None
 
     def _get_arm_joint_ids(self) -> List[int]:
@@ -1501,7 +1501,7 @@ class SquatController:
             self.action_scale = 0.25
 
         # 尝试加载策略网络
-        policy_path = config.policy_path.replace("{LEGGED_GYM_ROOT_DIR}", dir_root)
+        policy_path = config.policy_path.replace("{__PROJECT_ROOT__}", dir_root)
         try:
             self.policy = torch.jit.load(policy_path)
             print(f"成功加载策略网络: {policy_path}")
@@ -1979,8 +1979,8 @@ class InputThread(threading.Thread):
 def main():
     """主函数"""
     # 解析命令行参数
-    parser = argparse.ArgumentParser(description="Unitree G1 MuJoCo Simulation Deploy")
-    parser.add_argument("config_file", nargs="?", default="g1_53.yaml", type=str, help="config file name in the config folder (default: g1_53.yaml)")
+    parser = argparse.ArgumentParser(description="人形机器人 MuJoCo Simulation Deploy")
+    parser.add_argument("config_file", nargs="?", default="humanoid_53dof.yaml", type=str, help="配置文件名 (位于 config/ 下, 默认 humanoid_53dof.yaml)")
     args = parser.parse_args()
 
     # 加载配置文件
@@ -1995,7 +1995,7 @@ def main():
 
     with open(config_path, "r") as f:
         yaml_config = yaml.load(f, Loader=yaml.FullLoader)
-        xml_path = yaml_config["xml_path"].replace("{LEGGED_GYM_ROOT_DIR}", dir_root)
+        xml_path = yaml_config["xml_path"].replace("{__PROJECT_ROOT__}", dir_root)
 
     # 加载机器人模型
     model = mujoco.MjModel.from_xml_path(xml_path)

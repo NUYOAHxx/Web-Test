@@ -1,5 +1,5 @@
 """
-Unitree G1 S-Curve 轨迹插值器单元测试 (Piecewise Quintic Hermite S-Curve Interpolator)
+人形机器人 S-Curve 轨迹插值器单元测试 (Piecewise Quintic Hermite S-Curve Interpolator)
 ===================================================================================
 测试覆盖:
   1. 稀疏双路标点 (Rest-to-Rest) 端点位置精确匹配、初末速度为 0、初末加速度为 0

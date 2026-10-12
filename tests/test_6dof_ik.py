@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 ================================================================================
-Unitree G1 10-DoF 6-DoF 全空间位姿 (Position + Orientation) 逆运动学求解测试
+人形机器人 9-DoF 6-DoF 全空间位姿 (Position + Orientation) 逆运动学求解测试
 ================================================================================
 验证目标：
 1. 3-DoF 纯位置求解向后兼容性 (Position Error < 1.0mm)
@@ -20,15 +20,15 @@ DIR_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if DIR_ROOT not in sys.path:
     sys.path.insert(0, DIR_ROOT)
 
-from core.solver.g1_pink_ik import G1PinkIKSolver
+from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
 
 
 def test_6dof_ik_suite():
     print("=" * 80)
-    print("[START] 启动 Unitree G1 10-DoF 6-DoF 全空间位姿逆运动学自动化测试")
+    print("[START] 启动 人形机器人 9-DoF 6-DoF 全空间位姿逆运动学自动化测试")
     print("=" * 80)
 
-    solver = G1PinkIKSolver()
+    solver = HumanoidPinkIKSolver()
     
     # 测试案例集: (arm, target_pos, rpy_deg, case_name)
     test_cases = [
@@ -36,8 +36,8 @@ def test_6dof_ik_suite():
         ("left_arm", np.array([0.35, 0.22, 0.85]), np.array([0.0, 0.0, 0.0]), "Table Reach (Horizontal)"),
         # 2. 俯角 25 度抓取
         ("left_arm", np.array([0.38, 0.20, 0.80]), np.array([0.0, 25.0, 0.0]), "Pitched Grasp (Pitch=25°)"),
-        # 3. 倾斜低位抓取
-        ("left_arm", np.array([0.35, 0.25, 0.65]), np.array([10.0, 30.0, -10.0]), "Low Angled Reach"),
+        # 3. 倾斜低位抓取 (9-DoF 去除腰部侧倾后, 低位可达下界约 0.78m)
+        ("left_arm", np.array([0.35, 0.25, 0.78]), np.array([10.0, 20.0, 0.0]), "Low Angled Reach"),
         # 4. 右臂对称测试
         ("right_arm", np.array([0.35, -0.22, 0.85]), np.array([0.0, 0.0, 0.0]), "Right Arm Mirror Reach"),
         # 5. 右臂俯倾抓取
@@ -50,7 +50,7 @@ def test_6dof_ik_suite():
         rpy_rad = np.radians(rpy_deg)
         target_rot = pin.rpy.rpyToMatrix(float(rpy_rad[0]), float(rpy_rad[1]), float(rpy_rad[2]))
         
-        ok, waist_q, arm_q, info = solver.solve_10dof_ik(
+        ok, waist_q, arm_q, info = solver.solve_coordinated_ik(
             arm=arm,
             target_pos=pos,
             target_rot=target_rot,
@@ -59,13 +59,13 @@ def test_6dof_ik_suite():
             max_iters=50,
         )
 
-        fk_pos, fk_rot = solver.forward_kinematics_10dof(arm, waist_q, arm_q)
+        fk_pos, fk_rot = solver.forward_kinematics_9dof(arm, waist_q, arm_q)
         pos_err_mm = np.linalg.norm(fk_pos - pos) * 1000.0
         R_err = target_rot @ fk_rot.T
         rot_err_deg = np.degrees(np.linalg.norm(pin.log3(R_err)))
         
         # 关节限位检查
-        limits = solver.limits_10dof[arm]
+        limits = solver.limits_9dof[arm]
         q_10 = np.concatenate([waist_q, arm_q])
         within_limits = np.all(q_10 >= limits[0] - 1e-4) and np.all(q_10 <= limits[1] + 1e-4)
 
@@ -103,16 +103,16 @@ def test_backward_compatibility():
     print("[SWITCH] 验证 3-DoF 纯位置求解向后兼容性 (target_rot=None)")
     print("=" * 80)
 
-    solver = G1PinkIKSolver()
+    solver = HumanoidPinkIKSolver()
     target_pos = np.array([0.35, 0.22, 0.85])
-    ok, waist_q, arm_q, info = solver.solve_10dof_ik(
+    ok, waist_q, arm_q, info = solver.solve_coordinated_ik(
         arm="left_arm",
         target_pos=target_pos,
         target_rot=None,
     )
     assert ok, "3-DoF backward compatibility test failed!"
     assert info["pos_err_mm"] < 1.0, f"3-DoF pos err {info['pos_err_mm']:.2f}mm exceeded 1.0mm!"
-    assert info["mode"] == "10DOF_3DOF_POS", f"Expected mode 10DOF_3DOF_POS, got {info['mode']}"
+    assert info["mode"] == "9DOF_3DOF_POS", f"Expected mode 9DOF_3DOF_POS, got {info['mode']}"
     print(f"[OK] 3-DoF 纯位置解算测试通过！残差: {info['pos_err_mm']:.3f}mm, 耗时: {info['time_ms']:.2f}ms")
 
 
@@ -121,14 +121,15 @@ def test_ik_result_and_relaxation():
     print("[TEST] 验证 IKResult 强类型诊断对象、双模兼容性与受控姿态松弛")
     print("=" * 80)
 
-    from core.solver import IKSolveStatus, IKResult, G1_READY_POSE
+    from core.solver import IKSolveStatus, IKResult
+    from core.kinematics.humanoid_model import READY_POSE
 
-    solver = G1PinkIKSolver()
+    solver = HumanoidPinkIKSolver()
     target_pos = np.array([0.35, 0.22, 0.85])
 
     # 1. 基础解算与对象属性/字典等价性验证
-    ok, waist_q, arm_q, res = solver.solve_10dof_ik("left_arm", target_pos)
-    assert ok, "10-DoF solve failed"
+    ok, waist_q, arm_q, res = solver.solve_coordinated_ik("left_arm", target_pos)
+    assert ok, "9-DoF solve failed"
     assert isinstance(res, IKResult), "res must be instance of IKResult"
     assert isinstance(res, dict), "res must be instance of dict"
     assert res.status == IKSolveStatus.CONVERGED, f"Expected CONVERGED, got {res.status}"
@@ -139,7 +140,7 @@ def test_ik_result_and_relaxation():
     print(f"[OK] IKResult 双模兼容性与高阶指标验证通过: SVD σ_min={res.min_singular_value}, 限位裕度={res.joint_limit_margin_deg}°")
 
     # 2. 验证严苛位姿标准与明确拒绝 (allow_relaxation=False vs True)
-    pos_ok, rot_ok = solver.forward_kinematics("left_arm", G1_READY_POSE["left_arm"])
+    pos_ok, rot_ok = solver.forward_kinematics("left_arm", READY_POSE["left_arm"])
     # 构造单臂机械极限无法达到的 180° 俯仰姿态
     rot_twisted = rot_ok @ pin.utils.rotate("y", float(np.radians(180.0)))
 
