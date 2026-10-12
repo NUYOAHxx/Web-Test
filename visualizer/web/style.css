@@ -971,7 +971,13 @@ input[type="range"].fine-drag::-moz-range-thumb {
 .trace-canvas-wrap {
     position: relative;
     flex: 1 1 auto;
-    min-height: 0;
+    /*
+     * 最小高度不可省。canvas 绝对定位后已不产生任何在流内容, 包裹层因此
+     * 失去了自身高度的来源: 三栏布局下高度由右侧流水线列决定, 但在单栏
+     * (窄屏降级) 下 .solver-plot 自成一行且为 auto 高度, 无处取值,
+     * 结果整层塌成 0, 画布只剩 2px 且永远绘制不出内容。
+     */
+    min-height: 110px;
     overflow: hidden;
 }
 
@@ -1018,7 +1024,8 @@ input[type="range"].fine-drag::-moz-range-thumb {
 
 .trace-steps-table-container {
     flex: 1 1 auto;
-    min-height: 0;
+    /* 同上: 步骤表内容由 JS 动态注入, 在内容到达前需要有确定高度可依 */
+    min-height: 110px;
     overflow-y: auto;
     background: var(--bg-inset);
     border: 1px solid var(--line-subtle);
@@ -1521,7 +1528,72 @@ input[type="range"].fine-drag::-moz-range-thumb {
     font-size: 12px;
 }
 
-/* 窄屏降级: 侧栏收窄, 维持 3D 视口可用 */
+/* ══════════════════════ 响应式降级 ══════════════════════
+ *
+ * 三栏布局存在硬性下限: 左右两栏各需约 268px 才放得下关节名称与限位条。
+ * 窗口再窄时, 固定列宽会把中栏挤成 0 —— 3D 视口与求解诊断面板会整体消失,
+ * 画布随之塌缩到 2px 并持续重绘空白。
+ *
+ * 因此在低于可容纳宽度时改为**单栏纵向堆叠**: 3D 视口置顶 (仍占最大高度),
+ * 其余面板依次向下, 页面整体滚动。这样窄窗口下内容不会丢失, 只是需要滚动。
+ */
+
+/* 中栏不足以容纳时: 放弃固定列宽, 全部转为单栏 */
+@media (max-width: 900px) {
+    :root { --col-side: auto; }
+
+    body { overflow: auto; }
+
+    .hud-header {
+        flex-wrap: wrap;
+        height: auto;
+        flex: 0 0 auto;
+        padding: 8px var(--gap-md);
+        gap: var(--gap-sm);
+    }
+    .status-center { order: 3; width: 100%; }
+
+    .dashboard-grid {
+        display: flex;
+        flex-direction: column;
+        flex: 0 0 auto;
+        min-height: 0;
+    }
+
+    /* 单栏下各栏不再独立滚动, 交由页面统一滚动 */
+    .panel-column,
+    .col-center {
+        overflow: visible;
+        min-height: 0;
+    }
+
+    /* 3D 视口保持主导, 给出最小可用高度 */
+    .viewport-wrapper { min-height: 320px; height: 48vh; flex: 0 0 auto; }
+
+    /* 求解面板两列改为上下堆叠, 避免被压成窄条 */
+    .solver-body { grid-template-columns: 1fr; }
+    .solver-side { border-top: 1px solid var(--line-subtle); padding-top: 6px; }
+
+    /* 折叠卡片在单栏下不再吸收剩余空间 (页面已可滚动) */
+    .card-fill, #cardDynamics { flex: 0 0 auto; min-height: 0; }
+    .log-stream { max-height: 220px; }
+
+    .log-dock { position: static; }
+}
+
+/* 极窄: 顶栏精简, 减少横向占用 */
+@media (max-width: 620px) {
+    .brand-text { display: none; }
+    .header-actions { width: 100%; justify-content: flex-end; }
+    .pose-summary-row, .trace-stats-bar { grid-template-columns: 1fr 1fr; }
+    .coord-stepper-grid, .presets-grid, .radar-zones-grid, .dyn-metrics {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+/* ══════════════════════ 中等屏降级 ══════════════════════
+ * 逐级收窄侧栏, 但保持三栏结构 (中栏始终优先保留)。
+ */
 @media (max-width: 1560px) {
     :root { --col-side: 330px; }
 }
