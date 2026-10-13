@@ -15,7 +15,6 @@ let targetArrow = null;
 let actualArrow = null;
 let pendingOrb = null;
 let pendingArrow = null;
-let pendingHalo = null;
 let actualOrb = null;
 let errorLine = null;
 let comOrb = null;
@@ -271,31 +270,23 @@ function initActualOrb() {
  *   · 悬停于实际目标之上, 下发成功后自动消失。
  */
 function initPendingOrb() {
-    // 醒目度实测不足 (用户反馈"不够明显"): 初版用 0.026 半径的线框八面体 +
-    // 0.30 透明度 + 与范围盒同色, 在实际视距下几乎看不见, 图例里也没有它 ——
-    // 用户既看不见, 看见了也不知道是什么。现改为实心、近乎不透明、加大、
-    // 并换用与既有标记都不撞的紫色。
+    // 尺寸经过一次反复: 0.026 (实机反馈"不够明显") → 0.052 + 外圈壳 (反馈
+    // "很丑, 也很大") → 0.028 定稿。可见度不靠堆体积, 靠**颜色与不透明度**:
+    // 同一尺寸下 0.30 透明度几乎看不见, 0.9 实心则清晰可辨, 而体积翻两倍
+    // 只会变成一坨挡住机器人手臂的色块。
     pendingOrb = addToScene(new THREE.Mesh(
-        new THREE.OctahedronGeometry(0.052),
+        new THREE.OctahedronGeometry(0.028),
         new THREE.MeshBasicMaterial({
-            color: 0xc46bff, transparent: true, opacity: 0.95, depthTest: false,
+            // 柔和紫: 与绿色(已下发目标)、金色(末端实测)、青色(范围盒/质心) 均
+            // 不撞, 又不像高饱和品红那样在大面积深色背景上显得刺眼
+            color: 0xa78bfa, transparent: true, opacity: 0.9, depthTest: false,
         })
     ));
     pendingOrb.renderOrder = 1001;
 
-    // 外圈再加一层稍大的半透明壳, 远距离下仍有一团明显的色块
-    pendingHalo = addToScene(new THREE.Mesh(
-        new THREE.OctahedronGeometry(0.080),
-        new THREE.MeshBasicMaterial({
-            color: 0xc46bff, transparent: true, opacity: 0.22,
-            depthTest: false, depthWrite: false, side: THREE.BackSide,
-        })
-    ));
-    pendingHalo.renderOrder = 1000;
-
     pendingArrow = new THREE.ArrowHelper(
         new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0),
-        0.16, 0xd98cff, 0.042, 0.026,
+        0.092, 0xb9a2ff, 0.026, 0.016,
     );
     pendingArrow.line.material.depthTest = false;
     pendingArrow.cone.material.depthTest = false;
@@ -311,7 +302,7 @@ function initPendingOrb() {
  * 突然出现的紫色物体却无从查证是什么 —— 这本身就是"不明显"的一部分。
  */
 function setPendingVisible(visible) {
-    for (const obj of [pendingOrb, pendingHalo, pendingArrow]) {
+    for (const obj of [pendingOrb, pendingArrow]) {
         if (obj) obj.visible = visible;
     }
     const legend = el("legendPending");

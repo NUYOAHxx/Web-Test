@@ -810,8 +810,8 @@ input[type="range"].fine-drag::-moz-range-thumb {
 .orb-legend.blue  { background: var(--accent-blue); box-shadow: 0 0 6px var(--accent-blue); }
 /* 待发预览: 与绿色(已下发目标)、金色(末端实测)、青色(范围盒/质心) 均不撞色 */
 .orb-legend.violet {
-    background: #c46bff;
-    box-shadow: 0 0 8px #c46bff;
+    background: #a78bfa;
+    box-shadow: 0 0 6px #a78bfa;
 }
 
 .viewport-stats { display: flex; gap: var(--gap-sm); }
