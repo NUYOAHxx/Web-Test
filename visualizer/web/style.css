@@ -1493,6 +1493,7 @@ input[type="range"].fine-drag::-moz-range-thumb {
     margin-top: 1px;
 }
 .log-badge.command   { border-color: rgba(56, 184, 212, 0.32); color: var(--accent-cyan); }
+.log-badge.warn      { border-color: rgba(232, 170, 78, 0.36); color: var(--sev-warn); }
 .log-badge.error     { border-color: rgba(232, 85, 109, 0.4);  color: var(--sev-alert); }
 .log-badge.config    { border-color: rgba(91, 155, 213, 0.32); color: var(--accent-blue); }
 .log-badge.telemetry { border-color: rgba(52, 199, 123, 0.3);  color: var(--sev-ok); }

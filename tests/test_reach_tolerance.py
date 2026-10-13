@@ -2,11 +2,12 @@
 可达性判定容差的标定测试
 ================================================================================
 
-守护的是一个实测标定值, 而非随手取的常数。
+注意: 本模块守护的容差**不再用于拦截**, 仅决定界面是否给出"可能不收敛"的
+提示。大屏是观测工具而非计算器 —— 用户要的是能把任意目标下发出去并观察结果,
+拦截会把"不收敛"这一最值得看的现象挡在入口。
 
-容差 = "距最近的已采样可达位姿多远仍算可达"。若它小于采样间距的尾部,
-采样稀疏处就会把**完全够得着**的点判成不可达 —— 用户会看到
-"目标 [...] 不可达: 距最近的可达位姿 45mm", 而那一点实际残差 0.45mm。
+容差 = "距最近的已采样可达位姿多远就不再提示"。若它小于采样间距的尾部,
+采样稀疏处会对完全够得着的点误报"可能不收敛" (提示噪声)。
 
 实测 (6 万采样, 左臂):
 
@@ -15,7 +16,7 @@
     容差 40mm      误拒  1/3000 = 0.0%      坏角点放过 0/8
     容差 50mm      误拒  0/3000 = 0.0%      坏角点放过 1/8   ← 不可接受
 
-容差过大同样有代价: 50mm 会放过距 49mm 的坏目标, 而该点实测残差 52mm。
+容差过大同样有代价: 50mm 会放过距 49mm 的明显不可达目标, 提示随之失效。
 因此区间很窄, 需要测试守着。
 """
 
@@ -42,7 +43,7 @@ def index():
 
 
 def test_tolerance_covers_sampling_gap(index):
-    """容差必须不小于采样间距的最大值, 否则稀疏处必然误拒。"""
+    """容差必须不小于采样间距的最大值, 否则稀疏处会误报提示。"""
     _, idx = index
     from scipy.spatial import cKDTree
     tree = cKDTree(idx.points)
@@ -56,7 +57,7 @@ def test_tolerance_covers_sampling_gap(index):
     tol = idx.tolerance
     assert tol >= max_gap * 0.95, (
         f"容差 {tol * 1000:.0f}mm 小于采样最大间距 {max_gap * 1000:.1f}mm 的 95%, "
-        f"稀疏处会出现误拒"
+        f"稀疏处会误报'可能不收敛'"
     )
 
 
@@ -67,8 +68,8 @@ def test_tolerance_not_so_loose(index):
         f"容差 {idx.tolerance * 1000:.0f}mm 过宽: 实测 50mm 会放过残差 52mm 的坏目标"
 
 
-def test_false_rejection_rate_low(index):
-    """对"样本自身"的误拒率必须接近零 —— 样本点必然可达。"""
+def test_false_warning_rate_low(index):
+    """对"样本自身"的误提示率必须接近零 —— 样本点必然可达, 不该提示不收敛。"""
     _, idx = index
     from scipy.spatial import cKDTree
     tree = cKDTree(idx.points)
@@ -80,11 +81,14 @@ def test_false_rejection_rate_low(index):
 
     rejected = int((own_gap > idx.tolerance).sum())
     assert rejected / len(pick) < 0.005, \
-        f"误拒率 {rejected / len(pick):.1%} 过高, 界面会频繁拦截可达目标"
+        f"误提示率 {rejected / len(pick):.1%} 过高, 界面对可达目标也会报警"
 
 
-def test_unreachable_regions_rejected(index):
-    """包围盒角点 (实测残差 52~262mm) 必须全部拒绝。"""
+def test_unreachable_regions_flagged(index):
+    """包围盒角点 (实测残差 52~262mm) 必须全部被标记为"很可能不可达"。
+
+    只要求标记, 不要求拦截 —— 指令照常下发, 由残差与收敛曲线呈现结果。
+    """
     _, idx = index
     corners = [
         (0.041, -0.446, 0.722), (0.041, -0.446, 1.374),
@@ -97,17 +101,17 @@ def test_unreachable_regions_rejected(index):
         ok, gap = idx.query(c)
         if ok:
             wrongly.append((c, gap))
-    assert not wrongly, f"以下不可达角点被误判为可达: {wrongly}"
+    assert not wrongly, f"以下明显不可达的目标未被标记 (提示将失效): {wrongly}"
 
 
 def test_high_targets_reachable(index):
-    """高处不是禁区 —— 防止过度收紧把上方工作空间也一起封掉。
+    """高处不是禁区 —— 防止过度收紧把上方工作空间也标成不可达。
 
     实测 [0.30, 0.20, 1.35] 残差 0.45mm, 属于完全可达。
     """
     _, idx = index
     ok, gap = idx.query((0.30, 0.20, 1.35))
-    assert ok, f"已知可达的高处目标被判为不可达 (距最近可达位姿 {gap * 1000:.1f}mm)"
+    assert ok, f"已知可达的高处目标被标为不可达 (距最近可达位姿 {gap * 1000:.1f}mm)"
 
 
 def test_query_reports_meaningful_distance(index):

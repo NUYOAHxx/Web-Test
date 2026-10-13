@@ -430,8 +430,17 @@ export async function dispatch(cmd, presetName) {
             setText(el("btnDispatchTarget"), "下发 6D 目标位姿");
             pushLocalLog("COMMAND", `下发目标: ${presetName}`,
                 `[${state.arm}] X ${signed(cmd.x, 3)}m Y ${signed(cmd.y, 3)}m Z ${signed(cmd.z, 3)}m${rpyInfo}`);
+
+            // 可达性提示: 指令已照常下发, 这里只告知"可能不收敛"。
+            // 大屏是观测工具 —— 不收敛本身正是要看的现象, 不应被拦在入口。
+            const adv = res.reachability;
+            if (adv && (adv.likely_reachable === false || adv.rpy_out_of_range)) {
+                pushLocalLog("WARN", `目标可能不可达: ${presetName}`,
+                    `${adv.note || adv.rpy_note || ""} —— 已下发, 请观察残差与收敛曲线`);
+            }
         } else {
-            pushLocalLog("ERROR", `指令被拦截: ${presetName}`, res.error || `HTTP ${resp.status}`);
+            // 仅畸形输入会走到这里 (NaN/Inf、rpy 长度非法、臂名未知)
+            pushLocalLog("ERROR", `指令格式有误: ${presetName}`, res.error || `HTTP ${resp.status}`);
         }
     } catch (err) {
         pushLocalLog("ERROR", "指令下发通信失败", err.message || "无法连接到遥测控制中枢");

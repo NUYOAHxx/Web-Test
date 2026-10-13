@@ -85,20 +85,17 @@ REACH_INDEX_SAMPLES = 60000
 #: 加大采样数并不能改善误拒 —— 最大间距随 N 只从 40.1mm 降到 39.3mm
 #: (6万→12万), 却要多付 2.3s 启动时间。
 REACH_INDEX_TOLERANCE_M = 0.040
-#: 滑块/粗筛范围相对实测包围盒的内缩比例 —— 边界处 IK 收敛率显著下降
-SLIDER_INSET = 0.85
 
+#: 索引构建失败时的兜底范围。仅用于让滑块仍有合理量程, 不参与任何拦截。
 FALLBACK_REACH_ENVELOPE = {
-    "x": {"min": 0.05, "max": 0.45},
-    "y": {"min": -0.30, "max": 0.30},
-    "z": {"min": 0.70, "max": 1.30},
-    "roll": {"min": -90.0, "max": 90.0},
+    "x": {"min": -0.55, "max": 0.55},
+    "y": {"min": -0.55, "max": 0.55},
+    "z": {"min": 0.65, "max": 1.45},
+    "roll": {"min": -150.0, "max": 150.0},
     "pitch": {"min": -75.0, "max": 75.0},
-    "yaw": {"min": -90.0, "max": 90.0},
+    "yaw": {"min": -150.0, "max": 150.0},
 }
 
-#: 六个受约束的坐标键 (前端滑块与后端校验共用同一套)
-ENVELOPE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 
 
 class RobotTelemetryManager:
@@ -304,23 +301,19 @@ class RobotTelemetryManager:
             time.sleep(sleep_time)
 
     def _kin_slider_envelope(self, p_min, p_max, arm: str) -> Dict[str, Dict[str, float]]:
-        """由可达性索引的采样包围盒推导滑块范围与粗筛范围。
+        """滑块范围 = 可达性索引的实测包围盒 (原始值, 不截断不内缩)。
 
-        位置直接采用索引包围盒 (X 下界置 0, 身后为贴近躯干的奇异区), 并按
-        ``INSET`` 内缩避开边界 —— 边界处 IK 收敛率显著下降。
+        早期版本会做两处收窄: X 下界截到 0 (身后为奇异区) 、整体按 0.85 内缩
+        (避开边界以提高收敛率)。两处都是**为计算器策略**服务的假设; 而大屏的
+        用途是观察 —— 用户恰恰需要能滑到边界乃至边界之外, 才能看到求解器在
+        那里如何失败。因此改为完整给出实测范围, 是否收敛交给残差与曲线呈现。
 
-        姿态仍走 ``compute_reach_envelope``: 索引只存末端位置, 不含朝向。
+        姿态维度索引不覆盖, 仍由 ``compute_orientation_envelope`` 提供。
         """
         env = self.kin.compute_orientation_envelope(arm)
         out: Dict[str, Dict[str, float]] = {}
         for i, key in enumerate(("x", "y", "z")):
-            lo = float(p_min[i])
-            if key == "x":
-                lo = max(lo, 0.0)          # front_only
-            hi = float(p_max[i])
-            c = (lo + hi) * 0.5
-            half = (hi - lo) * 0.5 * SLIDER_INSET
-            out[key] = {"min": round(c - half, 4), "max": round(c + half, 4)}
+            out[key] = {"min": round(float(p_min[i]), 4), "max": round(float(p_max[i]), 4)}
         for key in ("roll", "pitch", "yaw"):
             out[key] = env[key]
         return out
@@ -1026,33 +1019,29 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                 if arm not in ("left_arm", "right_arm"):
                     raise ValueError(f"Invalid arm '{arm}', must be 'left_arm' or 'right_arm'")
 
-                # 3. 可达性判定。包围盒只做粗筛 —— 末端可达集是非凸的, 盒子角点几乎必然
-                #    落在集外 (实测 8/8 角点无解, 残差 52~262mm)。真正的判据是
-                #    稠密采样建的 KD 树: 查最近候选位姿并逐个做自碰撞判定。
-                env = (MANAGER._reach_envelope.get(arm)
-                       if MANAGER else None) or FALLBACK_REACH_ENVELOPE
-
-                def _in(axis: str, value: float) -> bool:
-                    box = env[axis]
-                    return box["min"] <= value <= box["max"]
-
-                bad = []
-                for axis, value, unit in (("x", x, "m"), ("y", y, "m"), ("z", z, "m")):
-                    if not _in(axis, value):
-                        bad.append(f"{axis.upper()}={value:.3f} 粗筛范围 "
-                                   f"[{env[axis]['min']:.3f}, {env[axis]['max']:.3f}]{unit}")
-                if bad:
-                    raise ValueError("目标超出该臂粗筛范围: " + "; ".join(bad))
-
+                # 3. 可达性: 只提示, 不拦截。
+                #
+                #    早期版本在此拒绝越界目标 (实测包围盒 8 角点 8/8 被拒)。但本系统
+                #    是**观测大屏而非计算器** —— 用户要的就是能把任意目标下发出去,
+                #    然后观察收敛曲线、残差与碰撞状态怎么变化。拦截反而把"不收敛"
+                #    这一最值得看的现象挡在了入口, 让人只能看到一片拒绝日志。
+                #
+                #    因此这里只计算可达性并回传距离, 由界面以提示形式呈现。
+                #    格式类校验 (NaN/Inf、rpy 长度、臂名) 仍保留 —— 那不是策略闸,
+                #    而是畸形输入会让下游序列化与求解崩溃。
+                advisory: Dict[str, Any] = {}
                 index = MANAGER._reach_index.get(arm) if MANAGER else None
                 if index is not None:
                     reachable, gap = index.query((x, y, z))
+                    advisory = {
+                        "likely_reachable": bool(reachable),
+                        "gap_mm": round(gap * 1000.0, 1),
+                        "tolerance_mm": round(index.tolerance * 1000.0, 1),
+                    }
                     if not reachable:
-                        raise ValueError(
-                            f"目标 [{x:.3f}, {y:.3f}, {z:.3f}] 不可达: "
-                            f"距最近的可达位姿 {gap * 1000.0:.0f}mm"
-                            f"（容差 {index.tolerance * 1000.0:.0f}mm）。"
-                            "可达工作空间是非凸的, 请把目标收进实测范围内再下发。"
+                        advisory["note"] = (
+                            f"距最近的可达位姿 {gap * 1000.0:.0f}mm, 可能无法收敛 —— "
+                            "指令已照常下发, 请观察残差与收敛曲线"
                         )
 
                 # 4. 6-DoF 空间朝向欧拉角解析 (Roll, Pitch, Yaw 单位: 度)
@@ -1072,18 +1061,20 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                     for angle in rpy:
                         if math.isnan(angle) or math.isinf(angle):
                             raise ValueError("RPY angles cannot contain NaN or Infinity")
-                    # 姿态范围校验 —— 此前完全缺失, 前端放开 ±180° 会被原样下发,
-                    # 表现为"校验通过但残差几百毫米", 正是收紧位置包络要避免的情况。
-                    # 实测本模型 Roll/Yaw 近乎无约束而 Pitch 受限于 ±75°,
-                    # 三者各不相同, 故逐轴独立判定。
-                    for axis, angle in zip(("roll", "pitch", "yaw"), rpy):
-                        if not _in(axis, angle):
-                            box = env[axis]
-                            raise ValueError(
-                                f"{axis.upper()}={angle:.1f}° 超出该臂实测可达姿态范围 "
-                                f"[{box['min']:.1f}, {box['max']:.1f}]°"
-                                "（范围由当前 URDF 在启动时实测得出）"
-                            )
+                    # 姿态范围同样不拦截 —— 与位置一致, 大屏用于观察而非判定。
+                    # 仅在明显超出实测范围时附一条提示。
+                    if rpy is not None and MANAGER is not None:
+                        _env = MANAGER._reach_envelope.get(arm) or {}
+                        for axis, angle in zip(("roll", "pitch", "yaw"), rpy):
+                            box = _env.get(axis)
+                            if box and not (box["min"] <= angle <= box["max"]):
+                                advisory["rpy_out_of_range"] = True
+                                advisory.setdefault(
+                                    "rpy_note",
+                                    f"{axis.upper()}={angle:.1f}° 超出实测可达姿态 "
+                                    f"[{box['min']:.0f}, {box['max']:.0f}]°, 可能无法收敛",
+                                )
+                                break
 
                 if MANAGER is None:
                     raise RuntimeError("ROS 2 调度中枢未就绪 (MANAGER 未初始化)，指令未下发")
@@ -1099,7 +1090,9 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                     "rpy": rpy,
                     "arm": arm,
                     "preset": preset,
-                    f"message": f"6D 目标指令已发布至 ROS 2 话题 {MANAGER.topics['target_pose']}, 由 IK 引擎解算",
+                    "message": f"6D 目标指令已发布至 ROS 2 话题 {MANAGER.topics['target_pose']}, 由 IK 引擎解算",
+                    # 可达性提示: 指令已下发, 此处仅告知结果可能如何
+                    "reachability": advisory,
                 }, ensure_ascii=False).encode("utf-8"))
             except Exception as e:
                 self.send_response(400)
