@@ -6,6 +6,7 @@
  */
 
 import { addToScene } from "./scene.js";
+import { el, setHidden } from "../dom.js";
 import { clearanceStatus } from "../format.js";
 
 /* 标记物句柄 */
@@ -14,6 +15,7 @@ let targetArrow = null;
 let actualArrow = null;
 let pendingOrb = null;
 let pendingArrow = null;
+let pendingHalo = null;
 let actualOrb = null;
 let errorLine = null;
 let comOrb = null;
@@ -269,29 +271,51 @@ function initActualOrb() {
  *   · 悬停于实际目标之上, 下发成功后自动消失。
  */
 function initPendingOrb() {
+    // 醒目度实测不足 (用户反馈"不够明显"): 初版用 0.026 半径的线框八面体 +
+    // 0.30 透明度 + 与范围盒同色, 在实际视距下几乎看不见, 图例里也没有它 ——
+    // 用户既看不见, 看见了也不知道是什么。现改为实心、近乎不透明、加大、
+    // 并换用与既有标记都不撞的紫色。
     pendingOrb = addToScene(new THREE.Mesh(
-        new THREE.OctahedronGeometry(0.026),
+        new THREE.OctahedronGeometry(0.052),
         new THREE.MeshBasicMaterial({
-            color: 0x7fe8ff, transparent: true, opacity: 0.30,
-            wireframe: true, depthWrite: false,
+            color: 0xc46bff, transparent: true, opacity: 0.95, depthTest: false,
         })
     ));
-    pendingOrb.renderOrder = 1000;
+    pendingOrb.renderOrder = 1001;
+
+    // 外圈再加一层稍大的半透明壳, 远距离下仍有一团明显的色块
+    pendingHalo = addToScene(new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.080),
+        new THREE.MeshBasicMaterial({
+            color: 0xc46bff, transparent: true, opacity: 0.22,
+            depthTest: false, depthWrite: false, side: THREE.BackSide,
+        })
+    ));
+    pendingHalo.renderOrder = 1000;
 
     pendingArrow = new THREE.ArrowHelper(
         new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0),
-        0.105, 0x7fe8ff, 0.026, 0.016,
+        0.16, 0xd98cff, 0.042, 0.026,
     );
-    pendingArrow.line.material.transparent = true;
-    pendingArrow.line.material.opacity = 0.85;
     pendingArrow.line.material.depthTest = false;
-    pendingArrow.cone.material.transparent = true;
-    pendingArrow.cone.material.opacity = 0.85;
     pendingArrow.cone.material.depthTest = false;
     pendingOrb.add(pendingArrow);
 
-    pendingOrb.visible = false;
-    pendingArrow.visible = false;
+    setPendingVisible(false);
+}
+
+/**
+ * 统一切换三个图元的显隐, 避免只改其中一个导致残留。
+ *
+ * 同步点亮图例: 此前图例里根本没有"待发预览"这一项, 用户在视口里看到一个
+ * 突然出现的紫色物体却无从查证是什么 —— 这本身就是"不明显"的一部分。
+ */
+function setPendingVisible(visible) {
+    for (const obj of [pendingOrb, pendingHalo, pendingArrow]) {
+        if (obj) obj.visible = visible;
+    }
+    const legend = el("legendPending");
+    if (legend) setHidden(legend, !visible);
 }
 
 /**
@@ -304,18 +328,14 @@ function initPendingOrb() {
 export function updatePendingMarker(pos, quat) {
     if (!pendingOrb) return false;
     if (!pos || !Number.isFinite(pos[0])) {
-        if (pendingOrb.visible) {
-            pendingOrb.visible = false;
-            pendingArrow.visible = false;
-        }
+        if (pendingOrb.visible) setPendingVisible(false);
         return false;
     }
     pendingOrb.position.set(pos[0], pos[1], pos[2]);
     if (quat && quat.length === 4) {
         pendingOrb.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
     }
-    pendingOrb.visible = true;
-    pendingArrow.visible = true;
+    setPendingVisible(true);
     return true;
 }
 
