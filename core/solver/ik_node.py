@@ -7,12 +7,12 @@
 
 定位：纯算法与运动学计算节点 (Zero Web / Pure Kinematics Engine)
 1. 彻底解耦，无任何阻塞式 input()，完全作为 Headless ROS 2 独立服务节点常驻；
-2. 订阅标准笛卡尔指令话题：/g1/kinematics/target_pose 与高层指令 /g1/kinematics/target_command；
+2. 订阅标准笛卡尔指令话题：<前缀>/kinematics/target_pose 与高层指令 <前缀>/kinematics/target_command；
 3. 执行非对称加权自适应阻尼最小二乘 (Weighted DLS) 9-DoF 协同求解；
 4. 运行全机身 28 对关键连杆自碰撞安全检测门禁与距离裕度计算；
 5. 内置 50Hz 工业级平滑 S 曲线余弦插值器，向 /joint_states 发布真实关节轨迹；
-6. 实时广播专业度量流：/g1/kinematics/actual_pose、/g1/kinematics/solver_metrics、
-   /g1/safety/collision_status 与 RViz 3D 标记流。
+6. 实时广播专业度量流：<前缀>/kinematics/actual_pose、<前缀>/kinematics/solver_metrics、
+   <前缀>/safety/collision_status 与 RViz 3D 标记流。
 """
 
 import os
@@ -142,26 +142,46 @@ class IKSolverNode(Node):
         self.declare_parameter("publish_joint_states", True)
         self.publish_joint_states = bool(self.get_parameter("publish_joint_states").value)
 
+        # ── ROS 2 话题命名空间 ──
+        # 前缀此前写死为 /g1/, 换用其他机器人后话题名仍带具体型号, 与
+        # "型号只是测试对象"的前提冲突; 且与另一台设备共用总线时必然撞名。
+        # 现改为参数, 默认 /humanoid (通用), 兼容旧命名只需传 /g1。
+        self.declare_parameter("topic_prefix", "/humanoid")
+        _pfx = str(self.get_parameter("topic_prefix").value or "/humanoid").strip()
+        if not _pfx.startswith("/"):
+            _pfx = "/" + _pfx
+        self.topic_prefix: str = _pfx.rstrip("/")
+        self.topics: Dict[str, str] = {
+            "target_pose": f"{self.topic_prefix}/kinematics/target_pose",
+            "target_command": f"{self.topic_prefix}/kinematics/target_command",
+            "target_status": f"{self.topic_prefix}/kinematics/target_status",
+            "actual_pose": f"{self.topic_prefix}/kinematics/actual_pose",
+            "solver_metrics": f"{self.topic_prefix}/kinematics/solver_metrics",
+            "collision_status": f"{self.topic_prefix}/safety/collision_status",
+            "markers": f"{self.topic_prefix}/visualization/markers",
+            "compute_ik": f"{self.topic_prefix}/compute_ik",
+        }
+
         # ── ROS 2 发布者 (标准专业命名，零冗余兼容) ──
         self.pub_joint_states = self.create_publisher(JointState, "/joint_states", 10)
         # 目标位姿回显发布到独立的 status 话题。
-        # 早期实现向指令话题 /g1/kinematics/target_pose 回发, 而本节点又订阅该话题,
+        # 早期实现向指令话题 target_pose 回发, 而本节点又订阅该话题,
         # 形成 solve_target -> publish -> _on_target_pose_msg -> solve_target 的
         # 自回环, 导致 IK 以 50Hz 无限重解 (表现为界面持续刷新残差、机械臂细微抖动)。
         # 指令输入与状态回显必须是两个话题。
-        self.pub_target_pose = self.create_publisher(PoseStamped, "/g1/kinematics/target_status", 10)
-        self.pub_actual_pose = self.create_publisher(PoseStamped, "/g1/kinematics/actual_pose", 10)
-        self.pub_metrics = self.create_publisher(String, "/g1/kinematics/solver_metrics", 10)
-        self.pub_safety = self.create_publisher(String, "/g1/safety/collision_status", 10)
-        self.pub_markers = self.create_publisher(MarkerArray, "/g1/visualization/markers", 10)
+        self.pub_target_pose = self.create_publisher(PoseStamped, self.topics["target_status"], 10)
+        self.pub_actual_pose = self.create_publisher(PoseStamped, self.topics["actual_pose"], 10)
+        self.pub_metrics = self.create_publisher(String, self.topics["solver_metrics"], 10)
+        self.pub_safety = self.create_publisher(String, self.topics["collision_status"], 10)
+        self.pub_markers = self.create_publisher(MarkerArray, self.topics["markers"], 10)
         self.is_demo_running = False
 
         # ── ROS 2 订阅者 (标准专业命名) ──
         self.sub_target_pose = self.create_subscription(
-            PoseStamped, "/g1/kinematics/target_pose", self._on_target_pose_msg, 10
+            PoseStamped, self.topics["target_pose"], self._on_target_pose_msg, 10
         )
         self.sub_command = self.create_subscription(
-            String, "/g1/kinematics/target_command", self._on_target_command_msg, 10
+            String, self.topics["target_command"], self._on_target_command_msg, 10
         )
         if not self.publish_joint_states:
             self.sub_joint_states_feedback = self.create_subscription(
@@ -171,18 +191,22 @@ class IKSolverNode(Node):
         # 50Hz 实时轨迹平滑插值广播定时器 (20ms 步长)
         self.timer = self.create_timer(0.02, self._on_timer_step)
 
-        # ── MoveIt 2 标准兼容逆运动学服务接口 (/g1/compute_ik) 与规划路径监听 ──
+        # ── MoveIt 2 标准兼容逆运动学服务接口 与规划路径监听 ──
         if HAS_MOVEIT_MSGS:
             self.srv_compute_ik = self.create_service(
-                GetPositionIK, "/g1/compute_ik", self._on_compute_ik_service
+                GetPositionIK, self.topics["compute_ik"], self._on_compute_ik_service
             )
             self.sub_display_path = self.create_subscription(
                 DisplayTrajectory, "/display_planned_path", self._on_display_planned_path_msg, 10
             )
-            self.get_logger().info("[OK] MoveIt 2 标准兼容服务就绪: /g1/compute_ik & /display_planned_path")
+            self.get_logger().info(
+                f"[OK] MoveIt 2 标准兼容服务就绪: {self.topics['compute_ik']} & /display_planned_path")
 
-        self.get_logger().info("[OK] 订阅话题就绪: /g1/kinematics/target_pose & /g1/kinematics/target_command")
-        self.get_logger().info("[OK] 发布总线就绪: /joint_states (50Hz), /g1/kinematics/*, /g1/safety/*")
+        self.get_logger().info(
+            f"[OK] 订阅话题就绪: {self.topics['target_pose']} & {self.topics['target_command']}")
+        self.get_logger().info(
+            f"[OK] 发布总线就绪: /joint_states (50Hz), {self.topic_prefix}/kinematics/*, "
+            f"{self.topic_prefix}/safety/*")
         self.get_logger().info(f"[OK] 初始对齐就绪: 手爪空间坐标 [{init_fk_pos[0]:.3f}, {init_fk_pos[1]:.3f}, {init_fk_pos[2]:.3f}], 姿态 RPY: {init_rpy_deg}°")
 
     # ─────────────────────────────────────────────────────────────
@@ -277,11 +301,11 @@ class IKSolverNode(Node):
             self.get_logger().error(f"[ERROR] 解析目标指令异常: {e}")
 
     # ─────────────────────────────────────────────────────────────
-    # MoveIt 2 标准逆运动学服务处理 (/g1/compute_ik)
+    # MoveIt 2 标准逆运动学服务处理 (<前缀>/compute_ik)
     # ─────────────────────────────────────────────────────────────
     def _on_compute_ik_service(self, request, response):
         """
-        处理 MoveIt 2 标准逆运动学服务请求 (/g1/compute_ik, moveit_msgs/srv/GetPositionIK)
+        处理 MoveIt 2 标准逆运动学服务请求 (<前缀>/compute_ik, moveit_msgs/srv/GetPositionIK)
         支持规划组：left_arm, right_arm, left_arm_torso, right_arm_torso
         """
         req = request.ik_request

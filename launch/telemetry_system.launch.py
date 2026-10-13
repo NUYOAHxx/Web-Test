@@ -84,6 +84,9 @@ def generate_launch_description():
     port_arg = DeclareLaunchArgument(
         name="port", default_value="8080",
         description="Web 遥测监控大屏 HTTP 服务端口")
+    topic_prefix_arg = DeclareLaunchArgument(
+        name="topic_prefix", default_value="/humanoid",
+        description="ROS 2 话题命名空间前缀 (求解器与大屏共用; 兼容旧命名传 /g1)")
     launch_rviz_arg = DeclareLaunchArgument(
         name="rviz", default_value="false",
         description="是否同时启动桌面端 RViz2 监控 (true/false)")
@@ -101,6 +104,7 @@ def generate_launch_description():
             #   写进 f-string    → 退化成字符串字面量, 替换不生效, 参数被静默忽略。
             "-p", ["urdf_path:=", LaunchConfiguration("urdf")],
             "-p", ["srdf_path:=", LaunchConfiguration("srdf")],
+            "-p", ["topic_prefix:=", LaunchConfiguration("topic_prefix")],
         ],
         output="screen",
         name="ik_solver",
@@ -133,7 +137,7 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        urdf_arg, srdf_arg, solver_arg, port_arg, launch_rviz_arg,
+        urdf_arg, srdf_arg, solver_arg, port_arg, topic_prefix_arg, launch_rviz_arg,
         ik_solver_process, rsp, web_server_process, rviz_node,
     ])
 

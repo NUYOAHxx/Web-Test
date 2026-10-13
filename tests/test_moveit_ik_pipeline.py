@@ -6,7 +6,7 @@
 ================================================================================
 
 测试目标：
-1. 验证 MoveIt 2 标准服务协议兼容性 (/g1/compute_ik, moveit_msgs/srv/GetPositionIK)；
+1. 验证 MoveIt 2 标准服务协议兼容性 (<前缀>/compute_ik, moveit_msgs/srv/GetPositionIK)；
 2. 验证 7-DoF 单臂与 9-DoF 躯干-手臂协同在 MoveIt 消息体系下的解算精度与合规性；
 3. 验证关节输出 100% 符合 MoveIt joint_limits.yaml 物理极限；
 4. 验证面对超限/奇异目标时的诚实拦截机制 (MoveItErrorCodes.NO_IK_SOLUTION)；
@@ -43,7 +43,7 @@ import pinocchio as pin
 
 from core.solver.humanoid_pink_ik import HumanoidPinkIKSolver
 from core.kinematics.humanoid_model import (
-    READY_POSE, DEFAULT_STAND_JOINTS, JOINT_LIMITS, WAIST_LIMITS,
+    READY_POSE, DEFAULT_STAND_JOINTS,
 )
 from core.planning.moveit_ompl_planner import MoveItOMPLPlanner
 
@@ -58,7 +58,7 @@ def ros_context():
     if not rclpy.ok():
         rclpy.init()
     node = Node("test_moveit_ik_pipeline_client")
-    client = node.create_client(GetPositionIK, "/g1/compute_ik")
+    client = node.create_client(GetPositionIK, _IK_SERVICE())
     
     # 阻塞等待服务就绪 (最多等待 3.0s)
     service_ready = client.wait_for_service(timeout_sec=3.0)
@@ -68,8 +68,37 @@ def ros_context():
     node.destroy_node()
 
 
+def _IK_SERVICE():
+    """IK 服务名。与求解节点共用同一前缀, 否则两端命名空间不一致,
+    测试会因找不到服务而静默跳过, 看起来"一直通过"。"""
+    import os
+    pfx = os.environ.get("ROBOT_TOPIC_PREFIX", "/humanoid").strip()
+    if not pfx.startswith("/"):
+        pfx = "/" + pfx
+    return f"{pfx.rstrip('/')}/compute_ik"
+
+
+def _engine_limits():
+    """从运动学引擎取关节限位 (唯一真源为 URDF 的 <limit>)。
+
+    此前本测试直接引用代码里的 JOINT_LIMITS / WAIST_LIMITS 副本字典, 与求解器
+    实际使用的限位分属两套来源 —— 换模型后二者会分叉, 而测试仍然通过。
+    """
+    from core.kinematics.humanoid_model import HumanoidKinematicsModel
+    kin = HumanoidKinematicsModel()
+    out = {}
+    lo, hi = kin.waist_limits
+    for i, n in enumerate(kin.waist_joint_names):
+        out[n] = (float(lo[i]), float(hi[i]))
+    for arm in ("left_arm", "right_arm"):
+        lo, hi = kin.limits[arm]
+        for i, n in enumerate(kin.arm_joint_names[arm]):
+            out[n] = (float(lo[i]), float(hi[i]))
+    return out
+
+
 def test_moveit_service_ready(ros_context):
-    """测试 1: 验证 MoveIt 2 标准 /g1/compute_ik 服务节点在线（若未启动后台节点则跳过集成测试）"""
+    """测试 1: 验证 MoveIt 2 标准 compute_ik 服务节点在线（若未启动后台节点则跳过集成测试）"""
     if not ros_context["service_ready"]:
         pytest.skip("MoveIt IK 服务未启动（需运行 launch/telemetry_system.launch.py 或 core/solver/ik_node.py）")
     assert ros_context["service_ready"]
@@ -107,9 +136,10 @@ def test_moveit_7dof_left_arm_ik(ros_context):
     assert len(joint_names) == 7, f"7-DoF 应返回 7 个关节，实际返回: {len(joint_names)}"
     assert all("left_" in name for name in joint_names), "关节名称应为 left_ 前缀"
 
-    # 验证关节限位 100% 遵守
+    # 验证关节限位 100% 遵守。限位取自 URDF (运动学引擎), 与求解器同源。
+    _lim = _engine_limits()
     for name, pos in zip(joint_names, joint_positions):
-        min_lim, max_lim = JOINT_LIMITS[name]
+        min_lim, max_lim = _lim[name]
         assert min_lim - 1e-4 <= pos <= max_lim + 1e-4, f"关节 {name}={pos:.3f} 越界 [{min_lim:.3f}, {max_lim:.3f}]"
 
 
@@ -152,11 +182,9 @@ def test_moveit_9dof_torso_coordination_ik(ros_context):
     assert abs(waist_yaw) > 0.05 or abs(waist_pitch) > 0.05, "远距离抓取腰部未如期介入协同"
 
     # 验证腰部与手臂各关节绝对处于物理硬限位之内
+    _lim = _engine_limits()
     for name, pos in sol_dict.items():
-        if name in WAIST_LIMITS:
-            min_lim, max_lim = WAIST_LIMITS[name]
-        else:
-            min_lim, max_lim = JOINT_LIMITS[name]
+        min_lim, max_lim = _lim[name]
         assert min_lim - 1e-4 <= pos <= max_lim + 1e-4, f"关节 {name}={pos:.3f} 越界"
 
 

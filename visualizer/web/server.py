@@ -7,9 +7,9 @@
 定位：纯被动遥测展示 + 目标指令下发中枢 (Zero IK Calculation · Pure Telemetry & Dispatcher)
 1. 算展彻底解耦：本服务端绝对不进行任何逆解 (IK) 计算，专注高性能被动监听与指令下发；
 2. 目标指令分发：提供 POST /api/send_target，将前端下达的笛卡尔目标坐标发布至 ROS 2 标准话题：
-   /g1/kinematics/target_pose 与 /g1/kinematics/target_command；
-3. 工业标准监听：被动订阅 ROS 2 /joint_states、/g1/kinematics/actual_pose、
-   /g1/kinematics/solver_metrics 与 /g1/safety/collision_status；
+   <前缀>/kinematics/target_pose 与 <前缀>/kinematics/target_command；
+3. 工业标准监听：被动订阅 ROS 2 /joint_states、<前缀>/kinematics/actual_pose、
+   <前缀>/kinematics/solver_metrics 与 <前缀>/safety/collision_status；
 4. 正向运动学镜像：利用 Pinocchio 前向运动学 (FK, <0.05ms) 计算 36 个官方 STL 连杆世界坐标；
 5. 全域安全雷达：实时计算 28 对关键连杆物理安全净空与干涉告警；
 6. 30Hz SSE 本地实时推送，为 Web 大屏提供丝滑低延迟数据孪生渲染。
@@ -37,8 +37,6 @@ import pinocchio as pin
 from core.kinematics import reachability  # noqa: E402
 from core.kinematics.humanoid_model import (
     HumanoidKinematicsModel,
-    JOINT_LIMITS,
-    WAIST_LIMITS,
     DEFAULT_STAND_JOINTS,
 )
 from core.collision.humanoid_collision import HumanoidCollisionChecker
@@ -179,22 +177,35 @@ class RobotTelemetryManager:
             try:
                 if not rclpy.ok():
                     rclpy.init()
-                self.ros_node = rclpy.create_node("g1_telemetry_hub")
+                self.ros_node = rclpy.create_node("telemetry_hub")
+
+                # 话题前缀必须与 IK 求解节点一致, 否则两端各自发布/订阅到
+                # 不同命名空间, 表现为"指令已下发但机器人不动"。
+                # 前缀此前在本文件与求解器里各写死一份 /g1/, 两处不一致时
+                # 无任何报错, 只是静默失联。
+                _pfx = os.environ.get("ROBOT_TOPIC_PREFIX", "/humanoid").strip()
+                self.topic_prefix: str = ("/" + _pfx if not _pfx.startswith("/") else _pfx).rstrip("/")
+                self.topics: Dict[str, str] = {
+                    "target_pose": f"{self.topic_prefix}/kinematics/target_pose",
+                    "target_command": f"{self.topic_prefix}/kinematics/target_command",
+                    "target_status": f"{self.topic_prefix}/kinematics/target_status",
+                    "solver_metrics": f"{self.topic_prefix}/kinematics/solver_metrics",
+                }
 
                 # 订阅标准遥测话题 (标准话题，不作冗余兼容)
                 self.ros_node.create_subscription(JointState, "/joint_states", self._on_joint_state, 10)
                 # 订阅节点回显的"当前目标位姿"用于遥测显示。
-                # 注意: 与指令话题 /g1/kinematics/target_pose 分离 —— 后者由本节点发布、
+                # 注意: 与指令话题 target_pose 分离 —— 后者由本节点发布、
                 # 供 IK 节点订阅解算; 若在此订阅它, 会把自身发布的指令当成外部新指令,
                 # 再叠加 IK 节点曾经的自回环, 共同造成持续重解。
-                self.ros_node.create_subscription(PoseStamped, "/g1/kinematics/target_status", self._on_target_pose, 10)
-                self.ros_node.create_subscription(String, "/g1/kinematics/solver_metrics", self._on_solver_metrics, 10)
+                self.ros_node.create_subscription(PoseStamped, self.topics["target_status"], self._on_target_pose, 10)
+                self.ros_node.create_subscription(String, self.topics["solver_metrics"], self._on_solver_metrics, 10)
 
                 # 发布目标控制指令话题
-                self.pub_target_pose = self.ros_node.create_publisher(PoseStamped, "/g1/kinematics/target_pose", 10)
-                self.pub_command = self.ros_node.create_publisher(String, "/g1/kinematics/target_command", 10)
+                self.pub_target_pose = self.ros_node.create_publisher(PoseStamped, self.topics["target_pose"], 10)
+                self.pub_command = self.ros_node.create_publisher(String, self.topics["target_command"], 10)
 
-                print("[Web 纯遥测后端] ✔️ 成功建立 ROS 2 数据总线：监听 /joint_states & 分发 /g1/kinematics/target_pose！")
+                print(f"[Web 纯遥测后端] ✔️ 成功建立 ROS 2 数据总线: 监听 /joint_states & 分发 {self.topics['target_pose']}")
 
                 self.ros_spin_thread = threading.Thread(target=self._ros_spin_loop, daemon=True)
                 self.ros_spin_thread.start()
@@ -472,7 +483,7 @@ class RobotTelemetryManager:
             qw = float(msg.pose.orientation.w)
             quat = np.array([qx, qy, qz, qw], dtype=np.float64)
 
-            # 本节点既发布又订阅 /g1/kinematics/target_pose，DDS 会把自身消息回环回来。
+            # 本节点既发布又订阅 target_pose，DDS 会把自身消息回环回来。
             # 若不拦截，自行发布的位姿会把 target_pos/target_rot 覆盖成同一份快照；
             # 更严重的是 rpy=None 时发布的 identity 四元数会污染这里维护的姿态。
             # 通过比对"最近一次自行发布的内容"识别并丢弃回环消息。
@@ -686,7 +697,8 @@ class RobotTelemetryManager:
                     "is_connected": is_connected,
                     "dds_rate_hz": round(self.current_hz, 1),
                     "ingress_packets": self.msg_count,
-                    "topic_target": "/g1/kinematics/target_pose",
+                    "topic_target": getattr(self, "topics", {}).get(
+                    "target_pose", "/humanoid/kinematics/target_pose"),
                     "topic_joints": "/joint_states",
                     "transport": "ROS 2 DDS + 30Hz SSE",
                     "mode": "PURE_TELEMETRY_AND_DISPATCH",
@@ -775,14 +787,20 @@ class RobotTelemetryManager:
             # 6. 腰部 3 自由度关节遥测数据 (直接使用官方关节名与符号)
             waist_metadata = {
                 "waist_yaw_joint":   {"label": "waist_yaw",   "symbol": "q_w0"},
-                "waist_roll_joint":  {"label": "waist_roll",  "symbol": "q_w1"},
-                "waist_pitch_joint": {"label": "waist_pitch", "symbol": "q_w2"},
+                "waist_pitch_joint": {"label": "waist_pitch", "symbol": "q_w1"},
             }
+            # 注: 腰部曾含 waist_roll_joint, 但 WAIST_JOINTS 已刻意排除它
+            # (躯干不侧倾, 姿态可控性更直接)。其条目留在字典里不会被查到,
+            # 却会让人误以为腰部仍是 3 自由度, 故一并移除。
             waist_data = []
-            for name in self.kin.waist_joint_names:
+            # 限位取自运动学引擎 (已改为从 URDF 的 <limit> 读取)。
+            # 此前此处直接读代码里的 WAIST_LIMITS 字典, 与 URDF 构成两套来源 ——
+            # 换模型后二者必然分叉, 且不会报错, 只会显示错误的限位条。
+            _w_lo, _w_hi = self.kin.waist_limits
+            for _wi, name in enumerate(self.kin.waist_joint_names):
                 val_rad = float(self.joint_positions.get(name, 0.0))
                 val_deg = round(math.degrees(val_rad), 1)
-                lim_min, lim_max = WAIST_LIMITS[name]
+                lim_min, lim_max = float(_w_lo[_wi]), float(_w_hi[_wi])
                 min_deg = round(math.degrees(lim_min), 1)
                 max_deg = round(math.degrees(lim_max), 1)
                 # 除零防护: URDF 中允许某关节限位端点为 0 (单侧行程), 此前直接除会抛
@@ -815,10 +833,12 @@ class RobotTelemetryManager:
             }
             arm_jnames = self.kin.left_arm_joint_names if self.active_arm == "left_arm" else self.kin.right_arm_joint_names
             arm_data = []
-            for name in arm_jnames:
+            _a_lo, _a_hi = self.kin.limits[self.active_arm]
+            for _ai, name in enumerate(arm_jnames):
                 val_rad = float(self.joint_positions.get(name, 0.0))
                 val_deg = round(math.degrees(val_rad), 1)
-                lim_min, lim_max = JOINT_LIMITS[name]
+                # 同上: 限位来自 URDF, 不再读代码里的副本字典
+                lim_min, lim_max = float(_a_lo[_ai]), float(_a_hi[_ai])
                 min_deg = round(math.degrees(lim_min), 1)
                 max_deg = round(math.degrees(lim_max), 1)
                 # 除零防护: URDF 中允许某关节限位端点为 0 (单侧行程), 此前直接除会抛
@@ -878,7 +898,8 @@ class RobotTelemetryManager:
                 "is_connected": is_connected,
                 "dds_rate_hz": round(self.current_hz, 1),
                 "ingress_packets": self.msg_count,
-                "topic_target": "/g1/kinematics/target_pose",
+                "topic_target": getattr(self, "topics", {}).get(
+                    "target_pose", "/humanoid/kinematics/target_pose"),
                 "topic_joints": "/joint_states",
                 "transport": "ROS 2 DDS + 30Hz SSE",
                 "mode": "PURE_TELEMETRY_AND_DISPATCH",
@@ -1064,7 +1085,7 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                     "rpy": rpy,
                     "arm": arm,
                     "preset": preset,
-                    "message": "6D 目标指令已发布至 ROS 2 话题 /g1/kinematics/target_pose，由 IK 引擎解算",
+                    f"message": f"6D 目标指令已发布至 ROS 2 话题 {MANAGER.topics['target_pose']}, 由 IK 引擎解算",
                 }, ensure_ascii=False).encode("utf-8"))
             except Exception as e:
                 self.send_response(400)

@@ -371,6 +371,7 @@ pip install -r requirements.txt
 bash scripts/start_web.sh                      # 默认模型 + Pink 9-DoF 求解器
 bash scripts/start_web.sh --port 9090          # 换端口
 bash scripts/start_web.sh --solver dual_arm    # 换求解器
+bash scripts/start_web.sh --topic-prefix /g1  # 话题命名空间 (默认 /humanoid)
 bash scripts/start_web.sh --urdf <路径> --srdf <路径>   # 换机器人模型
 bash scripts/start_web.sh --rviz               # 同时拉起桌面端 RViz2
 bash scripts/start_web.sh --help
@@ -402,6 +403,7 @@ python3 -m venv --system-site-packages .venv
 | `--urdf` | 仓库内置模型 | 机器人 URDF；IK 节点、大屏运动学、TF 树**共用**同一份 |
 | `--srdf` | 仓库内置 SRDF | 允许碰撞矩阵 (ACM)，用于过滤无意义碰撞对 |
 | `--solver` | `pink` | `pink` = 9-DoF 腰臂协同解；`dual_arm` = 双臂独立解 |
+| `--topic-prefix` | `/humanoid` | ROS 2 话题命名空间前缀；求解器与大屏共用 |
 | `--rviz` | 关 | 同时启动桌面端 RViz2 |
 
 换模型只需 `--urdf`：求解器与运动学类本就接受 `urdf_path` / `srdf_path`，

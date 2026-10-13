@@ -27,51 +27,13 @@ from core.kinematics.robot_profile import RobotProfile, RobotProfileError
 # 硬件物理规格与参考基准姿态 (Hardware Limits & Reference Configurations)
 # ==============================================================================
 
-# 人形机器人 关节限位**兜底表** —— 仅在 URDF 未给出 <limit> 时生效
-# ==============================================================================
+# 关节限位的唯一真源是 URDF 中的 <limit>, 由 :func:`read_joint_limits` 读取。
 #
-# 关节限位的唯一真源是 URDF 中的 <limit>: 那才是模型作者声明的机械规格。
-# 本表**不再**是常规模路径的取值来源, 只作缺省兜底, 以免个别模型 URDF 写得
-# 不完整时直接退化成 ±pi (会把不可达姿态也当作可行解, 产出错误的关节角)。
-#
-# 若确需覆盖某关节的限位, 请写入该 URDF 同目录的 <名字>.profile.json:
-#   {"limit_overrides": {"left_elbow_joint": [-1.0, 2.0]}}
-#
-# 保留常量名 JOINT_LIMITS / WAIST_LIMITS 是为兼容既有导入方, 语义已由
-# "限位真源" 改为 "缺省兜底"。
-JOINT_LIMITS: Dict[str, Tuple[float, float]] = {
-    # 左臂 7-DoF
-    "left_shoulder_pitch_joint": (-3.0892, 2.6704),
-    "left_shoulder_roll_joint":  (-1.5882, 2.2515),
-    "left_shoulder_yaw_joint":   (-2.6180, 2.6180),
-    "left_elbow_joint":          (-1.0472, 2.0944),
-    "left_wrist_roll_joint":     (-1.9722, 1.9722),
-    "left_wrist_pitch_joint":    (-1.6144, 1.6144),
-    "left_wrist_yaw_joint":      (-1.6144, 1.6144),
-    # 右臂 7-DoF
-    "right_shoulder_pitch_joint": (-3.0892, 2.6704),
-    "right_shoulder_roll_joint":  (-2.2515, 1.5882),
-    "right_shoulder_yaw_joint":   (-2.6180, 2.6180),
-    "right_elbow_joint":          (-1.0472, 2.0944),
-    "right_wrist_roll_joint":     (-1.9722, 1.9722),
-    "right_wrist_pitch_joint":    (-1.6144, 1.6144),
-    "right_wrist_yaw_joint":      (-1.6144, 1.6144),
-}
-
-# 人形机器人 腰部 3 自由度物理限位 (单位: 弧度)
-WAIST_LIMITS: Dict[str, Tuple[float, float]] = {
-    "waist_yaw_joint":   (-2.6180, 2.6180),   # 左右旋转 ±150 度
-    "waist_roll_joint":  (-0.5200, 0.5200),   # 左右侧倾 ±30 度
-    "waist_pitch_joint": (-0.5200, 0.5200),   # 前后俯仰 ±30 度
-}
-
-# 腰部活动关节集合 —— 固定为 2 自由度 (Yaw + Pitch)。
-# 刻意不含 waist_roll: 躯干不侧倾, 末端姿态完全由 7 轴手臂决定, 姿态可控性更直接,
-# 也避免 3 自由度腰部引入的额外多解分支。
-WAIST_JOINTS: List[str] = [
-    "waist_yaw_joint",
-    "waist_pitch_joint",
-]
+# 早期版本在此另存一份 JOINT_LIMITS / WAIST_LIMITS 副本字典, 供运动学引擎与
+# 大屏遥测读取 —— 于是同一时刻存在两套限位来源, 二者分叉时不会报错, 只会
+# 显示错误的限位条并放行越界姿态。现已全部改为从 URDF 读取, 副本随之删除;
+# 需要覆盖某关节限位时, 在该 URDF 同目录的 <名字>.profile.json 中写
+# {"limit_overrides": {"left_elbow_joint": [-1.0, 2.0]}}。
 
 # 人体仿生预备就绪姿态 (肘部自然朝下微弯、手腕平直)
 READY_POSE: Dict[str, np.ndarray] = {

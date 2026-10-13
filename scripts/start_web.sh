@@ -8,6 +8,7 @@
 #   bash scripts/start_web.sh --port 9090
 #   bash scripts/start_web.sh --urdf resources/humanoid/humanoid_29dof.urdf
 #   bash scripts/start_web.sh --solver dual_arm   # 切换解算器
+#   bash scripts/start_web.sh --topic-prefix /g1 # 话题命名空间 (默认 /humanoid)
 #   bash scripts/start_web.sh --rviz              # 同时启动桌面端 RViz2
 #
 # 设计要点 (相对早期版本):
@@ -28,6 +29,7 @@ URDF=""
 SOLVER="pink"
 SRDF=""
 RVIZ="false"
+TOPIC_PREFIX="/humanoid"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -35,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --urdf)   URDF="$2"; shift 2 ;;
         --srdf)   SRDF="$2"; shift 2 ;;
         --solver) SOLVER="$2"; shift 2 ;;
+        --topic-prefix) TOPIC_PREFIX="$2"; shift 2 ;;
         --rviz)   RVIZ="true"; shift ;;
         -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; exit 0 ;;
         *) echo "未知参数: $1 (用 --help 查看用法)" >&2; exit 2 ;;
@@ -63,6 +66,10 @@ source "$ROS_SETUP"
 set -u
 
 # ── ament 资源前缀 (解析 URDF 中的 package:// 引用) ──
+# 话题前缀经环境变量传给大屏服务端, 与求解器的 ROS 参数同源 ——
+# 两端各写一份时不一致不会报错, 只是静默失联 (指令已下发但机器人不动)。
+export ROBOT_TOPIC_PREFIX="$TOPIC_PREFIX"
+
 export AMENT_PREFIX_PATH="${REPO}/resources/ament/install/humanoid_description:${AMENT_PREFIX_PATH:-/opt/ros/jazzy}"
 
 # ── 求解器选择 ──
@@ -113,6 +120,7 @@ cat <<EOF
  人形机器人 Web 遥测大屏
    端口      : ${PORT}   →  http://localhost:${PORT}
    求解器    : ${SOLVER}  (${SOLVER_SCRIPT})
+   话题前缀  : ${TOPIC_PREFIX}
    URDF      : ${URDF}
    SRDF      : ${SRDF}
    ament 前缀: ${REPO}/resources/ament
@@ -130,4 +138,5 @@ exec "$VENV_PY" "${REPO}/launch/telemetry_system.launch.py" \
      urdf:="${URDF}" \
      srdf:="${SRDF}" \
      solver_script:="${SOLVER_SCRIPT}" \
-     rviz:="${RVIZ}"
+     rviz:="${RVIZ}" \
+     topic_prefix:="${TOPIC_PREFIX}"
