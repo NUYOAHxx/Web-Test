@@ -6,8 +6,12 @@
 
 职责：
 1. 管理机器人 URDF 几何拓扑、刚体动力学模型 (Pinocchio Model/Data)；
-2. 维护机械臂 (7-DoF) 与腰部 (3-DoF) 的关节名称映射、索引字典与物理硬件极限；
+2. 依据机器人描述档案 (RobotProfile) 维护腰部与机械臂的关节名称、索引与限位；
 3. 提供高性能前向运动学 (FK) 与空间解析雅可比 (Analytical Jacobian) 计算服务。
+
+关节链语义 (哪条链是腰、哪条是臂、哪两个连杆构成支撑足) 由
+``core/kinematics/robot_profile.py`` 提供并在校验期强制与 URDF 对齐,
+换用其他 URDF 时可通过同目录的 ``<名字>.profile.json`` 声明, 无需改码。
 """
 
 import os
@@ -15,12 +19,26 @@ from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 import pinocchio as pin
 
+from core.kinematics import robot_profile as rp
+from core.kinematics.robot_profile import RobotProfile, RobotProfileError
+
 
 # ==============================================================================
 # 硬件物理规格与参考基准姿态 (Hardware Limits & Reference Configurations)
 # ==============================================================================
 
-# 人形机器人 机械臂 7 自由度硬件限位 (单位: 弧度)
+# 人形机器人 关节限位**兜底表** —— 仅在 URDF 未给出 <limit> 时生效
+# ==============================================================================
+#
+# 关节限位的唯一真源是 URDF 中的 <limit>: 那才是模型作者声明的机械规格。
+# 本表**不再**是常规模路径的取值来源, 只作缺省兜底, 以免个别模型 URDF 写得
+# 不完整时直接退化成 ±pi (会把不可达姿态也当作可行解, 产出错误的关节角)。
+#
+# 若确需覆盖某关节的限位, 请写入该 URDF 同目录的 <名字>.profile.json:
+#   {"limit_overrides": {"left_elbow_joint": [-1.0, 2.0]}}
+#
+# 保留常量名 JOINT_LIMITS / WAIST_LIMITS 是为兼容既有导入方, 语义已由
+# "限位真源" 改为 "缺省兜底"。
 JOINT_LIMITS: Dict[str, Tuple[float, float]] = {
     # 左臂 7-DoF
     "left_shoulder_pitch_joint": (-3.0892, 2.6704),
@@ -104,9 +122,20 @@ class HumanoidKinematicsModel:
         self,
         urdf_path: Optional[str] = None,
         srdf_path: Optional[str] = None,
+        profile: Optional["RobotProfile"] = None,
+        require_support: bool = True,
     ):
         """
-        :param waist_joint_names: 已移除 —— 腰部自由度固定为 2 (Yaw + Pitch)，即 9-DoF 总自由度。
+        :param urdf_path: 机器人 URDF 路径, 为空时用仓库内置模型
+        :param srdf_path: MoveIt SRDF 路径 (允许碰撞矩阵), 为空时按 URDF 同名推导
+        :param profile: 机器人描述档案 (关节链语义)。为 None 时读取 URDF 同目录的
+            ``<basename>.profile.json``, 不存在则用默认档案。
+        :param require_support: 是否要求支撑连杆可解析 (仅平衡评估需要)
+
+        :raises RobotProfileError: 档案声明的关节 / Frame / 连杆在 URDF 中不存在。
+            这是刻意的: 旧实现对不存在的名称调用 ``getJointId()`` 会得到
+            ``model.njoints``, 减一后恰好是合法下标, 于是静默指向另一个关节,
+            求解器会对着一条不存在的链算出看似合理实则全错的结果。
         """
         if urdf_path is None:
             urdf_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../resources/humanoid/humanoid_29dof.urdf"))
@@ -130,30 +159,21 @@ class HumanoidKinematicsModel:
             pin.removeCollisionPairs(self.model, self.coll_model, self.srdf_path)
         self.coll_data: pin.GeometryData = pin.GeometryData(self.coll_model)
 
-        # ── 1. 关节定义与末端 Frame ──
-        self.left_arm_joint_names: List[str] = [
-            "left_shoulder_pitch_joint",
-            "left_shoulder_roll_joint",
-            "left_shoulder_yaw_joint",
-            "left_elbow_joint",
-            "left_wrist_roll_joint",
-            "left_wrist_pitch_joint",
-            "left_wrist_yaw_joint",
-        ]
+        # ── 1. 关节链语义: 校验 + 自动补全 ──
+        # 校验必须在任何 getJointId / getFrameId 调用**之前**完成, 否则错误索引
+        # 已经混进后续全部计算, 报错位置也会远离真正的错误来源。
+        self.profile: RobotProfile = rp.resolve(
+            self.model,
+            profile if profile is not None else rp.RobotProfile.load_for_urdf(self.urdf_path),
+            require_support=require_support,
+        )
 
-        self.right_arm_joint_names: List[str] = [
-            "right_shoulder_pitch_joint",
-            "right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint",
-            "right_elbow_joint",
-            "right_wrist_roll_joint",
-            "right_wrist_pitch_joint",
-            "right_wrist_yaw_joint",
-        ]
+        self.left_arm_joint_names: List[str] = list(self.profile.left_arm_joint_names)
+        self.right_arm_joint_names: List[str] = list(self.profile.right_arm_joint_names)
 
         self.ee_frame_names: Dict[str, str] = {
-            "left_arm":  "left_wrist_yaw_link",
-            "right_arm": "right_wrist_yaw_link",
+            "left_arm":  self.profile.left_ee_frame,
+            "right_arm": self.profile.right_ee_frame,
         }
 
         self.ee_frame_ids: Dict[str, int] = {
@@ -167,21 +187,21 @@ class HumanoidKinematicsModel:
             "right_arm": [self.model.getJointId(name) - 1 for name in self.right_arm_joint_names],
         }
 
-        # 提取 7-DoF 关节物理限位数组 (lower, upper)
+        # 关节限位: 唯一真源为 URDF 的 <limit>, 档案覆盖仅在 URDF 缺省时生效
+        overrides = self.profile.limit_overrides
         self.limits: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         for arm, jnames in [("left_arm", self.left_arm_joint_names), ("right_arm", self.right_arm_joint_names)]:
-            lower = np.array([JOINT_LIMITS[name][0] for name in jnames], dtype=np.float64)
-            upper = np.array([JOINT_LIMITS[name][1] for name in jnames], dtype=np.float64)
-            self.limits[arm] = (lower, upper)
+            bounds = rp.read_joint_limits(self.model, jnames, overrides)
+            self.limits[arm] = (bounds[:, 0].copy(), bounds[:, 1].copy())
 
-        # ── 2. 腰部 3 自由度关节与 9-DoF 协同链 ──
-        self.waist_joint_names: List[str] = list(WAIST_JOINTS)
+        # ── 2. 腰部关节与 9-DoF 协同链 ──
+        self.waist_joint_names: List[str] = list(self.profile.waist_joint_names)
         # 腰部自由度由关节集合长度派生, 而非硬编码 3 —— 下游 (求解器/碰撞/降维模型)
-        # 全部依赖该值, 9-DoF 与 9-DoF 因此共用同一条代码路径。
+        # 全部依赖该值, 9-DoF 与 7-DoF 因此共用同一条代码路径。
         self.waist_dim: int = len(self.waist_joint_names)
         self.waist_q_indices: List[int] = [self.model.getJointId(name) - 1 for name in self.waist_joint_names]
-        waist_lower = np.array([WAIST_LIMITS[name][0] for name in self.waist_joint_names], dtype=np.float64)
-        waist_upper = np.array([WAIST_LIMITS[name][1] for name in self.waist_joint_names], dtype=np.float64)
+        waist_bounds = rp.read_joint_limits(self.model, self.waist_joint_names, overrides)
+        waist_lower, waist_upper = waist_bounds[:, 0].copy(), waist_bounds[:, 1].copy()
         self.waist_limits: Tuple[np.ndarray, np.ndarray] = (waist_lower, waist_upper)
 
         self.arm_joint_names: Dict[str, List[str]] = {
@@ -202,14 +222,19 @@ class HumanoidKinematicsModel:
             u_10 = np.concatenate([waist_upper, self.limits[arm][1]])
             self.limits_9dof[arm] = (l_10, u_10)
 
-        # ── 3. 双足物理支撑几何规格 (Dual-foot Support Polygon Geometry) ──
-        # 双足长 ~0.22m (前0.13m, 后0.09m), 宽 ~0.10m, 双足外侧宽 ~0.34m (Y in [-0.17, 0.17])
-        self.support_polygon: Dict[str, float] = {
-            "x_min": -0.090,
-            "x_max":  0.130,
-            "y_min": -0.170,
-            "y_max":  0.170,
-        }
+        # ── 3. 双足支撑几何 (Dual-foot Support Polygon) ──
+        # 由支撑连杆的碰撞几何在参考姿态下的 AABB 并集推导, 而非写死某型号尺寸 ——
+        # 脚掌尺寸不同的模型, 写死的矩形会让平衡裕度系统性失真且无任何提示。
+        # 档案可用 support_polygon 字段显式覆盖。
+        self.support_polygon_source: str
+        if self.profile.support_polygon:
+            self.support_polygon = dict(self.profile.support_polygon)
+            self.support_polygon_source = "档案显式指定"
+        else:
+            self.support_polygon = rp.derive_support_polygon(
+                self.model, self.data, self.coll_model, self.profile.support_links,
+            )
+            self.support_polygon_source = f"由支撑几何 AABB 推导 {list(self.profile.support_links)}"
 
         # ── 4. 9-DoF & 7-DoF 轻量裁剪子模型缓存 (pin.buildReducedModel 提速 4.1x) ──
         self.model_9dof: Dict[str, pin.Model] = {}

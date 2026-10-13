@@ -189,6 +189,7 @@ class RobotTelemetryManager:
         self._cached_stream_json: str = ""
         # 慢变量推送指纹 (仅服务端内部比对用, 不出现在任何报文中)
         self._last_stream_fps: Dict[str, Any] = {}
+        self._model_info: Dict[str, Any] = self._build_model_info()
         self._compute_and_cache_state()
 
         self._state_thread = threading.Thread(target=self._state_worker_loop, daemon=True)
@@ -213,8 +214,37 @@ class RobotTelemetryManager:
             sleep_time = max(0.001, interval - elapsed)
             time.sleep(sleep_time)
 
+    def _build_model_info(self) -> Dict[str, Any]:
+        """汇总机器人静态元信息, 供前端按实际模型动态渲染。
+
+        此前大屏上的模型描述 (关节总数、网格数、求解自由度等) 全部写死在 HTML
+        里, 换模型后文案与实际数据不符, 且没有任何提示。这里把真实数值下发,
+        前端据此生成, 换模型无需再改前端。
+
+        该块内容对同一模型恒定, 因此在 SSE 增量推送中只发一次。
+        """
+        kin = self.kin
+        prof = getattr(kin, "profile", None)
+        n_geoms = len(kin.coll_model.geometryObjects)
+        return {
+            "name": getattr(prof, "name", "humanoid"),
+            "urdf": os.path.basename(kin.urdf_path),
+            # Pinocchio 只为带惯量的连杆建关节, 故 njoints-1 通常等于驱动关节数
+            "total_dof": int(kin.model.nq),
+            "driven_joints": int(kin.model.njoints - 1),
+            "n_geometries": n_geoms,
+            "ik_dof": int(kin.waist_dim + len(kin.left_arm_joint_names)),
+            "waist_dof": int(kin.waist_dim),
+            "arm_dof": int(len(kin.left_arm_joint_names)),
+            "collision_pairs": len(kin.coll_model.collisionPairs),
+            "support_polygon": dict(kin.support_polygon),
+            "ee_frames": dict(kin.ee_frame_names),
+            "limits_source": "URDF <limit>",
+        }
+
     def _compute_and_cache_state(self):
         state = self.get_state_dict()
+        state["model_info"] = self._model_info
         state_json = json.dumps(state, ensure_ascii=False)
         stream_json = self._build_stream_delta(state)
         with self._state_cache_lock:
@@ -588,7 +618,9 @@ class RobotTelemetryManager:
             pin.updateFramePlacements(self.kin.model, self.kin.data)
 
             # 计算末端执行器真实空间坐标与朝向
-            ee_frame = "left_wrist_yaw_link" if self.active_arm == "left_arm" else "right_wrist_yaw_link"
+            # 末端 Frame 取自机器人档案, 不可写死 —— 换模型后写死的名字会让
+            # getFrameId 返回越界下标, FK 结果静默指向另一个连杆而不报错。
+            ee_frame = self.kin.ee_frame_names[self.active_arm]
             fid = self.kin.model.getFrameId(ee_frame)
             fk_actual_pos = self.kin.data.oMf[fid].translation.copy()
             fk_actual_rot = self.kin.data.oMf[fid].rotation.copy()

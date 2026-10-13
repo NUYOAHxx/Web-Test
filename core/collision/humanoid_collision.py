@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pinocchio as pin
 from core.kinematics.humanoid_model import HumanoidKinematicsModel
+from core.kinematics import robot_profile as rp
 
 
 class HumanoidCollisionChecker:
@@ -52,6 +53,72 @@ class HumanoidCollisionChecker:
                 return "_".join(parts[:-1])
             return raw_name
 
+        # ── 身体部位归属: 由档案声明的关节集合决定 ──
+        # 不再用 `"shoulder" in name` 这类英文子串猜测。改为**沿关节树向上回溯**,
+        # 找到最近的、档案声明过的关节, 其所属部位即该连杆的部位。
+        #
+        # 回溯而非"关节名换算连杆名"的直接映射, 是因为躯干基座连杆
+        # (pelvis / logo / imu 等) 由根关节驱动, 并不隶属任何腰部关节 ——
+        # 直接映射会整批漏掉, 表现为 arm_torso 恒为 0。
+        profile = getattr(kinematics, "profile", None)
+        part_of_joint: Dict[str, str] = {}
+
+        if profile is not None:
+            for jn in profile.waist_joint_names or []:
+                part_of_joint[jn] = "torso"
+            for jn in (profile.left_arm_joint_names or []) + (profile.right_arm_joint_names or []):
+                part_of_joint[jn] = "arm"
+            for jn in profile.leg_joint_names or []:
+                part_of_joint[jn] = "leg"
+            for jn in profile.head_joint_names or []:
+                part_of_joint[jn] = "head"
+
+        _part_cache: Dict[str, str] = {}
+        _declared_joint_ids = {self.model.getJointId(j): p
+                               for j, p in part_of_joint.items()
+                               if self.model.existJointName(j)}
+        # 显式声明的无关节连杆 (如头部外壳) 优先于关节回溯结果
+        _explicit_parts: Dict[str, str] = {}
+        for _lk in (getattr(profile, "head_links", None) or []):
+            _explicit_parts[_lk] = "head"
+        # 上溯到根关节仍未命中任何已声明关节的连杆 (骨盆、基座 IMU 等) 归入基座部位
+        _base_part: str = getattr(profile, "base_part", "torso") or "torso"
+
+        def _body_part(link_name: str) -> str:
+            if link_name in _explicit_parts:
+                return _explicit_parts[link_name]
+            if link_name in _part_cache:
+                return _part_cache[link_name]
+            part = "other"
+            fid = self.model.getFrameId(link_name) if self.model.existFrame(link_name) else -1
+            seen = set()
+            while fid >= 0 and fid not in seen and fid < self.model.nframes:
+                seen.add(fid)
+                jid = int(self.model.frames[fid].parentJoint)
+                if jid in _declared_joint_ids:
+                    part = _declared_joint_ids[jid]
+                    break
+                # 继续上溯到该关节的父关节所驱动的连杆
+                pj = int(self.model.parents[jid]) if jid > 0 else 0
+                if pj <= 0:
+                    # 已回溯到根关节: 该连杆直接挂在机器人基座上
+                    part = _base_part
+                    break
+                target = self.model.names[pj]
+                fid = next((i for i in range(self.model.nframes)
+                            if self.model.frames[i].name == target), -1)
+            _part_cache[link_name] = part
+            return part
+
+        def _side(link_name: str) -> str:
+            # 侧别只能从名字推断 —— URDF 本身没有"左/右"的结构性标记。
+            # 这里保留前缀匹配, 但**仅用于侧别**, 不参与部位判定。
+            if "left" in link_name:
+                return "left"
+            if "right" in link_name:
+                return "right"
+            return "center"
+
         self.pair_metadata: List[Tuple[str, str, str]] = []
         self._arm_pair_indices: Dict[str, List[int]] = {"left_arm": [], "right_arm": []}
         self._category_indices: Dict[str, List[int]] = {
@@ -66,22 +133,27 @@ class HumanoidCollisionChecker:
             l1 = _clean_geom_name(self.coll_model.geometryObjects[p.first].name)
             l2 = _clean_geom_name(self.coll_model.geometryObjects[p.second].name)
 
-            is_left_1 = "left_" in l1
-            is_left_2 = "left_" in l2
-            is_right_1 = "right_" in l1
-            is_right_2 = "right_" in l2
+            # 身体部位归属由档案中声明的关节集合决定, 而非猜测连杆名的字面内容。
+            # 旧实现用 `"shoulder" in l1` 这类英文子串匹配, 换用命名风格不同的
+            # 模型时会全体落进 "other" —— 碰撞对本身照常计算, 但大屏的安全雷达
+            # 分组全部错位, 且没有任何报错。
+            part_1 = _body_part(l1)
+            part_2 = _body_part(l2)
+            side_1 = _side(l1)
+            side_2 = _side(l2)
 
-            is_arm_1 = any(k in l1 for k in ("shoulder", "elbow", "wrist", "hand"))
-            is_arm_2 = any(k in l2 for k in ("shoulder", "elbow", "wrist", "hand"))
-
-            is_torso_1 = any(k in l1 for k in ("torso", "waist", "pelvis", "logo"))
-            is_torso_2 = any(k in l2 for k in ("torso", "waist", "pelvis", "logo"))
-
-            is_head_1 = "head" in l1
-            is_head_2 = "head" in l2
-
-            is_leg_1 = any(k in l1 for k in ("hip", "knee", "ankle"))
-            is_leg_2 = any(k in l2 for k in ("hip", "knee", "ankle"))
+            is_arm_1 = part_1 == "arm"
+            is_arm_2 = part_2 == "arm"
+            is_torso_1 = part_1 == "torso"
+            is_torso_2 = part_2 == "torso"
+            is_head_1 = part_1 == "head"
+            is_head_2 = part_2 == "head"
+            is_leg_1 = part_1 == "leg"
+            is_leg_2 = part_2 == "leg"
+            is_left_1 = side_1 == "left"
+            is_left_2 = side_2 == "left"
+            is_right_1 = side_1 == "right"
+            is_right_2 = side_2 == "right"
 
             if (is_left_1 and is_right_2 and is_arm_1 and is_arm_2) or \
                (is_right_1 and is_left_2 and is_arm_1 and is_arm_2):

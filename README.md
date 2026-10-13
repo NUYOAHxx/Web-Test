@@ -408,6 +408,33 @@ python3 -m venv --system-site-packages .venv
 启动脚本负责把同一路径透传给三个组件（IK 节点、大屏服务端、TF 广播），
 无需改码。
 
+#### 机器人描述档案（换模型时唯一需要提供的东西）
+
+URDF 只描述几何与关节树，不描述「这条链是腰、这条链是左臂、哪两个连杆构成
+支撑足」。这些语义由**机器人描述档案**提供，路径约定为 URDF 同目录下的
+`<名字>.profile.json`（本仓库内置模型已附带，见
+`resources/humanoid/humanoid_29dof.profile.json`）：
+
+```json
+{
+  "name": "humanoid_29dof",
+  "waist_joint_names": ["waist_yaw_joint", "waist_pitch_joint"],
+  "left_arm_joint_names": ["left_shoulder_pitch_joint", "..."],
+  "left_ee_frame": "left_wrist_yaw_link",
+  "support_links": ["left_ankle_roll_link", "right_ankle_roll_link"],
+  "head_links": ["head_link"]
+}
+```
+
+仅 `support_links` 为必填，其余可留空并自动推导（腿部关节由支撑连杆的祖先链
+推出；关节限位一律从 URDF 的 `<limit>` 读取；支撑多边形由足部碰撞几何的包围盒
+推导）。
+
+**档案在构造期强制校验。** 任一关节 / Frame / 连杆不存在即启动失败，并列出模型
+中实际存在的名称。这一层不是防御性冗余：Pinocchio 的 `getJointId()` 对不存在的
+名称返回 `model.njoints` 而非抛异常，减一后恰好是 `names` 的合法下标——没有校验
+就会静默把求解链指向另一个关节，输出一组看似合理实则全错的结果。
+
 #### 手动启动（不使用脚本）
 
 ```bash

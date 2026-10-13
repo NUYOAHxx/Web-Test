@@ -55,6 +55,8 @@ const REQUIRED_IDS = [
     // 视口
     "threeCanvasContainer", "viewportFallback", "btnResetCamera", "btnToggleGrid",
     "viewportMeshCount", "vpCollisionBadge", "vpCollisionCount",
+    // 顶栏模型描述 (按实际模型动态生成, 不写死)
+    "brandSub",
     // 求解器
     "btnTraceCurve", "btnTraceSteps", "traceStepsBadge", "pipelineStepper",
     "convergenceModeBadge", "traceTimeVal", "traceItersVal", "traceSeedVal", "traceResidueVal",
@@ -179,8 +181,31 @@ function onLinkChange(online) {
  * 一帧遥测报文: 分发给各面板。
  * @param {object} data
  */
+/**
+ * 按服务端下发的模型元信息渲染动态文案。
+ *
+ * 顶栏的模型描述此前写死为 "GENERIC HUMANOID · 29-DoF MODEL", 换用其他 URDF
+ * 后会继续显示 29-DoF, 与实际模型不符且无任何提示。改为按真实 nq 生成。
+ *
+ * @param {object} info 服务端 model_info
+ */
+function renderModelInfo(info) {
+    const name = String(info.name || "humanoid").replace(/_/g, " ").toUpperCase();
+    const dof = Number(info.total_dof);
+    const sub = `${name} · ${Number.isFinite(dof) ? dof : "—"}-DoF MODEL`;
+    setText(el("brandSub"), sub);
+}
+
 function onTelemetryFrame(data) {
     if (!data) return;
+
+    // 0. 机器人静态元信息 (关节数/网格数/自由度…)
+    // model_info 对同一模型恒定, 增量推送下只在首帧出现, 故每次都重新渲染 ——
+    // setText 内部有免写判断, 重复赋值不会产生多余的 DOM 操作。
+    if (data.model_info) {
+        state.modelInfo = data.model_info;
+        renderModelInfo(data.model_info);
+    }
 
     const cmd = data.cartesian_cmd_pose;
     const act = data.cartesian_actual_pose;
@@ -244,7 +269,9 @@ function updateViewport(data, cmd, act, errMm) {
 
     if (data.visuals) {
         updateVisuals(data.visuals);
-        setText(el("viewportMeshCount"), `${state.meshCount}/36`);
+        // 网格总数取自服务端下发的 model_info, 不写死 —— 换模型后分母必须跟着变。
+    // 旧实现固定 "/36", 换任何模型都会显示成 "12/36" 这类明显错误却不报错。
+    setText(el("viewportMeshCount"), `${state.meshCount}/${state.modelInfo.n_geometries || "—"}`);
     }
 
     // 碰撞零件在模型上标红。
