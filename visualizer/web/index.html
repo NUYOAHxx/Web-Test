@@ -359,13 +359,16 @@
 
                 <!-- 右: 流水线 + 指标 -->
                 <aside class="solver-side">
-                    <ol class="pipeline-stepper" id="pipelineStepper">
-                        <li class="pipeline-step-item active" data-stage="1" title="多种子采样与热启动"><span class="step-num">1</span><span class="step-name">Seed</span></li>
-                        <li class="pipeline-step-item" data-stage="2" title="刚体正向运动学"><span class="step-num">2</span><span class="step-name">FK</span></li>
-                        <li class="pipeline-step-item" data-stage="3" title="加权阻尼最小二乘"><span class="step-num">3</span><span class="step-name">W-DLS</span></li>
-                        <li class="pipeline-step-item" data-stage="4" title="零空间人工势场投影"><span class="step-num">4</span><span class="step-name">APF</span></li>
-                        <li class="pipeline-step-item" data-stage="5" title="步长限幅与碰撞门禁"><span class="step-num">5</span><span class="step-name">Gate</span></li>
-                    </ol>
+                    <!--
+ 流水线指示器的条目由服务端下发的 solver_diagnostics.pipeline_stages 动态生成,
+ 此处只保留空容器。
+
+ 原先在此写死五段 (Seed / FK / W-DLS / APF / Gate), 但求解器实际执行的是
+ Pink QP 五段 (ConfigurationLimit / FrameTask / PostureTask / QP Solver /
+ Gauss-Newton Polish)。两套不一致, 大屏展示的流程与真实求解不符且无从察觉 ——
+ 换求解器 (如 --solver dual_arm) 后更会完全对不上。
+-->
+                    <ol class="pipeline-stepper" id="pipelineStepper"></ol>
 
                     <div class="trace-stats-bar">
                         <div class="trace-stat-item"><span class="stat-lbl">耗时</span><span class="stat-val" id="traceTimeVal">—</span></div>

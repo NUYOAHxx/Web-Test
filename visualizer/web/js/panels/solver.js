@@ -196,28 +196,53 @@ export function renderSolver(diag) {
     // 步骤表的页脚只在"计算步骤"视图下有意义 —— 曲线视图下它是冗余的第二处状态显示
     setHidden(el("traceStepsFooter"), activeView !== "steps");
 
-    renderStepper(iters, posErr);
+    renderStepper(iters, posErr, diag.pipeline_stages);
     renderStepsTable(diag, stepCount, posErr);
 
     if (changed || state.trace.hover >= 0) redraw();
 }
 
 /**
- * 五段流水线状态指示器。
+ * 流水线状态指示器。
+ *
+ * 条目来自服务端下发的 `pipeline_stages`, 不在 HTML 里写死 ——
+ * 写死的那五段 (Seed/FK/W-DLS/APF/Gate) 与求解器实际执行的 Pink QP 五段
+ * 并不一致, 换求解器后更是完全对不上, 而界面不会有任何提示。
+ *
  * @param {number} iters
  * @param {number} posErr
+ * @param {Array} stages 服务端下发的阶段描述
  */
-function renderStepper(iters, posErr) {
+function renderStepper(iters, posErr, stages) {
     const stepper = el("pipelineStepper");
     if (!stepper) return;
-    const items = stepper.querySelectorAll(".pipeline-step-item");
 
+    const list = Array.isArray(stages) && stages.length
+        ? stages
+        : [{ id: 1, name: "—", desc: "求解器未上报流水线阶段" }];
+
+    // 阶段集合可能随求解器切换而变化, 故按签名重建, 避免重复追加
+    const signature = list.map((s) => `${s.id}:${s.name}`).join("|");
+    if (stepper.dataset.signature !== signature) {
+        stepper.dataset.signature = signature;
+        setHTML(stepper, list.map((s, i) => `
+            <li class="pipeline-step-item" data-stage="${escapeHtml(String(s.id ?? i + 1))}"
+                title="${escapeHtml(s.desc || s.fullName || "")}">
+                <span class="step-num">${escapeHtml(String(s.id ?? i + 1))}</span>
+                <span class="step-name">${escapeHtml(s.name ?? "")}</span>
+            </li>`).join(""));
+    }
+
+    const items = stepper.querySelectorAll(".pipeline-step-item");
     if (iters === 0) {
         items.forEach((n, i) => setClass(n, `pipeline-step-item${i === 0 ? " active" : ""}`));
     } else if (posErr < SOLVER.GOOD) {
         items.forEach((n) => setClass(n, "pipeline-step-item converged"));
     } else {
-        items.forEach((n, i) => setClass(n, `pipeline-step-item${i < 4 ? " active" : ""}`));
+        // 未收敛: 除最后一段 (抛光/门禁) 外均视为已走过。
+        // 原先写死 `i < 4`, 隐含"永远五段"的前提, 阶段数变化即错位。
+        const lastActive = Math.max(0, items.length - 1);
+        items.forEach((n, i) => setClass(n, `pipeline-step-item${i < lastActive ? " active" : ""}`));
     }
 }
 

@@ -113,6 +113,12 @@ DEFAULT_STAND_JOINTS: Dict[str, float] = {
 }
 
 
+#: 力矩包络采样的样本数与随机种子。
+#: 种子固定 ⇒ 结果可复现, 换模型重跑得到同样的阈值, 便于对照排查。
+_ENVELOPE_SAMPLES = 400
+_ENVELOPE_SEED = 20240501
+
+
 class HumanoidKinematicsModel:
     """
     人形机器人 运动学引擎：封装 Pinocchio 模型与动力学计算图
@@ -450,6 +456,62 @@ class HumanoidKinematicsModel:
         """
         com = pin.centerOfMass(self.model, self.data, q_full)
         return com.copy()
+
+    def compute_torque_envelope(
+        self, arm: str = "left_arm", is_9dof: bool = True,
+    ) -> Dict[str, float]:
+        """各关节在自身限位范围内可达到的最大静态重力力矩。
+
+        这是**结构性负载**, 与"是否异常"无关: 腰部俯仰关节承载整个躯干,
+        合法上限可达 12+ N·m; 腕关节则始终在 0.5 N·m 以内。
+
+        用一条全局阈值判断全部关节必然误报 —— 躯干关节常年报警, 腕关节永远
+        正常, 阈值失去意义。此处逐关节给出结构上限, 遥测按 ``|τ|/上限`` 的
+        **利用率**着色, 换模型时随该模型自身的质量分布与限位自动重新标定。
+
+        采样: 零位 + 每个关节各自的限位上下端点。重力力矩只依赖位形, 沿某
+        单轴推到端点即覆盖该轴贡献的极值; 轴间的交叉项在多轴同时偏置时才会
+        出现, 因此上限取各单轴极值的较小安全系数由调用方按利用率呈现。
+
+        :return: ``{关节名: 最大 |重力力矩| (N·m)}``
+        """
+        names = self.chain_9dof_joint_names[arm] if is_9dof else list(self.model.names[1:])
+        lower = (np.concatenate([self.waist_limits[0], self.limits[arm][0]])
+                 if is_9dof else np.array([self.model.lowerPositionLimit[
+                     self.model.getJointId(n) - 1] for n in names]))
+        upper = (np.concatenate([self.waist_limits[1], self.limits[arm][1]])
+                 if is_9dof else np.array([self.model.upperPositionLimit[
+                     self.model.getJointId(n) - 1] for n in names]))
+
+        q_idx = [self.model.getJointId(n) - 1 for n in names]
+        q = pin.neutral(self.model)
+        envelope = np.zeros(len(names), dtype=np.float64)
+
+        def _sweep() -> None:
+            tau = self.compute_gravity_torques(q, arm=arm, is_9dof=is_9dof)
+            for i, v in enumerate(tau):
+                envelope[i] = max(envelope[i], abs(float(v)))
+
+        # (1) 零位与各关节单独推到限位端点 —— 覆盖单轴贡献的极值
+        _sweep()
+        for i, idx in enumerate(q_idx):
+            saved = q[idx]
+            for val in (float(lower[i]), float(upper[i])):
+                q[idx] = val
+                _sweep()
+            q[idx] = saved
+
+        # (2) 限位盒内的确定性伪随机采样 —— 覆盖多轴同时偏置时的交叉贡献。
+        #     只取单轴极值会显著低估: 手臂前伸时肩关节负载高于任何单轴姿态,
+        #     导致真实姿态的利用率超过 100%, 误报为"重载"。
+        rng = np.random.default_rng(_ENVELOPE_SEED)
+        for _ in range(_ENVELOPE_SAMPLES):
+            for i, idx in enumerate(q_idx):
+                q[idx] = float(rng.uniform(lower[i], upper[i]))
+            _sweep()
+
+        # 下限兜底: 完全无负载的关节 (如 yaw) 会得到 0, 使利用率除零
+        return {n: float(max(v, 0.5)) for n, v in zip(names, envelope)}
 
     def compute_com_jacobian(
         self, q_full: np.ndarray, arm: str = "left_arm", is_9dof: bool = True

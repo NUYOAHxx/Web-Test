@@ -190,6 +190,8 @@ class RobotTelemetryManager:
         # 慢变量推送指纹 (仅服务端内部比对用, 不出现在任何报文中)
         self._last_stream_fps: Dict[str, Any] = {}
         self._model_info: Dict[str, Any] = self._build_model_info()
+        # 各关节结构性力矩上限 (随模型质量分布与限位自动标定)
+        self._torque_envelope: Dict[str, float] = self.kin.compute_torque_envelope()
         self._compute_and_cache_state()
 
         self._state_thread = threading.Thread(target=self._state_worker_loop, daemon=True)
@@ -678,6 +680,10 @@ class RobotTelemetryManager:
                     "label": clean_lbl,
                     "torque_nm": round(val_nm, 2),
                     "abs_nm": round(abs(val_nm), 2),
+                    # 该关节的结构性力矩上限: 用 |τ|/上限 的利用率着色, 而非
+                    # 全局绝对阈值 —— 腰部俯仰承载躯干合法可达 12+ N·m, 腕关节
+                    # 始终 <0.5, 共用一条阈值必然误报。
+                    "limit_nm": round(self._torque_envelope.get(jname, 0.5), 2),
                 })
 
             # 6. 腰部 3 自由度关节遥测数据 (直接使用官方关节名与符号)

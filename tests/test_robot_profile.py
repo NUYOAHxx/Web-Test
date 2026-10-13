@@ -28,7 +28,9 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from core.kinematics import robot_profile as rp          # noqa: E402
-from core.kinematics.humanoid_model import HumanoidKinematicsModel  # noqa: E402
+from core.kinematics.humanoid_model import (  # noqa: E402
+    DEFAULT_STAND_JOINTS, HumanoidKinematicsModel,
+)
 from core.collision.humanoid_collision import HumanoidCollisionChecker  # noqa: E402
 
 URDF = os.path.join(REPO_ROOT, "resources/humanoid/humanoid_29dof.urdf")
@@ -186,6 +188,61 @@ def test_invalid_limit_override_rejected(kin):
     with pytest.raises(rp.RobotProfileError, match="大于上界"):
         rp.read_joint_limits(kin.model, ["left_elbow_joint"],
                              {"left_elbow_joint": [1.0, -1.0]})
+
+
+# ==============================================================================
+# 5. 力矩结构上限 —— 采样必须覆盖多轴交叉贡献
+# ==============================================================================
+
+def test_torque_envelope_covers_cross_axis(kin):
+    """包络必须覆盖多轴同时偏置时的交叉贡献, 不能只取单轴极值。
+
+    只采样"零位 + 各关节单独推到限位端点"会显著低估: 手臂前伸时肩关节负载
+    高于任何单轴姿态, 导致真实姿态的利用率超过 100%, 被误报为重载。
+    """
+    import pinocchio as pin
+    env = kin.compute_torque_envelope()
+    assert set(env) == set(kin.chain_9dof_joint_names["left_arm"])
+    assert all(v > 0 for v in env.values()), "包络不得为 0, 否则利用率除零"
+
+    # 就绪姿态的利用率应留有余量, 不应顶到上限
+    q = pin.neutral(kin.model)
+    for k, v in DEFAULT_STAND_JOINTS.items():
+        if kin.model.existJointName(k):
+            i = kin.model.getJointId(k)
+            q[kin.model.joints[i].idx_q] = v
+    tau = kin.compute_gravity_torques(q, arm="left_arm", is_9dof=True)
+    ratios = [abs(float(tau[i])) / env[n]
+              for i, n in enumerate(kin.chain_9dof_joint_names["left_arm"])]
+    assert max(ratios) < 1.0, f"就绪姿态利用率已达 {max(ratios):.0%}, 阈值过紧会常态误报"
+
+
+def test_torque_envelope_deterministic(kin):
+    """固定随机种子 ⇒ 结果可复现, 便于换模型后对照排查。"""
+    a = kin.compute_torque_envelope()
+    b = kin.compute_torque_envelope()
+    assert a == b, "包络计算必须可复现"
+
+
+def test_torque_envelope_dominates_ready_pose(kin):
+    """包络必须不小于任何被采样姿态的实际力矩 —— 这是"上限"的定义。"""
+    import pinocchio as pin
+    env = kin.compute_torque_envelope()
+    rng = np.random.default_rng(7)
+    lower = np.concatenate([kin.waist_limits[0], kin.limits["left_arm"][0]])
+    upper = np.concatenate([kin.waist_limits[1], kin.limits["left_arm"][1]])
+    names = kin.chain_9dof_joint_names["left_arm"]
+    idx = [kin.model.getJointId(n) - 1 for n in names]
+
+    for _ in range(40):
+        q = pin.neutral(kin.model)
+        for i, j in enumerate(idx):
+            q[j] = float(rng.uniform(lower[i], upper[i]))
+        tau = kin.compute_gravity_torques(q, arm="left_arm", is_9dof=True)
+        for i, n in enumerate(names):
+            # 允许 5% 采样余量: 包络本身也是采样得到的
+            assert abs(float(tau[i])) <= env[n] * 1.05, \
+                f"{n} 的实际力矩 {abs(float(tau[i])):.2f} 超出包络 {env[n]:.2f}"
 
 
 # ==============================================================================

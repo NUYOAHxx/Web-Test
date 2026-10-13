@@ -6,7 +6,7 @@
  */
 
 import { el, setText, setClass, setStyle, setHTML, escapeHtml } from "../dom.js";
-import { balanceStatus, BALANCE, fixed, signed, pct, toneByMagnitude, TORQUE } from "../format.js";
+import { balanceStatus, BALANCE, fixed, signed, pct, TORQUE } from "../format.js";
 
 /**
  * 归一化两种后端报文形态。
@@ -100,20 +100,30 @@ function renderPeakTorque(peak) {
 
 /**
  * 重力补偿力矩列表 (折叠面板内)。
+ *
+ * 着色与条宽都按**利用率** (|τ| / 该关节结构性上限) 呈现, 而非全局绝对阈值。
+ *
+ * 旧实现用一条 TORQUE 阈值 (GOOD 4 / WARN 8 N·m) 判断全部关节: 腰部俯仰承载
+ * 躯干, 合法上限 12.9 N·m, 会被长期误报成告警; 腕关节则永远低于阈值, 无论
+ * 处于何种工况都显示正常。阈值因此失去区分能力。
+ *
+ * 条宽原先按"当前列表中的最大值"归一, 于是 12.9 N·m 的腰与 0.1 N·m 的腕
+ * 会渲染成同样长度, 无法读出谁更吃紧。
+ *
  * @param {object[]} torques
  */
 function renderTorqueList(torques) {
-    const maxAbs = Math.max(1.0, ...torques.map((t) => Math.abs(Number(t.torque_nm) || 0)));
     const rows = torques.map((t) => {
         const val = Number(t.torque_nm) || 0;
         const abs = Math.abs(val);
-        // 力矩幅值是"越小越好", 用 toneByMagnitude 而非 severity
-        const tone = toneByMagnitude(abs, TORQUE);
-        const width = Math.min(100, Math.round((abs / maxAbs) * 100));
-        const cls = tone === "red" ? "torque-bar-fill critical"
-            : tone === "gold" ? "torque-bar-fill heavy"
+        const limit = Math.max(0.5, Number(t.limit_nm) || 0);
+        const ratio = abs / limit;                       // 0..1+ 利用率
+        const width = Math.min(100, Math.round(ratio * 100));
+        const cls = ratio >= TORQUE.WARN ? "torque-bar-fill critical"
+            : ratio >= TORQUE.GOOD ? "torque-bar-fill heavy"
             : "torque-bar-fill";
-        const tip = `${t.name}: ${signed(val, 2)} N·m`;
+        const tip = `${t.name}: ${signed(val, 2)} N·m (结构上限 ${limit.toFixed(1)} N·m, `
+                  + `利用率 ${(ratio * 100).toFixed(0)}%)`;
         return `
             <div class="torque-item-row" title="${escapeHtml(tip)}">
                 <span class="torque-label">${escapeHtml(t.label || t.name)}</span>
