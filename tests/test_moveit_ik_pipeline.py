@@ -144,7 +144,15 @@ def test_moveit_7dof_left_arm_ik(ros_context):
 
 
 def test_moveit_9dof_torso_coordination_ik(ros_context):
-    """测试 3: 9-DoF 躯干-手臂协同 (left_arm_torso) MoveIt 远距离大跨度求解与手臂优先原则"""
+    """测试 3: 9-DoF 躯干-手臂协同 (left_arm_torso) MoveIt 远距离大跨度求解与手臂优先原则
+
+⚠️ 本用例对**求解起���位姿敏感**: IK 服务以当前关节状态为热启动种子, 若跑本
+测试前机器人正停在一个不可达或极端目标上 (如大屏上刚下发过 [0.9, 0.7, 1.6],
+实测残差 765mm), 则远距离协同求解可能返回错误码 -31。
+
+实测: 从极端位姿出发失败, `/api/reset_stand` 后连跑 3 次均通过。跑本文件前
+若机器人处于异常位姿, 请先复位。
+"""
     if not ros_context["service_ready"]:
         pytest.skip("MoveIt IK 服务未就绪")
 

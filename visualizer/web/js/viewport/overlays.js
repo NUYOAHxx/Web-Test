@@ -5,12 +5,13 @@
  * 每个标记物提供独立的 update 方法, 主循环只负责派发数据。
  */
 
-import { addToScene, onFrame } from "./scene.js";
+import { addToScene } from "./scene.js";
 import { clearanceStatus } from "../format.js";
 
 /* 标记物句柄 */
 let targetOrb = null;
-let targetRing = null;
+let targetArrow = null;
+let actualArrow = null;
 let actualOrb = null;
 let errorLine = null;
 let comOrb = null;
@@ -45,7 +46,6 @@ export function initOverlays() {
     initOrbitRing();
     initMotionTrail();
     initReachBox();
-    onFrame(animateOverlays);
 }
 
 /* ═════════════════════ 可达工作空间参照盒 ═════════════════════ */
@@ -73,11 +73,11 @@ let reachBoxBounds = null;
 
 function initReachBox() {
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(24 * 3), 3));
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(CORNER_BRACKET_VERTS * 3), 3));
     reachBox = addToScene(new THREE.LineSegments(
         geo,
         new THREE.LineBasicMaterial({
-            color: 0x00c8e0, transparent: true, opacity: 0.34, depthWrite: false,
+            color: 0x00c8e0, transparent: true, opacity: 0.42, depthWrite: false,
         })
     ));
     reachBox.renderOrder = 998;      // 压在机身之下, 不遮挡关节观察
@@ -87,11 +87,21 @@ function initReachBox() {
     reachBox.visible = true;
 }
 
-const _cornerIndex = [
-    [0, 1], [1, 3], [3, 2], [2, 0],   // 底面 4 边
-    [4, 5], [5, 7], [7, 6], [6, 4],   // 顶面 4 边
-    [0, 4], [1, 5], [2, 6], [3, 7],   // 4 条竖边
-];
+/**
+ * 角括号: 每个角只画 1 段朝盒内的短线, 而不是把 12 条棱整条画出来。
+ *
+ * 完整棱线横穿视野, 会把机器人整体切割成若干块, 视线被这些线反复打断;
+ * 而可达范围的**角点**才是真正需要看清的位置 —— 目标球靠近某个角, 就说明
+ * 快出界了。角括号保留了"范围到哪儿"的信息, 去掉了横贯画面的噪声。
+ *
+ * 每个角一段 (而非沿三轴各一段) 是刻意的: 三段轴向线在 8 个角上共 24 段,
+ * 视觉上比 8 段更密, 且容易被误读成"网格"; 单段斜向短线是工程制图里的
+ * 经典角括号样式, 8 段足够定位范围, 且完全不与机身轮廓交叠。
+ *
+ * 线段长度取各轴跨度的 18%, 方向朝包围盒内部 (下界角朝 +, 上界角朝 -)。
+ */
+const BRACKET_RATIO = 0.18;
+const CORNER_BRACKET_VERTS = 8 * 2;   // 8 角 × 1 段 × 2 端点
 
 /**
  * 按实测包围盒重绘线框。
@@ -111,15 +121,31 @@ export function updateReachBox(envelope, arm) {
 
     const lo = [env.x.min, env.y.min, env.z.min];
     const hi = [env.x.max, env.y.max, env.z.max];
-    const c = [
-        [lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]], [hi[0], hi[1], lo[2]], [lo[0], hi[1], lo[2]],
-        [lo[0], lo[1], hi[2]], [hi[0], lo[1], hi[2]], [hi[0], hi[1], hi[2]], [lo[0], hi[1], hi[2]],
-    ];
+    const span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    const mid = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
+
     const pos = reachBox.geometry.getAttribute("position");
     let k = 0;
-    for (const [a, b] of _cornerIndex) {
-        pos.setXYZ(k++, c[a][0], c[a][1], c[a][2]);
-        pos.setXYZ(k++, c[b][0], c[b][1], c[b][2]);
+    for (const cx of [lo[0], hi[0]]) {
+        for (const cy of [lo[1], hi[1]]) {
+            for (const cz of [lo[2], hi[2]]) {
+                // 括号必须从角点**朝盒内**延伸。方向取决于该角位于哪一侧:
+                // 下界角朝 +、上界角朝 -。若一律按固定 -X/-Y/-Z 方向内缩,
+                // 下界角的线段就会向外扩出包围盒 (实测 x: -0.549 → -0.747),
+                // 既越界又让盒子尺寸不再是实测值。
+                const p = [cx, cy, cz];
+                const dir = [
+                    cx < mid[0] ? 1 : -1,
+                    cy < mid[1] ? 1 : -1,
+                    cz < mid[2] ? 1 : -1,
+                ];
+                pos.setXYZ(k++, cx, cy, cz);
+                pos.setXYZ(k++,
+                    cx + dir[0] * span[0] * BRACKET_RATIO,
+                    cy + dir[1] * span[1] * BRACKET_RATIO,
+                    cz + dir[2] * span[2] * BRACKET_RATIO);
+            }
+        }
     }
     pos.needsUpdate = true;
     reachBox.geometry.computeBoundingSphere();
@@ -164,36 +190,63 @@ export function isTargetOutsideReachBox(pos) {
     return false;
 }
 
+/* ═════════════════════ 目标 / 末端 标记物 ═════════════════════ */
+
+/**
+ * 位置与朝向的图元选择
+ * -------------------------------------------------------------------
+ * 旧实现给目标点叠了三个图元: 球 (r=0.018) + 同色圆环 + AxesHelper(0.05)。
+ *
+ *   · 球与环轮廓重合、颜色相同, 等于同一形状画了两遍, 只是让边缘"厚"了一圈;
+ *   · AxesHelper 画的是三根 RGB 轴线, 即一个坐标系。坐标系回答不了用户真正
+ *     想看的问题 —— "手要往哪个方向伸"。而且 0.05m 长的轴线在目标距离上只有
+ *     几个像素, 颜色还被机身光照与雾吃掉, 基本读不出信息, 只是噪声。
+ *
+ * 现改为两个图元, 每个直接对应一个语义:
+ *   · 位置 → 八面体。棱面结构使轮廓随视角变化, 比球更容易与背景区分, 且
+ *     没有球面那种"一团糊"的观感。
+ *   · 朝向 → 单根箭头, 沿末端 +Z (夹爪接近轴)。方向是单一信息, 箭头恰好
+ *     只表达这一件事, 不会像坐标系那样把注意力分散到三个轴上。
+ */
+
+/** 目标点: 八面体 + 接近方向箭头 */
 function initTargetOrb() {
     targetOrb = addToScene(new THREE.Mesh(
-        new THREE.SphereGeometry(0.018, 24, 24),
+        new THREE.OctahedronGeometry(0.020),
         new THREE.MeshStandardMaterial({
-            color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 0.9, roughness: 0.2,
+            color: 0x00ff88, emissive: 0x00ff88, emissiveIntensity: 1.1,
+            roughness: 0.25, metalness: 0.1,
         })
     ));
+    targetOrb.renderOrder = 999;
 
-    targetRing = new THREE.Mesh(
-        new THREE.RingGeometry(0.024, 0.030, 32),
-        new THREE.MeshBasicMaterial({ color: 0x00ff88, side: THREE.DoubleSide, transparent: true, opacity: 0.75 })
+    targetArrow = new THREE.ArrowHelper(
+        new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0),
+        0.085, 0x00ff88, 0.022, 0.013,
     );
-    targetOrb.add(targetRing);
-
-    const axes = new THREE.AxesHelper(0.05);
-    axes.renderOrder = 999;
-    targetOrb.add(axes);
+    targetArrow.line.material.depthTest = false;
+    targetArrow.cone.material.depthTest = false;
+    targetOrb.add(targetArrow);
 }
 
+/** 末端实测点: 同构但更小更暗, 与目标形成主次 */
 function initActualOrb() {
     actualOrb = addToScene(new THREE.Mesh(
-        new THREE.SphereGeometry(0.014, 24, 24),
+        new THREE.OctahedronGeometry(0.013),
         new THREE.MeshStandardMaterial({
-            color: 0xffb800, emissive: 0xffb800, emissiveIntensity: 0.85, roughness: 0.25,
+            color: 0xffb800, emissive: 0xffb800, emissiveIntensity: 0.8,
+            roughness: 0.3, metalness: 0.1,
         })
     ));
+    actualOrb.renderOrder = 999;
 
-    const axes = new THREE.AxesHelper(0.045);
-    axes.renderOrder = 999;
-    actualOrb.add(axes);
+    actualArrow = new THREE.ArrowHelper(
+        new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0),
+        0.058, 0xffb800, 0.016, 0.010,
+    );
+    actualArrow.line.material.depthTest = false;
+    actualArrow.cone.material.depthTest = false;
+    actualOrb.add(actualArrow);
 }
 
 function initErrorLine() {
@@ -274,11 +327,13 @@ function initMotionTrail() {
     motionTrail.visible = false;
 }
 
-/* ═════════════════════ 每帧动画 ═════════════════════ */
-
-function animateOverlays() {
-    if (targetRing) targetRing.rotation.z += 0.02;
-}
+/* ── 每帧动画 ──
+ *
+ * 此前此处让目标圆环持续自转以吸引注意。该环已随"球 + 环 + 坐标系"一并移除。
+ * 也**不能**把自转改到八面体上: updatePoseMarkers 每帧用四元数写入目标朝向,
+ * 而 three.js 中 rotation 与 quaternion 互相联动, 叠加自转会污染朝向显示 ——
+ * 箭头会指向与指令不符的方向。
+ */
 
 /* ═════════════════════ 数据驱动更新 ═════════════════════ */
 
@@ -300,10 +355,10 @@ export function updatePoseMarkers(cmdPos, cmdQuat, actPos, actQuat) {
         const outside = isTargetOutsideReachBox(cmdPos);
         if (outside !== _targetWasOutside) {
             _targetWasOutside = outside;
-            const mat = targetOrb.material;
-            mat.color.setHex(outside ? 0xff5566 : 0x00ff88);
-            mat.emissive.setHex(outside ? 0xff5566 : 0x00ff88);
-            targetRing.material.color.setHex(outside ? 0xff5566 : 0x00ff88);
+            const hex = outside ? 0xff5566 : 0x00ff88;
+            targetOrb.material.color.setHex(hex);
+            targetOrb.material.emissive.setHex(hex);
+            targetArrow.setColor(hex);
         }
     }
     if (actualOrb && actPos) {

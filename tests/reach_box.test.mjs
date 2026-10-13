@@ -23,22 +23,28 @@ function test(name, fn) {
 
 /* ══════════════════════ 与 overlays.js 同构的实现 ══════════════════════ */
 
-const CORNER_INDEX = [
-    [0, 1], [1, 3], [3, 2], [2, 0],
-    [4, 5], [5, 7], [7, 6], [6, 4],
-    [0, 4], [1, 5], [2, 6], [3, 7],
-];
+// 每个角沿三个轴同时朝盒内伸出一小段 (下界角朝 +, 上界角朝 -)
+const BRACKET_RATIO = 0.18;
 
-/** 由包围盒生成 24 个顶点 (12 条棱 × 2 端点) */
+/** 由包围盒生成 16 个顶点 (8 角 × 1 段 × 2 端点) */
 function buildBoxVertices(env) {
     const lo = [env.x.min, env.y.min, env.z.min];
     const hi = [env.x.max, env.y.max, env.z.max];
-    const c = [
-        [lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]], [hi[0], hi[1], lo[2]], [lo[0], hi[1], lo[2]],
-        [lo[0], lo[1], hi[2]], [hi[0], lo[1], hi[2]], [hi[0], hi[1], hi[2]], [lo[0], hi[1], hi[2]],
-    ];
+    const span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+    const mid = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
     const out = [];
-    for (const [a, b] of CORNER_INDEX) { out.push(c[a], c[b]); }
+    for (const cx of [lo[0], hi[0]]) {
+        for (const cy of [lo[1], hi[1]]) {
+            for (const cz of [lo[2], hi[2]]) {
+                out.push([cx, cy, cz]);
+                out.push([
+                    cx + (cx < mid[0] ? 1 : -1) * span[0] * BRACKET_RATIO,
+                    cy + (cy < mid[1] ? 1 : -1) * span[1] * BRACKET_RATIO,
+                    cz + (cz < mid[2] ? 1 : -1) * span[2] * BRACKET_RATIO,
+                ]);
+            }
+        }
+    }
     return out;
 }
 
@@ -62,35 +68,62 @@ const ENV = {
 
 /* ══════════════════════ 用例 ══════════════════════ */
 
-test("生成 24 个顶点 (12 条棱)", () => {
+test("生成 16 个顶点 (8 角 × 1 段 × 2 端点)", () => {
+    // 缓冲区大小必须与实际填充量一致: 多分配的顶点停留在 (0,0,0),
+    // 会在世界原点画出退化的零长线段, 表现为凭空出现的细小线头。
     const v = buildBoxVertices(ENV);
-    assert.equal(v.length, 24, `应为 24 个顶点, 实得 ${v.length}`);
+    assert.equal(v.length, 16, `应为 16 个顶点, 实得 ${v.length}`);
     assert.ok(v.every((p) => p.length === 3), "每个顶点须为 3 维坐标");
 });
 
-test("所有顶点均落在包围盒表面上", () => {
+test("角括号只在盒的 8 个角上, 不横贯视野", () => {
+    // 每段的一端必须是包围盒的真实角点 —— 这是"角括号"与"完整棱线"的分界
+    const v = buildBoxVertices(ENV);
+    const corners = new Set();
+    for (const cx of [ENV.x.min, ENV.x.max])
+        for (const cy of [ENV.y.min, ENV.y.max])
+            for (const cz of [ENV.z.min, ENV.z.max])
+                corners.add(`${cx},${cy},${cz}`);
+    for (let i = 0; i < v.length; i += 2) {
+        assert.ok(corners.has(`${v[i][0]},${v[i][1]},${v[i][2]}`),
+            `线段起点 ${v[i]} 不是包围盒角点`);
+    }
+    // 8 个角各被覆盖一次, 无遗漏
+    assert.equal(v.filter((_, i) => i % 2 === 0).length, 8, "应为 8 个角点起点");
+});
+
+test("角括号向内缩, 不越出包围盒", () => {
     const v = buildBoxVertices(ENV);
     for (const [x, y, z] of v) {
-        for (const [i, val] of [[0, x], [1, y], [2, z]]) {
-            const axis = ["x", "y", "z"][i];
-            const onMin = Math.abs(val - ENV[axis].min) < 1e-9;
-            const onMax = Math.abs(val - ENV[axis].max) < 1e-9;
-            assert.ok(onMin || onMax,
-                `坐标 ${val} 既不在 ${axis} 下界 ${ENV[axis].min} 也不在上界 ${ENV[axis].max}`);
+        assert.ok(x >= ENV.x.min && x <= ENV.x.max, `X ${x} 越界`);
+        assert.ok(y >= ENV.y.min && y <= ENV.y.max, `Y ${y} 越界`);
+        assert.ok(z >= ENV.z.min && z <= ENV.z.max, `Z ${z} 越界`);
+    }
+});
+
+test("内端点严格位于盒内, 且不在任何面上", () => {
+    // 该断言原为"所有顶点落在盒面上", 它对旧的 12 条棱线成立, 但对角括号
+    // 不成立: 角括号的另一端是朝内缩的点, 三个坐标都严格位于界内。
+    const v = buildBoxVertices(ENV);
+    for (let i = 1; i < v.length; i += 2) {
+        const [x, y, z] = v[i];
+        for (const [val, axis] of [[x, "x"], [y, "y"], [z, "z"]]) {
+            assert.ok(val > ENV[axis].min && val < ENV[axis].max,
+                `内端点 ${axis}=${val} 应严格位于 [${ENV[axis].min}, ${ENV[axis].max}] 内`);
         }
     }
 });
 
 test("棱长与包围盒尺寸一致", () => {
     const v = buildBoxVertices(ENV);
-    // 底面首条棱沿 X, 长度应等于 x 跨度
+    // 首段沿 X, 长度应等于 X 跨度的 BRACKET_RATIO 倍
     const dx = Math.abs(v[1][0] - v[0][0]);
-    assert.ok(Math.abs(dx - (ENV.x.max - ENV.x.min)) < 1e-9,
-        `X 向棱长 ${dx} 与包围盒 X 跨度不符`);
-    // 首条竖棱沿 Z (CORNER_INDEX[8] = [0,4], 落在顶点 16 与 17)
-    const dz = Math.abs(v[17][2] - v[16][2]);
-    assert.ok(Math.abs(dz - (ENV.z.max - ENV.z.min)) < 1e-9,
-        `Z 向棱长 ${dz} 与包围盒 Z 跨度不符`);
+    assert.ok(Math.abs(dx - (ENV.x.max - ENV.x.min) * BRACKET_RATIO) < 1e-9,
+        `X 向括号长度 ${dx} 与预期不符`);
+    // 第三段沿 Z, 长度应等于 Z 跨度的 BRACKET_RATIO 倍
+    const dz = Math.abs(v[5][2] - v[4][2]);
+    assert.ok(Math.abs(dz - (ENV.z.max - ENV.z.min) * BRACKET_RATIO) < 1e-9,
+        `Z 向括号长度 ${dz} 与预期不符`);
 });
 
 test("尺寸文本格式正确", () => {
