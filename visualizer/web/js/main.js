@@ -19,6 +19,7 @@ import {
     setDemoButtonState,
     resetStand,
     startDemo,
+    applyReachEnvelope,
 } from "./command.js";
 
 import { initViewport, ViewportUnavailableError, resetCamera, toggleGrid, disposeViewport } from "./viewport/scene.js";
@@ -205,6 +206,8 @@ function onTelemetryFrame(data) {
     if (data.model_info) {
         state.modelInfo = data.model_info;
         renderModelInfo(data.model_info);
+        // 滑块范围与后端指令校验共用同一份实测包络
+        applyReachEnvelope(data.model_info);
     }
 
     const cmd = data.cartesian_cmd_pose;

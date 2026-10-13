@@ -457,6 +457,109 @@ class HumanoidKinematicsModel:
         com = pin.centerOfMass(self.model, self.data, q_full)
         return com.copy()
 
+    def compute_reach_envelope(
+        self,
+        arm: str = "left_arm",
+        samples: int = 6000,
+        seed: int = 20240501,
+        inset: float = 0.85,
+        front_only: bool = True,
+    ) -> Dict[str, Dict[str, float]]:
+        """实测末端工作空间包络 (含姿态), 作为指令入口与前端滑块的**唯一真源**。
+
+        早期实现把范围 (X:[0.05,0.45] Y:±0.30 Z:[0.70,1.30] deg:±180) 同时
+        写在前端 HTML 的 min/max 与服务端的校验字典里, 两处无任何关联:
+
+        - 改一边不改另一边, 就会出现"滑块能选但后端拒绝"或反之, 用户只看到
+          一句报错, 不知道是界面给的越界;
+        - 换 URDF 后数值不变, 而实际可达范围已完全改变;
+        - 姿态根本没有范围校验 (后端只查 NaN/Inf), 滑到 (180,180,180) 会被
+          原样下发, 表现为"校验通过但残差几百毫米" —— 正是当初收紧位置包络
+          要避免的情况。
+
+        本方法在限位盒内采样, 剔除自碰撞位姿后取各轴极值:
+
+        - ``inset``   各侧按比例向可行域中心内缩, 避免用户恰好选在边界上
+                       (边界处 IK 收敛率显著下降);
+        - ``front_only`` X 只取前伸方向。身后可达 (实测 X 下界约 -0.5m) 属于
+                       贴近躯干的自碰撞奇异区, SRDF 相邻对过滤捕捉不到。
+
+        采样为确定性伪随机 (固定种子), 结果可复现, 便于换模型后对照排查。
+
+        :return: ``{"x": {"min","max"}, "y": {...}, "z": {...},
+                   "roll": {...}, "pitch": {...}, "yaw": {...}}``, 角度单位度
+        """
+        import pinocchio as pin
+
+        lo = np.concatenate([self.waist_limits[0], self.limits[arm][0]])
+        hi = np.concatenate([self.waist_limits[1], self.limits[arm][1]])
+        names = self.chain_9dof_joint_names[arm]
+        q_idx = [self.model.getJointId(n) - 1 for n in names]
+        fid = self.ee_frame_ids[arm]
+
+        # 自碰撞过滤需要完整全身模型状态, 此处用未降维的全模型判定
+        collider = self._build_reduced_collider(arm)
+
+        p_lo = np.array([np.inf] * 3)
+        p_hi = np.array([-np.inf] * 3)
+        r_lo = np.array([np.inf] * 3)
+        r_hi = np.array([-np.inf] * 3)
+        hit = 0
+        rng = np.random.default_rng(seed)
+
+        for _ in range(samples):
+            q = pin.neutral(self.model)
+            q_red = np.empty(len(names))
+            for i, j in enumerate(q_idx):
+                v = float(rng.uniform(lo[i], hi[i]))
+                q[j] = v
+                q_red[i] = v
+            if collider is not None and collider(q_red):
+                continue
+
+            pin.forwardKinematics(self.model, self.data, q)
+            pin.updateFramePlacements(self.model, self.data)
+            p = self.data.oMf[fid].translation
+            p_lo = np.minimum(p_lo, p)
+            p_hi = np.maximum(p_hi, p)
+            rpy = pin.rpy.matrixToRpy(self.data.oMf[fid].rotation)
+            r_lo = np.minimum(r_lo, rpy)
+            r_hi = np.maximum(r_hi, rpy)
+            hit += 1
+
+        if hit == 0:
+            raise RobotProfileError(
+                "工作空间采样全部被自碰撞剔除, 无法推导可达包络。"
+                "请检查 URDF 的碰撞几何与 SRDF 允许碰撞矩阵。")
+
+        if front_only:
+            # 身后为贴近躯干的奇异区, 不作为可用工作空间
+            p_lo[0] = max(p_lo[0], 0.0)
+
+        def _box(lo_v: float, hi_v: float) -> Dict[str, float]:
+            c = (lo_v + hi_v) * 0.5
+            half = (hi_v - lo_v) * 0.5 * inset
+            return {"min": round(c - half, 4), "max": round(c + half, 4)}
+
+        out: Dict[str, Dict[str, float]] = {
+            "x": _box(p_lo[0], p_hi[0]),
+            "y": _box(p_lo[1], p_hi[1]),
+            "z": _box(p_lo[2], p_hi[2]),
+        }
+        for i, key in enumerate(("roll", "pitch", "yaw")):
+            out[key] = _box(float(np.degrees(r_lo[i])), float(np.degrees(r_hi[i])))
+        out["_samples"] = {"total": samples, "collision_free": hit}
+        return out
+
+    def _build_reduced_collider(self, arm: str):
+        """构造该臂降维链上的自碰撞判据; 依赖碰撞引擎时返回 None (跳过过滤)。"""
+        try:
+            from core.collision.humanoid_collision import HumanoidCollisionChecker
+            checker = HumanoidCollisionChecker(self)
+        except Exception:
+            return None
+        return lambda q_red: checker.is_colliding_reduced(arm, q_red, is_9dof=True)
+
     def compute_torque_envelope(
         self, arm: str = "left_arm", is_9dof: bool = True,
     ) -> Dict[str, float]:

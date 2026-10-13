@@ -55,15 +55,30 @@ try:
 except ImportError:
     HAS_ROS2 = False
 
-# 9-DoF (2 腰 + 7 臂) 末端执行器实测可达包络 (世界坐标系, 米)。
-# 依据: 前向最大伸展约 0.45m, 侧向约 ±0.30m, 高度区间约 [0.70, 1.30]m。
-# 该包络比理论关节极限保守得多 —— 超出的目标不是"算得慢", 而是根本无解,
-# 提前在指令入口拒绝, 避免用户面对无法收敛的指令却不知原因。
-SAFE_REACH_ENVELOPE = {
-    "x": (0.05, 0.45),
-    "y": (-0.30, 0.30),
-    "z": (0.70, 1.30),
+# ── 可达工作空间包络 ──────────────────────────────────────────────────────
+#
+# 该包络由**模型实测**得出 (HumanoidKinematicsModel.compute_reach_envelope):
+# 在限位盒内采样, 剔除自碰撞位姿后取各轴极值, 再按 inset 内缩避开边界。
+#
+# 早期实现把它同时写在本文件与前端 HTML 的 min/max 里, 两处无任何关联:
+# 改一边不改另一边就会"滑块能选但后端拒绝"; 换 URDF 后数值不变而实际可达
+# 范围已变; 姿态更是完全没有校验 (只查 NaN/Inf), 滑到 (180,180,180) 会被
+# 原样下发, 表现为"校验通过但残差几百毫米"。
+#
+# 现由机器人档案统一管理, 服务端校验与前端滑块读同一份运行时数据。
+# 计算失败时回退到下面的保守缺省值, 并明确告警 —— 缺省值只是兜底, 不是真源。
+
+FALLBACK_REACH_ENVELOPE = {
+    "x": {"min": 0.05, "max": 0.45},
+    "y": {"min": -0.30, "max": 0.30},
+    "z": {"min": 0.70, "max": 1.30},
+    "roll": {"min": -90.0, "max": 90.0},
+    "pitch": {"min": -75.0, "max": 75.0},
+    "yaw": {"min": -90.0, "max": 90.0},
 }
+
+#: 六个受约束的坐标键 (前端滑块与后端校验共用同一套)
+ENVELOPE_AXES = ("x", "y", "z", "roll", "pitch", "yaw")
 
 
 class RobotTelemetryManager:
@@ -189,6 +204,26 @@ class RobotTelemetryManager:
         self._cached_stream_json: str = ""
         # 慢变量推送指纹 (仅服务端内部比对用, 不出现在任何报文中)
         self._last_stream_fps: Dict[str, Any] = {}
+        # 可达包络按臂实测 —— 同时作为后端校验与前端滑块范围的唯一真源。
+        # 必须早于 _build_model_info(): 后者要把包络装进 model_info 一并下发,
+        # 顺序颠倒会让前端收到空的 reach_envelope 而静默沿用 HTML 里的旧范围。
+        self._reach_envelope: Dict[str, Dict[str, Dict[str, float]]] = {}
+        for _arm in ("left_arm", "right_arm"):
+            try:
+                self._reach_envelope[_arm] = self.kin.compute_reach_envelope(_arm)
+                _env = self._reach_envelope[_arm]
+                print(f"[Web 纯遥测后端] {_arm} 实测可达包络: "
+                      f"X[{_env['x']['min']:+.3f},{_env['x']['max']:+.3f}] "
+                      f"Y[{_env['y']['min']:+.3f},{_env['y']['max']:+.3f}] "
+                      f"Z[{_env['z']['min']:+.3f},{_env['z']['max']:+.3f}] m | "
+                      f"Pitch[{_env['pitch']['min']:+.0f},{_env['pitch']['max']:+.0f}]° "
+                      f"(无碰撞样本 {_env['_samples']['collision_free']}/{_env['_samples']['total']})")
+            except Exception as exc:
+                self._reach_envelope[_arm] = json.loads(json.dumps(FALLBACK_REACH_ENVELOPE))
+                print(f"[Web 纯遥测后端] [警告] {_arm} 可达包络实测失败 "
+                      f"({type(exc).__name__}: {exc}), 回退到保守缺省值")
+
+        # model_info 必须在包络与力矩上限就绪之后再组装
         self._model_info: Dict[str, Any] = self._build_model_info()
         # 各关节结构性力矩上限 (随模型质量分布与限位自动标定)
         self._torque_envelope: Dict[str, float] = self.kin.compute_torque_envelope()
@@ -240,6 +275,8 @@ class RobotTelemetryManager:
             "arm_dof": int(len(kin.left_arm_joint_names)),
             "collision_pairs": len(kin.coll_model.collisionPairs),
             "support_polygon": dict(kin.support_polygon),
+            # 滑块范围与后端指令校验的唯一真源; 前端按此设置 min/max/step
+            "reach_envelope": getattr(self, "_reach_envelope", {}) or {},
             "ee_frames": dict(kin.ee_frame_names),
             "limits_source": "URDF <limit>",
         }
@@ -899,25 +936,32 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                 if math.isnan(x) or math.isnan(y) or math.isnan(z) or math.isinf(x) or math.isinf(y) or math.isinf(z):
                     raise ValueError("Target coordinates cannot contain NaN or Infinity")
 
-                # 2. 机械臂执行空间物理安全包络防御校验 (Safe Reach Envelope)
-                # 9-DoF (2 腰 + 7 臂) 实测可达包络。早期版本使用了明显偏大的理论包络
-                # (X≤1.0 / Y≤0.8 / Z∈[0.64,1.5]), 结果是"校验通过但 IK 无法收敛",
-                # 用户只能在遥测表上看到上百毫米的残差却不知原因。现按实测边界收紧,
-                # 越界目标在入口即被明确拒绝。
-                env = SAFE_REACH_ENVELOPE
-                if not (env["x"][0] <= x <= env["x"][1]
-                        and env["y"][0] <= y <= env["y"][1]
-                        and env["z"][0] <= z <= env["z"][1]):
-                    raise ValueError(
-                        f"目标 [{x:.3f}, {y:.3f}, {z:.3f}] 超出 9-DoF 可达工作空间: "
-                        f"X:[{env['x'][0]:.2f}, {env['x'][1]:.2f}]m, "
-                        f"Y:[{env['y'][0]:.2f}, {env['y'][1]:.2f}]m, "
-                        f"Z:[{env['z'][0]:.2f}, {env['z'][1]:.2f}]m"
-                    )
-
-                # 3. 操作臂合法性校验
+                # 2. 操作臂合法性校验。
+                #    必须早于包络校验: 包络按臂取值, 非法臂名会取到缺省包络,
+                #    报出与真实原因无关的错误信息。
                 if arm not in ("left_arm", "right_arm"):
                     raise ValueError(f"Invalid arm '{arm}', must be 'left_arm' or 'right_arm'")
+
+                # 3. 可达工作空间校验 —— 位置与姿态走同一份实测包络。
+                #    该包络由模型实测得出并与前端滑块共用 (见 _reach_envelope),
+                #    不存在"滑块能选但后端拒绝"的可能。
+                env = (MANAGER._reach_envelope.get(arm)
+                       if MANAGER else None) or FALLBACK_REACH_ENVELOPE
+
+                def _in(axis: str, value: float) -> bool:
+                    box = env[axis]
+                    return box["min"] <= value <= box["max"]
+
+                bad = []
+                for axis, value, unit in (("x", x, "m"), ("y", y, "m"), ("z", z, "m")):
+                    if not _in(axis, value):
+                        bad.append(f"{axis.upper()}={value:.3f} 允许 "
+                                   f"[{env[axis]['min']:.3f}, {env[axis]['max']:.3f}]{unit}")
+                if bad:
+                    raise ValueError(
+                        "目标超出该臂实测可达工作空间: " + "; ".join(bad)
+                        + "（范围由当前 URDF 在启动时实测得出）"
+                    )
 
                 # 4. 6-DoF 空间朝向欧拉角解析 (Roll, Pitch, Yaw 单位: 度)
                 rpy_raw = data.get("rpy", None)
@@ -936,6 +980,18 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                     for angle in rpy:
                         if math.isnan(angle) or math.isinf(angle):
                             raise ValueError("RPY angles cannot contain NaN or Infinity")
+                    # 姿态范围校验 —— 此前完全缺失, 前端放开 ±180° 会被原样下发,
+                    # 表现为"校验通过但残差几百毫米", 正是收紧位置包络要避免的情况。
+                    # 实测本模型 Roll/Yaw 近乎无约束而 Pitch 受限于 ±75°,
+                    # 三者各不相同, 故逐轴独立判定。
+                    for axis, angle in zip(("roll", "pitch", "yaw"), rpy):
+                        if not _in(axis, angle):
+                            box = env[axis]
+                            raise ValueError(
+                                f"{axis.upper()}={angle:.1f}° 超出该臂实测可达姿态范围 "
+                                f"[{box['min']:.1f}, {box['max']:.1f}]°"
+                                "（范围由当前 URDF 在启动时实测得出）"
+                            )
 
                 if MANAGER is None:
                     raise RuntimeError("ROS 2 调度中枢未就绪 (MANAGER 未初始化)，指令未下发")

@@ -351,3 +351,54 @@ def pin_neutral_with(kin):
             v = float(np.clip(0.0, lo[k], hi[k]))
             q[kin.model.joints[j + 1].idx_q] = v
     return q
+
+# ==============================================================================
+# 6. 可达包络实测
+# ==============================================================================
+
+def test_reach_envelope_shape(kin):
+    """包络须覆盖六个轴, 且姿态三轴各自独立 —— 约束强度差异极大。"""
+    env = kin.compute_reach_envelope("left_arm", samples=1200)
+    for axis in ("x", "y", "z", "roll", "pitch", "yaw"):
+        assert axis in env, f"包络缺少 {axis} 轴"
+        assert env[axis]["min"] < env[axis]["max"], f"{axis} 轴区间非法"
+    assert env["_samples"]["collision_free"] > 0
+
+
+def test_reach_envelope_pitch_is_constrained(kin):
+    """实测结论: Roll/Yaw 近乎无约束而 Pitch 明显受限, 不能统一放宽。
+
+    早前端点对三轴一律放开 ±180°, 而后端对姿态完全不做校验 (只查 NaN/Inf),
+    滑到 (0, 90, 0) 会被原样下发, 表现为"校验通过但残差几百毫米"。
+    """
+    env = kin.compute_reach_envelope("left_arm", samples=1200)
+    assert env["pitch"]["max"] < 90.0, \
+        f"Pitch 上界应为 {env['pitch']['max']:.1f}, 预期显著小于 90°"
+    assert abs(env["roll"]["max"]) > 100.0, "Roll 应接近无约束"
+    assert abs(env["yaw"]["max"]) > 100.0, "Yaw 应接近无约束"
+
+
+def test_reach_envelope_front_only(kin):
+    """X 下界应被前伸约束截断 —— 身后可达属贴近躯干的自碰撞奇异区。"""
+    env = kin.compute_reach_envelope("left_arm", samples=1200, front_only=True)
+    assert env["x"]["min"] >= 0.0, "启用 front_only 时 X 下界不应为负"
+
+
+def test_reach_envelope_inset_shrinks(kin):
+    """inset 应把区间等比向中心内缩, 且仍在可行域之内。"""
+    full = kin.compute_reach_envelope("left_arm", samples=1200, inset=1.0)
+    tight = kin.compute_reach_envelope("left_arm", samples=1200, inset=0.5)
+    for axis in ("x", "y", "z"):
+        fs = full[axis]["max"] - full[axis]["min"]
+        ts = tight[axis]["max"] - tight[axis]["min"]
+        assert ts < fs, f"{axis} 轴 inset 未生效"
+        # 内缩后仍在原区间之内
+        assert tight[axis]["min"] >= full[axis]["min"] - 1e-6
+        assert tight[axis]["max"] <= full[axis]["max"] + 1e-6
+
+
+def test_reach_envelope_deterministic(kin):
+    """固定种子 ⇒ 结果可复现。"""
+    a = kin.compute_reach_envelope("left_arm", samples=800)
+    b = kin.compute_reach_envelope("left_arm", samples=800)
+    assert a == b

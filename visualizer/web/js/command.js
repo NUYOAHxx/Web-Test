@@ -34,6 +34,59 @@ const AXES = [
     ["yaw", "sliderYaw", "numYaw", 1],
 ];
 
+/** 刻度位数: 位置米制保留 3 位, 姿态角度 1 位 */
+const DIGITS = { x: 3, y: 3, z: 3, roll: 1, pitch: 1, yaw: 1 };
+
+/**
+ * 按服务端实测的可达包络设置滑块范围。
+ *
+ * 范围原先写死在 HTML 的 min/max 里, 与服务端的校验字典各存一份, 两处无关联:
+ * 改一边不改另一边就会出现"滑块能选但后端拒绝", 换 URDF 后数值也不会变。
+ * 现在 min/max 与后端校验读同一份 `model_info.reach_envelope`, 不存在分叉。
+ *
+ * 滑块总像素宽度不变, 因此量程拉长后每像素代表的距离变大; 步长按量程比例
+ * 缩放, 保持"一次滚轮 ≈ 一个自然步长"的精度直觉。
+ *
+ * @param {object} info 服务端 model_info
+ */
+export function applyReachEnvelope(info) {
+    const envelopes = info?.reach_envelope;
+    if (!envelopes) return false;
+
+    // 右臂优先用右臂包络; 未下发该臂时退回左臂
+    const env = envelopes[state.arm] || envelopes.left_arm;
+    if (!env) return false;
+
+    for (const [axis, sliderId, numId] of AXES) {
+        const box = env[axis];
+        if (!box) continue;
+        const slider = el(sliderId);
+        const num = el(numId);
+        if (!slider || !num) continue;
+
+        const lo = Number(box.min);
+        const hi = Number(box.max);
+        const span = Math.max(1e-6, hi - lo);
+
+        slider.min = String(lo);
+        slider.max = String(hi);
+        // 姿态量程可达 300°, 位置仅约 0.5m; 步长按各自量程的 1/300 取,
+        // 使两侧的"一格"手感一致
+        num.min = String(lo);
+        num.max = String(hi);
+        slider.step = num.step = String(Math.max(1e-4, Math.round(span / 300 * 1e4) / 1e4));
+
+        // 当前值若落在新范围外, 夹到边界, 避免滑块位置与数值框不一致
+        const cur = Number(slider.value);
+        if (!Number.isFinite(cur) || cur < lo || cur > hi) {
+            const clamped = Math.min(hi, Math.max(lo, Number.isFinite(cur) ? cur : (lo + hi) / 2));
+            slider.value = String(clamped);
+            num.value = clamped.toFixed(DIGITS[axis]);
+        }
+    }
+    return true;
+}
+
 /**
  * 工况预设。
  * 坐标按 **左臂** 约定给出 (y 为正), 右臂在应用时自动镜像。
