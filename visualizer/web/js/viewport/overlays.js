@@ -12,6 +12,8 @@ import { clearanceStatus } from "../format.js";
 let targetOrb = null;
 let targetArrow = null;
 let actualArrow = null;
+let pendingOrb = null;
+let pendingArrow = null;
 let actualOrb = null;
 let errorLine = null;
 let comOrb = null;
@@ -46,6 +48,7 @@ export function initOverlays() {
     initOrbitRing();
     initMotionTrail();
     initReachBox();
+    initPendingOrb();
 }
 
 /* ═════════════════════ 可达工作空间参照盒 ═════════════════════ */
@@ -77,7 +80,7 @@ function initReachBox() {
     reachBox = addToScene(new THREE.LineSegments(
         geo,
         new THREE.LineBasicMaterial({
-            color: 0x00c8e0, transparent: true, opacity: 0.40, depthWrite: false,
+            color: 0x00c8e0, transparent: true, opacity: 0.30, depthWrite: false,
         })
     ));
     reachBox.renderOrder = 998;      // 压在机身之下, 不遮挡关节观察
@@ -88,23 +91,24 @@ function initReachBox() {
 }
 
 /**
- * 范围盒的画法: 底面矩形 + 四角立柱, 不画顶面。
+ * 范围盒画法: 完整 12 条棱, 顶面与底面都闭合。
  *
- * 迭代过两版, 两次都因"看起来不像盒子"被否:
- *   · 12 条完整棱 —— 顶面线正好横穿机器人上半身, 把整体切割成几块;
+ * 迭代过两版, 两次都被否, 两次的原因相反:
  *   · 每角 1 段朝内斜线 (角括号) —— 8 段互不相连, 视线无法把它们重建成
- *     一个盒子, 实际观感是画面里飘着几根随机线段, 比棱线更糟。
+ *     一个盒子, 实际观感是画面里飘着几根随机线段;
+ *   · 底面 + 立柱、不画顶面 —— 立柱顶端悬空无收口, 看起来是个没画完的
+ *     笼子 (用户实机确认"顶部没有连线")。
  *
- * 现取中间态:
- *   · 底面矩形完整画出 —— 它把范围**锚在地面**上, 是"一个区域"最强的空间
- *     暗示, 也是判断目标是否出界最常参照的一圈;
- *   · 四角立柱给出高度感, 说明这是有体积的空间而非地面上的一个圈;
- *   · 不画顶面 —— 顶面线正是穿过头部和胸腔的那些, 去掉后视线豁然开朗,
- *     而底面 + 立柱已足以还原体积。
+ * 结论: 半吊子的画法两头不讨好, 要么完整闭合, 要么彻底不画。范围盒的价值
+ * 正在于"这是一个封闭体"这件事本身, 缺一条边这个暗示就塌了, 因此回到
+ * 完整 12 棱。
  *
- * 共 8 条线段 = 16 个顶点。
+ * 顶面线确实会与机器人上半身交叠 —— 通过降低不透明度 (0.40 → 0.30) 与
+ * renderOrder 压低来减弱, 而不是靠删边来规避。
+ *
+ * 共 12 条线段 = 24 个顶点。
  */
-const REACH_BOX_VERTS = 16;
+const REACH_BOX_VERTS = 24;
 
 /**
  * 按实测包围盒重绘线框。
@@ -125,7 +129,7 @@ export function updateReachBox(envelope, arm) {
     const lo = [env.x.min, env.y.min, env.z.min];
     const hi = [env.x.max, env.y.max, env.z.max];
 
-    // 底面 4 个角 (z = 下界) 与顶面 4 个角 (z = 上界) 一一对应
+    // 底面 / 顶面各 4 个角, 一一对应
     const b = [
         [lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]],
     ];
@@ -133,13 +137,19 @@ export function updateReachBox(envelope, arm) {
     const put = (x, y, z) => pos.setXYZ(k++, x, y, z);
     let k = 0;
 
-    // 底面矩形: 4 条边, 完整画出 —— 把范围锚在地面上
+    // 底面 4 条边
     for (let i = 0; i < 4; i++) {
         const p = b[i], q = b[(i + 1) % 4];
         put(p[0], p[1], lo[2]);
         put(q[0], q[1], lo[2]);
     }
-    // 四角立柱: 从底面角点垂直连到顶面角点, 给出体积感
+    // 顶面 4 条边 —— 缺失会让立柱顶端悬空, 读起来像未完成的笼子
+    for (let i = 0; i < 4; i++) {
+        const p = b[i], q = b[(i + 1) % 4];
+        put(p[0], p[1], hi[2]);
+        put(q[0], q[1], hi[2]);
+    }
+    // 四角立柱: 连接上下, 使体闭合
     for (const [x, y] of b) {
         put(x, y, lo[2]);
         put(x, y, hi[2]);
@@ -244,6 +254,69 @@ function initActualOrb() {
     actualArrow.line.material.depthTest = false;
     actualArrow.cone.material.depthTest = false;
     actualOrb.add(actualArrow);
+}
+
+/**
+ * 待发目标 (pending) —— 下发**之前**的预览标记。
+ *
+ * 此前目标标记只跟随遥测回流的指令值, 于是拖动滑块时 3D 视口毫无反应,
+ * 用户只能盯着侧栏数字猜目标会落在哪 —— 而"先看见、再决定要不要下发"
+ * 正是大屏作为观测工具最有价值的用法。
+ *
+ * 与已下发目标 (cmd) 明确区分, 避免误认为机器人已收到:
+ *   · 颜色 淡青, 半透明 —— 读作"预想"而非"事实";
+ *   · 线框而非实体 —— 轮廓清晰但不与实体目标球争视觉;
+ *   · 悬停于实际目标之上, 下发成功后自动消失。
+ */
+function initPendingOrb() {
+    pendingOrb = addToScene(new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.026),
+        new THREE.MeshBasicMaterial({
+            color: 0x7fe8ff, transparent: true, opacity: 0.30,
+            wireframe: true, depthWrite: false,
+        })
+    ));
+    pendingOrb.renderOrder = 1000;
+
+    pendingArrow = new THREE.ArrowHelper(
+        new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, 0),
+        0.105, 0x7fe8ff, 0.026, 0.016,
+    );
+    pendingArrow.line.material.transparent = true;
+    pendingArrow.line.material.opacity = 0.85;
+    pendingArrow.line.material.depthTest = false;
+    pendingArrow.cone.material.transparent = true;
+    pendingArrow.cone.material.opacity = 0.85;
+    pendingArrow.cone.material.depthTest = false;
+    pendingOrb.add(pendingArrow);
+
+    pendingOrb.visible = false;
+    pendingArrow.visible = false;
+}
+
+/**
+ * 更新待发目标预览。
+ *
+ * @param {number[]|null} pos 世界坐标; 传 null 表示无待发修改, 隐藏预览
+ * @param {number[]|null} quat 目标姿态四元数; 缺省时朝向不更新 (保留上次)
+ * @returns {boolean} 是否处于预览态
+ */
+export function updatePendingMarker(pos, quat) {
+    if (!pendingOrb) return false;
+    if (!pos || !Number.isFinite(pos[0])) {
+        if (pendingOrb.visible) {
+            pendingOrb.visible = false;
+            pendingArrow.visible = false;
+        }
+        return false;
+    }
+    pendingOrb.position.set(pos[0], pos[1], pos[2]);
+    if (quat && quat.length === 4) {
+        pendingOrb.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
+    }
+    pendingOrb.visible = true;
+    pendingArrow.visible = true;
+    return true;
 }
 
 function initErrorLine() {

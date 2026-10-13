@@ -19,13 +19,14 @@ import {
     setDemoButtonState,
     resetStand,
     startDemo,
-    applyReachEnvelope, setArmChangeHandler,
+    applyReachEnvelope, setArmChangeHandler, setPendingPreviewHandler,
 } from "./command.js";
 
 import { initViewport, ViewportUnavailableError, resetCamera, toggleGrid, disposeViewport } from "./viewport/scene.js";
 import {
     initOverlays, updatePoseMarkers, updateErrorLine, updateComMarkers,
     updateDemoOverlays, updateReachBox, toggleReachBox, reachBoxSizeText,
+    updatePendingMarker,
 } from "./viewport/overlays.js";
 import { initRobotModel, updateVisuals, highlightLinks } from "./viewport/robot.js";
 
@@ -166,6 +167,9 @@ function bindGlobalActions() {
 
     // 切臂后刷新滑块量程与视口线框盒
     setArmChangeHandler(() => applyReachBox());
+
+    // 拖滑块时在 3D 里即时预览待发位姿 —— 先看见再决定是否下发
+    setPendingPreviewHandler((pos, quat) => updatePendingMarker(pos, quat));
 
     el("btnToggleGrid").addEventListener("click", () => {
         const visible = toggleGrid();

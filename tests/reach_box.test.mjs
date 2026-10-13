@@ -29,10 +29,10 @@ function test(name, fn) {
 
 /* ══════════════════════ 与 overlays.js 同构的实现 ══════════════════════ */
 
-const REACH_BOX_VERTS = 16;
+const REACH_BOX_VERTS = 24;
 
 /**
- * 底面矩形 (4 边) + 四角立柱 (4 边), 共 8 段 = 16 顶点。
+ * 完整 12 条棱 (底面 4 + 顶面 4 + 立柱 4), 共 12 段 = 24 顶点。
  * @returns {number[][]} 扁平的顶点列表 [x0,y0,z0, x1,y1,z1, ...]
  */
 function buildBoxVertices(env) {
@@ -44,13 +44,18 @@ function buildBoxVertices(env) {
     const v = [];
     const push = (x, y, z) => v.push([x, y, z]);
 
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 4; i++) {          // 底面 4 边
         const p = b[i], q = b[(i + 1) % 4];
-        push(p[0], p[1], lo[2]);          // 底面 4 边
+        push(p[0], p[1], lo[2]);
         push(q[0], q[1], lo[2]);
     }
-    for (const [x, y] of b) {
-        push(x, y, lo[2]);                // 四角立柱
+    for (let i = 0; i < 4; i++) {          // 顶面 4 边 —— 缺失则立柱悬空无收口
+        const p = b[i], q = b[(i + 1) % 4];
+        push(p[0], p[1], hi[2]);
+        push(q[0], q[1], hi[2]);
+    }
+    for (const [x, y] of b) {              // 四角立柱
+        push(x, y, lo[2]);
         push(x, y, hi[2]);
     }
     return v;
@@ -76,7 +81,7 @@ const ENV = {
 
 /* ══════════════════════ 用例 ══════════════════════ */
 
-test("生成 16 个顶点 (8 段 × 2 端点), 与缓冲区一致", () => {
+test("生成 24 个顶点 (12 段 × 2 端点), 与缓冲区一致", () => {
     // 缓冲区大小必须与实际填充量一致: 多分配的顶点停留在 (0,0,0),
     // 会在世界原点画出退化的零长线段, 表现为凭空出现的细小线头。
     const v = buildBoxVertices(ENV);
@@ -86,20 +91,23 @@ test("生成 16 个顶点 (8 段 × 2 端点), 与缓冲区一致", () => {
 
 test("底面 4 条边全部落在 z 下界", () => {
     const v = buildBoxVertices(ENV);
-    for (let i = 0; i < 16; i += 2) {
-        if (i >= 16) break;
-        const a = v[i], b = v[i + 1];
-        // 前 4 段是底面 (索引 0..7 的端点), 后 4 段是立柱
-        if (i < 8) {
-            assert.equal(a[2], ENV.z.min, `底面边 ${i / 2} 起点 z 应为下界`);
-            assert.equal(b[2], ENV.z.min, `底面边 ${i / 2} 终点 z 应为下界`);
-        }
+    for (let i = 0; i < 8; i += 2) {      // 前 4 段是底面
+        assert.equal(v[i][2], ENV.z.min, `底面边 ${i / 2} 起点 z 应为下界`);
+        assert.equal(v[i + 1][2], ENV.z.min, `底面边 ${i / 2} 终点 z 应为下界`);
+    }
+});
+
+test("顶面 4 条边完整闭合 (缺失则立柱悬空, 读起来像未完成的笼子)", () => {
+    const v = buildBoxVertices(ENV);
+    for (let i = 8; i < 16; i += 2) {     // 次 4 段是顶面
+        assert.equal(v[i][2], ENV.z.max, `顶面边 ${(i - 8) / 2} 起点 z 应为上界`);
+        assert.equal(v[i + 1][2], ENV.z.max, `顶面边 ${(i - 8) / 2} 终点 z 应为上界`);
     }
 });
 
 test("四角立柱一端在底面、一端在顶面, 且 XY 保持不变", () => {
     const v = buildBoxVertices(ENV);
-    for (let i = 8; i < 16; i += 2) {
+    for (let i = 16; i < 24; i += 2) {
         const a = v[i], b = v[i + 1];
         assert.equal(a[0], b[0], `立柱 ${i} 的 x 应保持不变`);
         assert.equal(a[1], b[1], `立柱 ${i} 的 y 应保持不变`);
@@ -110,7 +118,7 @@ test("四角立柱一端在底面、一端在顶面, 且 XY 保持不变", () =>
 
 test("立柱高度等于包围盒 Z 跨度", () => {
     const v = buildBoxVertices(ENV);
-    const h = v[9][2] - v[8][2];
+    const h = v[17][2] - v[16][2];
     assert.ok(Math.abs(h - (ENV.z.max - ENV.z.min)) < 1e-9,
         `立柱高度 ${h} 与 Z 跨度 ${ENV.z.max - ENV.z.min} 不符`);
 });
@@ -124,14 +132,20 @@ test("底面矩形覆盖完整的 X / Y 跨度", () => {
     assert.ok(Math.abs(Math.max(...ys) - ENV.y.max) < 1e-9, "底面未覆盖 y 上界");
 });
 
-test("不画顶面 (顶面线会横穿机器人上半身)", () => {
-    // 顶面边应不存在: 即没有任何一条线段的两个端点 z 都等于上界
+test("立方体闭合: 每个角点的三条棱都存在", () => {
+    // 半吊子画法 (只画部分边) 会让盒子读起来缺一块 —— 这正是本特性迭代过
+    // 两版都被否的共同原因。此处断言 12 条棱构成完整闭合体。
     const v = buildBoxVertices(ENV);
-    const topEdges = [];
+    assert.equal(v.length / 2, 12, "应为 12 条线段");
+    const lo = [ENV.x.min, ENV.y.min, ENV.z.min], hi = [ENV.x.max, ENV.y.max, ENV.z.max];
+    const corners = new Set();
+    for (const a of [lo[0], hi[0]]) for (const b of [lo[1], hi[1]]) for (const c of [lo[2], hi[2]])
+        corners.add(`${a},${b},${c}`);
+    // 每条线段至少一端是角点 (立方体的所有棱都是角点间的连线)
     for (let i = 0; i < v.length; i += 2) {
-        if (v[i][2] === ENV.z.max && v[i + 1][2] === ENV.z.max) topEdges.push(i / 2);
+        const k = `${v[i][0]},${v[i][1]},${v[i][2]}`;
+        assert.ok(corners.has(k), `线段 ${i / 2} 的起点不是角点`);
     }
-    assert.equal(topEdges.length, 0, `不应存在顶面线段, 实得 ${topEdges.length} 条`);
 });
 
 test("所有顶点均在包围盒内", () => {

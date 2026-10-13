@@ -9,7 +9,7 @@
  */
 
 import { el, requireAll, setText, setClass } from "./dom.js";
-import { fixed, signed } from "./format.js";
+import { fixed, signed, rpyToQuat } from "./format.js";
 import { state, mirrorY, mirrorRpy } from "./state.js";
 import { pushLocalLog } from "./panels/logs.js";
 
@@ -114,6 +114,40 @@ const PRESETS = {
     side: { x: 0.25, y: 0.30, z: 0.82, rpy: [15, 0, 30], name: "侧向取物" },
     cross: { x: 0.28, y: -0.15, z: 0.88, rpy: [-20, 10, -15], name: "胸前交接" },
 };
+
+/**
+ * 待发目标预览回调。由 main.js 注册, 在滑块变动时把位置交给视口渲染,
+ * 使"先看见位姿、再决定是否下发"成为可能 —— 大屏是观测工具, 不该要求用户
+ * 靠侧栏数字想象 3D 位置。
+ * @type {((pos:number[]|null, quat:number[]|null)=>void)|null}
+ */
+let onPendingPreview = null;
+
+/** 注册待发预览回调 @param {(pos:number[]|null, quat:number[]|null)=>void} fn */
+export function setPendingPreviewHandler(fn) { onPendingPreview = fn; }
+
+
+/**
+ * 把当前面板上的待发位姿推给视口。
+ *
+ * 仅在**面板值与机器人实际收到的指令不一致**时才显示预览 —— 一旦下发成功
+ * 或遥测回流一致, 预览自动消失, 避免与实心的"已下发目标"标记重影。
+ *
+ * 右臂时 Y 与部分姿态角需镜像, 否则预览会出现在错误的一侧。
+ */
+function notifyPendingPreview() {
+    if (!onPendingPreview) return;
+    const c = state.cmd;
+    if (!state.cmdPending) {
+        onPendingPreview(null, null);
+        return;
+    }
+    // state.cmd 里姿态是 roll/pitch/yaw 三个独立字段, 不是 rpy 数组
+    onPendingPreview(
+        [c.x, mirrorY(c.y), c.z],
+        rpyToQuat(mirrorRpy([c.roll ?? 0, c.pitch ?? 0, c.yaw ?? 0])),
+    );
+}
 
 /**
  * 切臂回调。由 main.js 注册, 用于让滑块量程与视口线框盒同步换到新操作臂的
@@ -303,6 +337,7 @@ function bindDispatch() {
  */
 export function setAxis(key, value) {
     state.cmd[key] = value;
+    notifyPendingPreview();
     const axis = AXES.find((a) => a[0] === key);
     if (!axis) return;
     const [, sliderId, numId] = axis;
@@ -355,6 +390,7 @@ const KEYS = ["x", "y", "z", "roll", "pitch", "yaw"];
 function setPending(pending) {
     if (state.cmdPending === pending) return;
     state.cmdPending = pending;
+    notifyPendingPreview();
     const btn = el("btnDispatchTarget");
     if (btn) btn.classList.toggle("has-pending", pending);
     setText(el("btnDispatchTarget"), pending ? "下发 6D 目标位姿 *" : "下发 6D 目标位姿");
@@ -436,6 +472,7 @@ export async function dispatch(cmd, presetName) {
         if (resp.ok && res.status === "DISPATCHED") {
             // 服务器已接收, 本地值不再是"未下发修改"
             state.cmdPending = false;
+            notifyPendingPreview();          // 已下发, 撤回预览标记
             el("btnDispatchTarget")?.classList.remove("has-pending");
             setText(el("btnDispatchTarget"), "下发 6D 目标位姿");
             pushLocalLog("COMMAND", `下发目标: ${presetName}`,

@@ -255,3 +255,36 @@ export function pick(obj, key, fallback = null) {
     const v = obj[key];
     return v === undefined || v === null ? fallback : v;
 }
+/* ═══════════════════ 姿态换算 (与后端约定一致) ═══════════════════ */
+
+/**
+ * 欧拉角 (度, 弧) → 四元数 [x, y, z, w]。
+ *
+ * 旋转约定必须与后端严格一致, 否则视口里的箭头会指向与指令不符的方向 ——
+ * 那比不显示朝向更糟。后端统一使用 `pin.rpy.rpyToMatrix(r, p, y)`, 即
+ *
+ *     R = Rz(yaw) · Ry(pitch) · Rx(roll)
+ *
+ * (与 URDF 的 rpy 约定同源)。此处按同一乘序展开, 不另立标准。
+ *
+ * @param {number[]} rpyDeg [roll, pitch, yaw], 单位度
+ * @returns {number[]} [x, y, z, w]
+ */
+export function rpyToQuat(rpyDeg) {
+    const d = Math.PI / 180;
+    const r = (rpyDeg?.[0] ?? 0) * d;
+    const p = (rpyDeg?.[1] ?? 0) * d;
+    const y = (rpyDeg?.[2] ?? 0) * d;
+
+    const cr = Math.cos(r / 2), sr = Math.sin(r / 2);
+    const cp = Math.cos(p / 2), sp = Math.sin(p / 2);
+    const cy = Math.cos(y / 2), sy = Math.sin(y / 2);
+
+    // Rz(y)·Ry(p)·Rx(r) 的四元数展开
+    return [
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    ];
+}
