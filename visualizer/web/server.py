@@ -73,6 +73,8 @@ except ImportError:
 #: 6 万样本下典型采样间距约 10mm, 构建约 2.7s。
 REACH_INDEX_SAMPLES = 60000
 REACH_INDEX_TOLERANCE_M = 0.030
+#: 滑块/粗筛范围相对实测包围盒的内缩比例 —— 边界处 IK 收敛率显著下降
+SLIDER_INSET = 0.85
 
 FALLBACK_REACH_ENVELOPE = {
     "x": {"min": 0.05, "max": 0.45},
@@ -230,9 +232,13 @@ class RobotTelemetryManager:
                     samples=REACH_INDEX_SAMPLES,
                     tolerance=REACH_INDEX_TOLERANCE_M,
                 )
-                self._reach_envelope[_arm] = self.kin.compute_reach_envelope(
-                    _arm, samples=4000, front_only=True)
                 _d = self._reach_index[_arm].describe()
+                # 滑块范围直接取自索引的采样包围盒, 而非另算一套 ——
+                # 两套数值不同会让用户在报错里看到的数字与滑块对不上。
+                # front_only 由索引的 x 下界置 0 实现 (身后属奇异区)。
+                _p_min, _p_max = self._reach_index[_arm].bounds()
+                self._reach_envelope[_arm] = self._kin_slider_envelope(
+                    _p_min, _p_max, _arm)
                 print(f"[Web 纯遥测后端] {_arm} 可达性索引就绪 ({time.time() - _t0:.1f}s): "
                       f"{_d['samples']} 采样, 容差 {_d['tolerance_mm']}mm, "
                       f"包围盒 X[{_d['bbox']['x'][0]:+.3f},{_d['bbox']['x'][1]:+.3f}] "
@@ -271,6 +277,28 @@ class RobotTelemetryManager:
             elapsed = time.time() - t0
             sleep_time = max(0.001, interval - elapsed)
             time.sleep(sleep_time)
+
+    def _kin_slider_envelope(self, p_min, p_max, arm: str) -> Dict[str, Dict[str, float]]:
+        """由可达性索引的采样包围盒推导滑块范围与粗筛范围。
+
+        位置直接采用索引包围盒 (X 下界置 0, 身后为贴近躯干的奇异区), 并按
+        ``INSET`` 内缩避开边界 —— 边界处 IK 收敛率显著下降。
+
+        姿态仍走 ``compute_reach_envelope``: 索引只存末端位置, 不含朝向。
+        """
+        env = self.kin.compute_orientation_envelope(arm)
+        out: Dict[str, Dict[str, float]] = {}
+        for i, key in enumerate(("x", "y", "z")):
+            lo = float(p_min[i])
+            if key == "x":
+                lo = max(lo, 0.0)          # front_only
+            hi = float(p_max[i])
+            c = (lo + hi) * 0.5
+            half = (hi - lo) * 0.5 * SLIDER_INSET
+            out[key] = {"min": round(c - half, 4), "max": round(c + half, 4)}
+        for key in ("roll", "pitch", "yaw"):
+            out[key] = env[key]
+        return out
 
     def _build_model_info(self) -> Dict[str, Any]:
         """汇总机器人静态元信息, 供前端按实际模型动态渲染。

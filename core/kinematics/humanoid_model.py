@@ -457,6 +457,22 @@ class HumanoidKinematicsModel:
         com = pin.centerOfMass(self.model, self.data, q_full)
         return com.copy()
 
+    def compute_orientation_envelope(
+        self, arm: str = "left_arm", samples: int = 4000, seed: int = 20240501,
+        inset: float = 0.85,
+    ) -> Dict[str, Dict[str, float]]:
+        """仅计算末端姿态 (RPY) 的可达范围。
+
+        位置范围由可达性索引 (:mod:`core.kinematics.reachability`) 给出 ——
+        它用更密的采样建 KD 树, 精度更高; 此处只补索引不覆盖的朝向维度。
+
+        :return: ``{"roll": {...}, "pitch": {...}, "yaw": {...}}``, 单位度
+        """
+        return {k: v for k, v in
+                self.compute_reach_envelope(arm, samples=samples, seed=seed,
+                                            inset=inset).items()
+                if k in ("roll", "pitch", "yaw")}
+
     def compute_reach_envelope(
         self,
         arm: str = "left_arm",

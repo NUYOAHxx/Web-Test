@@ -38,6 +38,15 @@ const AXES = [
 const DIGITS = { x: 3, y: 3, z: 3, roll: 1, pitch: 1, yaw: 1 };
 
 /**
+ * 已应用的包络签名 —— 避免每帧重复写入滑块属性。
+ *
+ * `model_info` 在增量推送下会被合并进累积态并**每帧都存在**, 因此本函数
+ * 实际以 60Hz 被调用。若不加签名判断, 每帧要写 12 个 DOM 元素的
+ * min/max/step, 纯属无谓开销 —— 这些值对同一模型恒定不变。
+ */
+let appliedEnvelopeKey = "";
+
+/**
  * 按服务端实测的可达包络设置滑块范围。
  *
  * 范围原先写死在 HTML 的 min/max 里, 与服务端的校验字典各存一份, 两处无关联:
@@ -48,6 +57,7 @@ const DIGITS = { x: 3, y: 3, z: 3, roll: 1, pitch: 1, yaw: 1 };
  * 缩放, 保持"一次滚轮 ≈ 一个自然步长"的精度直觉。
  *
  * @param {object} info 服务端 model_info
+ * @returns {boolean} 范围是否发生变化 (未变化时不做任何写入)
  */
 export function applyReachEnvelope(info) {
     const envelopes = info?.reach_envelope;
@@ -56,6 +66,11 @@ export function applyReachEnvelope(info) {
     // 右臂优先用右臂包络; 未下发该臂时退回左臂
     const env = envelopes[state.arm] || envelopes.left_arm;
     if (!env) return false;
+
+    // 签名含臂名: 切换操作臂后包络不同, 必须重新应用
+    const key = `${state.arm}|${AXES.map(([a]) => `${a}:${env[a]?.min}:${env[a]?.max}`).join(",")}`;
+    if (key === appliedEnvelopeKey) return false;
+    appliedEnvelopeKey = key;
 
     for (const [axis, sliderId, numId] of AXES) {
         const box = env[axis];

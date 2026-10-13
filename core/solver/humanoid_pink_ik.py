@@ -267,11 +267,31 @@ class HumanoidKinematicsAdapter:
         # 复用统一运动学引擎 (接受任意 URDF, 已含降维子模型 / SRDF ACM / 碰撞几何 /
         # 平衡与可操作度等遥测), 避免在本文件重复实现一套模型构建逻辑。
         from core.kinematics.humanoid_model import HumanoidKinematicsModel
+        from core.kinematics.robot_profile import RobotProfile
 
-        self._engine = HumanoidKinematicsModel(urdf_path=self.urdf_path, srdf_path=self.srdf_path)
-        if waist_joint_names:
-            self._engine.waist_joint_names = list(waist_joint_names)
-            self._engine.waist_dim = len(waist_joint_names)
+        # 覆盖项通过**机器人档案**传入, 而非在构造后直接改写引擎字段。
+        # 后者会绕过校验, 且不更新派生字段, 产出自相矛盾的状态 ——
+        # 实测传入 3 个腰部关节时 waist_dim=3 而 waist_limits 长度仍为 2、
+        # chain_9dof 长度仍为 9 (应为 10), 且不报任何错。
+        # 走档案则由 resolve() 统一校验并重算全部派生量。
+        profile: Optional[RobotProfile] = None
+        if waist_joint_names or arm_joint_names or ee_frame_names:
+            base = RobotProfile.load_for_urdf(self.urdf_path)
+            if waist_joint_names:
+                base.waist_joint_names = list(waist_joint_names)
+            if arm_joint_names:
+                base.left_arm_joint_names = list(
+                    arm_joint_names.get("left_arm", base.left_arm_joint_names))
+                base.right_arm_joint_names = list(
+                    arm_joint_names.get("right_arm", base.right_arm_joint_names))
+            if ee_frame_names:
+                base.left_ee_frame = ee_frame_names.get("left_arm", base.left_ee_frame)
+                base.right_ee_frame = ee_frame_names.get("right_arm", base.right_ee_frame)
+            profile = base
+
+        self._engine = HumanoidKinematicsModel(
+            urdf_path=self.urdf_path, srdf_path=self.srdf_path, profile=profile,
+        )
 
         self.model: pin.Model = self._engine.model
         self.data: pin.Data = self._engine.data
