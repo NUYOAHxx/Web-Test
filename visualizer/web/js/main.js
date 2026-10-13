@@ -19,11 +19,14 @@ import {
     setDemoButtonState,
     resetStand,
     startDemo,
-    applyReachEnvelope,
+    applyReachEnvelope, setArmChangeHandler,
 } from "./command.js";
 
 import { initViewport, ViewportUnavailableError, resetCamera, toggleGrid, disposeViewport } from "./viewport/scene.js";
-import { initOverlays, updatePoseMarkers, updateErrorLine, updateComMarkers, updateDemoOverlays } from "./viewport/overlays.js";
+import {
+    initOverlays, updatePoseMarkers, updateErrorLine, updateComMarkers,
+    updateDemoOverlays, updateReachBox, toggleReachBox, reachBoxSizeText,
+} from "./viewport/overlays.js";
 import { initRobotModel, updateVisuals, highlightLinks } from "./viewport/robot.js";
 
 import { renderPose } from "./panels/pose.js";
@@ -55,6 +58,7 @@ const REQUIRED_IDS = [
     "posErrNum", "rotErrNum", "streamHzNum", "packetCountText",
     // 视口
     "threeCanvasContainer", "viewportFallback", "btnResetCamera", "btnToggleGrid",
+    "btnToggleReachBox", "vpReachBoxBadge",
     "viewportMeshCount", "vpCollisionBadge", "vpCollisionCount",
     // 顶栏模型描述 (按实际模型动态生成, 不写死)
     "brandSub",
@@ -137,6 +141,13 @@ function showViewportFallback(reason) {
             `遥测 / 关节 / 碰撞等全部数据面板仍正常工作。<br />` +
             `可尝试启用浏览器硬件加速后刷新页面。`;
     }
+
+    // 视口专属控件一并隐藏。
+    // 此前"可达范围盒"按钮在降级模式下仍可点击, 点击无任何反应 (initOverlays
+    // 从未执行), 看起来像功能坏了。改为直接隐藏, 让降级状态自洽。
+    for (const id of ["btnToggleReachBox", "btnToggleGrid", "btnResetCamera", "vpReachBoxBadge"]) {
+        setHidden(el(id), true);
+    }
 }
 
 /**
@@ -153,9 +164,19 @@ function bindGlobalActions() {
     el("btnResetStand").addEventListener("click", resetStand);
     el("btnResetCamera").addEventListener("click", resetCamera);
 
+    // 切臂后刷新滑块量程与视口线框盒
+    setArmChangeHandler(() => applyReachBox());
+
     el("btnToggleGrid").addEventListener("click", () => {
         const visible = toggleGrid();
         pushLocalLog("VIEW", visible ? "显示地面网格" : "隐藏地面网格", "视口显示项切换");
+    });
+
+    el("btnToggleReachBox").addEventListener("click", () => {
+        const visible = toggleReachBox();
+        const size = reachBoxSizeText();
+        pushLocalLog("VIEW", visible ? "显示可达范围盒" : "隐藏可达范围盒",
+            size ? `${state.arm} 实测可达范围 ${size}` : "尚未收到实测包络");
     });
 
     // 重力力矩面板使用原生 <details>, HTML 初始为 open, 箭头须与之一致
@@ -183,6 +204,25 @@ function onLinkChange(online) {
  * @param {object} data
  */
 /**
+ * 把实测包络应用到两处消费方: 指令面板滑块范围、视口线框盒。
+ *
+ * 集中在一个函数里, 是因为两者必须**始终同源** —— 滑块能滑到的范围与视口里
+ * 画出的可达盒若不一致, 用户会以画为准则, 而滑块却发出越界指令。
+ * 切臂时也走这里, 保证换臂后两侧同步更新。
+ */
+function applyReachBox() {
+    const info = state.modelInfo;
+    if (!info?.reach_envelope) return;
+
+    applyReachEnvelope(info);
+
+    if (updateReachBox(info.reach_envelope, state.arm)) {
+        const size = reachBoxSizeText();
+        if (size) setText(el("vpReachBoxBadge"), size);
+    }
+}
+
+/**
  * 按服务端下发的模型元信息渲染动态文案。
  *
  * 顶栏的模型描述此前写死为 "GENERIC HUMANOID · 29-DoF MODEL", 换用其他 URDF
@@ -206,8 +246,7 @@ function onTelemetryFrame(data) {
     if (data.model_info) {
         state.modelInfo = data.model_info;
         renderModelInfo(data.model_info);
-        // 滑块范围与后端指令校验共用同一份实测包络
-        applyReachEnvelope(data.model_info);
+        applyReachBox();          // 滑块范围 + 视口线框盒
     }
 
     const cmd = data.cartesian_cmd_pose;

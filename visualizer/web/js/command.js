@@ -115,6 +115,16 @@ const PRESETS = {
     cross: { x: 0.28, y: -0.15, z: 0.88, rpy: [-20, 10, -15], name: "胸前交接" },
 };
 
+/**
+ * 切臂回调。由 main.js 注册, 用于让滑块量程与视口线框盒同步换到新操作臂的
+ * 实测可达范围 —— 两者由 main.js 的 applyReachBox() 统一刷新, 保证同源。
+ * @type {(()=>void)|null}
+ */
+let onArmChanged = null;
+
+/** 注册切臂回调 @param {()=>void} fn */
+export function setArmChangeHandler(fn) { onArmChanged = fn; }
+
 /** 标准直立预备位姿 */
 const STAND_POSE = { x: 0.111, y: 0.212, z: 0.751, rpy: [0, 0, 0] };
 
@@ -476,6 +486,8 @@ async function selectArm(arm) {
     if (changed) {
         // 切臂时 Y 的符号约定翻转, 同步滑块以免面板与实际下发值不一致
         setAxis("y", mirrorY(state.cmd.y));
+        // 左右臂的可达范围不同, 滑块量程与视口线框盒都要跟着换
+        onArmChanged?.();
     }
 
     try {

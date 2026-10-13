@@ -283,6 +283,7 @@
             <div class="viewport-overlay top-right">
                 <button class="btn-glass" id="btnResetCamera" type="button">复位视角</button>
                 <button class="btn-glass" id="btnToggleGrid" type="button">切换网格</button>
+                <button class="btn-glass" id="btnToggleReachBox" type="button">可达范围盒</button>
             </div>
 
             <div class="viewport-overlay bottom-left">
@@ -299,6 +300,7 @@
                 <div class="viewport-stats">
                     <span class="vp-stat"><i>报文</i><b id="packetCountText">0</b></span>
                     <span class="vp-stat"><i>视口</i><b id="viewportMeshCount">—</b></span>
+                    <span class="vp-stat" title="该臂末端实测可达工作空间线框盒尺寸"><i>可达盒</i><b id="vpReachBoxBadge">—</b></span>
                     <span class="vp-stat vp-stat-alert" id="vpCollisionBadge" hidden>
                         <i>碰撞</i><b id="vpCollisionCount">0</b>
                     </span>

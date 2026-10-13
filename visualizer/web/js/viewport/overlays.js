@@ -20,6 +20,9 @@ let supportPolygon = null;
 let orbitRing = null;
 let motionTrail = null;
 
+/** 目标球上一次是否处于"越界"状态 —— 用于只在跨过边界时改色, 避免每帧写材质 */
+let _targetWasOutside = false;
+
 /** 拖尾历史点 (运动轨迹流光) */
 const trailHistory = [];
 const MAX_TRAIL = 80;
@@ -41,7 +44,124 @@ export function initOverlays() {
     initSupportPolygon();
     initOrbitRing();
     initMotionTrail();
+    initReachBox();
     onFrame(animateOverlays);
+}
+
+/* ═════════════════════ 可达工作空间参照盒 ═════════════════════ */
+
+/**
+ * 线框盒: 标出该臂末端**实测可达**的工作空间范围。
+ *
+ * 最初的想法是画一个以世界原点为中心的正方体当距离参照。但任意大小的正方体
+ * 没有物理含义 —— 1m 边长凭什么? 画小了显得手够不到, 画大了又失去参考价值。
+ *
+ * 改用服务端在启动时实测的可达包围盒 (model_info.reach_envelope, 与指令可达性
+ * 判定同源), 于是这个盒子直接就是"手能够到的范围":
+ *   - 目标球落在盒内 → 大概率收敛
+ *   - 目标球落在盒外 → 画面上一眼可见地出界, 不必等看日志才发现
+ * 这把"可达性"从一行提示文字变成了空间直觉。
+ *
+ * 注意包围盒是可达集的**超集**: 9-DoF 臂的可达区非凸, 盒内仍可能有够不着的
+ * 角落。因此它只作参照, 不作判据 —— 判定仍由 KD 树完成。
+ */
+let reachBox = null;
+let reachBoxSignature = "";
+
+/** @type {{min:[number,number,number], max:[number,number,number], arm:string}|null} */
+let reachBoxBounds = null;
+
+function initReachBox() {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(24 * 3), 3));
+    reachBox = addToScene(new THREE.LineSegments(
+        geo,
+        new THREE.LineBasicMaterial({
+            color: 0x00c8e0, transparent: true, opacity: 0.34, depthWrite: false,
+        })
+    ));
+    reachBox.renderOrder = 998;      // 压在机身之下, 不遮挡关节观察
+    reachBox.frustumCulled = false;
+    // 默认显示 —— 这正是用户要的距离参照。收到 model_info 前盒体尺寸为零,
+    // 几何体退化成一个点, 不会造成可见干扰。
+    reachBox.visible = true;
+}
+
+const _cornerIndex = [
+    [0, 1], [1, 3], [3, 2], [2, 0],   // 底面 4 边
+    [4, 5], [5, 7], [7, 6], [6, 4],   // 顶面 4 边
+    [0, 4], [1, 5], [2, 6], [3, 7],   // 4 条竖边
+];
+
+/**
+ * 按实测包围盒重绘线框。
+ *
+ * @param {object} envelope model_info.reach_envelope
+ * @param {string} arm 当前操作臂
+ * @returns {boolean} 盒��是否发生变化
+ */
+export function updateReachBox(envelope, arm) {
+    if (!reachBox || !envelope) return false;
+    const env = envelope[arm] || envelope.left_arm;
+    if (!env || !env.x || !env.y || !env.z) return false;
+
+    const sig = `${arm}|${env.x.min},${env.x.max},${env.y.min},${env.y.max},${env.z.min},${env.z.max}`;
+    if (sig === reachBoxSignature) return false;
+    reachBoxSignature = sig;
+
+    const lo = [env.x.min, env.y.min, env.z.min];
+    const hi = [env.x.max, env.y.max, env.z.max];
+    const c = [
+        [lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]], [hi[0], hi[1], lo[2]], [lo[0], hi[1], lo[2]],
+        [lo[0], lo[1], hi[2]], [hi[0], lo[1], hi[2]], [hi[0], hi[1], hi[2]], [lo[0], hi[1], hi[2]],
+    ];
+    const pos = reachBox.geometry.getAttribute("position");
+    let k = 0;
+    for (const [a, b] of _cornerIndex) {
+        pos.setXYZ(k++, c[a][0], c[a][1], c[a][2]);
+        pos.setXYZ(k++, c[b][0], c[b][1], c[b][2]);
+    }
+    pos.needsUpdate = true;
+    reachBox.geometry.computeBoundingSphere();
+
+    reachBoxBounds = { min: lo, max: hi, arm };
+    return true;
+}
+
+/** 切换线框盒显隐 @returns {boolean} 切换后是否可见 */
+export function toggleReachBox() {
+    if (!reachBox) return false;
+    reachBox.visible = !reachBox.visible;
+    return reachBox.visible;
+}
+
+/** @returns {boolean} 线框盒当前是否可见 */
+export function isReachBoxVisible() {
+    return !!reachBox?.visible;
+}
+
+/** @returns {string|null} 线框盒尺寸描述 (米), 未就绪时为 null */
+export function reachBoxSizeText() {
+    if (!reachBoxBounds) return null;
+    const { min, max } = reachBoxBounds;
+    return `${(max[0] - min[0]).toFixed(2)} × ${(max[1] - min[1]).toFixed(2)} × ${(max[2] - min[2]).toFixed(2)} m`;
+}
+
+/**
+ * 目标是否落在可达盒之外 —— 用于把目标球染成告警色。
+ *
+ * 越界只改**颜色**, 不改指令流: 大屏用于观察, 用户应能自行决定是否下发。
+ *
+ * @param {number[]} pos 目标世界坐标
+ * @returns {boolean}
+ */
+export function isTargetOutsideReachBox(pos) {
+    if (!reachBoxBounds || !Array.isArray(pos) || pos.length < 3) return false;
+    const { min, max } = reachBoxBounds;
+    for (let i = 0; i < 3; i++) {
+        if (!(pos[i] >= min[i] && pos[i] <= max[i])) return true;
+    }
+    return false;
 }
 
 function initTargetOrb() {
@@ -174,6 +294,16 @@ export function updatePoseMarkers(cmdPos, cmdQuat, actPos, actQuat) {
         targetOrb.position.set(cmdPos[0], cmdPos[1], cmdPos[2]);
         if (cmdQuat && cmdQuat.length === 4) {
             targetOrb.quaternion.set(cmdQuat[0], cmdQuat[1], cmdQuat[2], cmdQuat[3]);
+        }
+        // 目标落在可达盒之外时染成告警色 —— 空间上直接可见"出界了",
+        // 不必等读日志。仍不阻止下发: 大屏用于观察。
+        const outside = isTargetOutsideReachBox(cmdPos);
+        if (outside !== _targetWasOutside) {
+            _targetWasOutside = outside;
+            const mat = targetOrb.material;
+            mat.color.setHex(outside ? 0xff5566 : 0x00ff88);
+            mat.emissive.setHex(outside ? 0xff5566 : 0x00ff88);
+            targetRing.material.color.setHex(outside ? 0xff5566 : 0x00ff88);
         }
     }
     if (actualOrb && actPos) {
