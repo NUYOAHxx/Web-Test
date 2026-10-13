@@ -96,6 +96,21 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/*
+ * [hidden] 全局兜底。
+ *
+ * `hidden` 属性的 UA 默认样式是 `display: none`, 但**任何一条组件级的
+ * `display` 声明都会覆盖它** —— 因为类选择器特异性 (0,1,0) 高于 UA 的
+ * 属性选择器兜底。此前这靠逐个组件补 `X[hidden] { display: none }` 维持,
+ * 已经打了 5 处补丁; 新加的 .legend-item (display:flex) 就漏了, 导致
+ * "待发预览" 图例项在下发完成后仍常驻可见。
+ *
+ * 这里用一条全局规则终结打补丁: `hidden` 是语义属性, 语义属性的意图不应
+ * 被组件样式覆盖, 所以这里必须是 !important —— 少了它, 上面那 5 条补丁
+ * 的历史就会重演。
+ */
+[hidden] { display: none !important; }
+
 html, body {
     margin: 0;
     padding: 0;
@@ -827,7 +842,6 @@ input[type="range"].fine-drag::-moz-range-thumb {
 }
 .vp-stat i { font-style: normal; font-size: 9px; color: var(--text-muted); }
 .vp-stat b { color: var(--text-primary); font-weight: 500; }
-.vp-stat[hidden] { display: none; }
 
 /* 碰撞角标: 与模型上的标红零件呼应, 提示"红色是哪里来的" */
 .vp-stat-alert {
@@ -966,12 +980,10 @@ input[type="range"].fine-drag::-moz-range-thumb {
 }
 
 .trace-steps-footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.trace-steps-footer[hidden] { display: none; }
 .steps-summary-info { font-family: var(--font-mono); font-size: 8.5px; color: var(--text-muted); }
 
 /* ── 绘图区 ── */
 .trace-view-panel { padding: 0; flex: 1 1 auto; min-height: 0; display: flex; }
-.trace-view-panel[hidden] { display: none; }
 
 .trace-canvas-wrap {
     position: relative;
@@ -1024,7 +1036,6 @@ input[type="range"].fine-drag::-moz-range-thumb {
     white-space: nowrap;
     z-index: 6;
 }
-.trace-tooltip[hidden] { display: none; }
 .tip-seed { opacity: 0.68; }
 
 .trace-steps-table-container {
@@ -1195,7 +1206,6 @@ input[type="range"].fine-drag::-moz-range-thumb {
     border: 1px solid rgba(255, 51, 102, 0.35);
     border-radius: var(--radius-md);
 }
-.collision-alert-box[hidden] { display: none; }
 .alert-header { font-size: 10.5px; color: var(--sev-alert); margin-bottom: 4px; font-weight: 600; }
 .alert-list {
     margin: 0; padding-left: 16px;

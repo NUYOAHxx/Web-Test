@@ -78,7 +78,21 @@ export const state = {
  * @returns {number}
  */
 export function mirrorY(v) {
-    return state.arm === "right_arm" ? -v : v;
+    return mirrorYFor(state.arm, v);
+}
+
+/**
+ * 显式指定操作臂的 Y 镜像 (纯函数, 不读全局状态)。
+ *
+ * 抽出来是为了让「下发 payload 的构造」可被独立测试 —— 镜像漏做或做两次
+ * 都不会抛错, 只会让机器人悄悄走到一个与面板显示相反的位置。
+ *
+ * @param {string} arm
+ * @param {number} v
+ * @returns {number}
+ */
+export function mirrorYFor(arm, v) {
+    return arm === "right_arm" ? -v : v;
 }
 
 /**
@@ -87,6 +101,16 @@ export function mirrorY(v) {
  * @returns {number[]}
  */
 export function mirrorRpy(rpy) {
-    if (state.arm !== "right_arm") return [rpy[0], rpy[1], rpy[2]];
+    return mirrorRpyFor(state.arm, rpy);
+}
+
+/**
+ * 显式指定操作臂的姿态镜像 (纯函数, 不读全局状态)。见 {@link mirrorYFor}。
+ * @param {string} arm
+ * @param {number[]} rpy
+ * @returns {number[]}
+ */
+export function mirrorRpyFor(arm, rpy) {
+    if (arm !== "right_arm") return [rpy[0], rpy[1], rpy[2]];
     return [-rpy[0], rpy[1], -rpy[2]];
 }

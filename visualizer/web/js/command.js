@@ -11,6 +11,7 @@
 import { el, requireAll, setText, setClass } from "./dom.js";
 import { fixed, signed, rpyToQuat } from "./format.js";
 import { state, mirrorY, mirrorRpy } from "./state.js";
+import { buildTargetPayload, panelToWorldPosition, panelToWorldRpy } from "./target_payload.js";
 import { pushLocalLog } from "./panels/logs.js";
 
 /**
@@ -142,10 +143,12 @@ function notifyPendingPreview() {
         onPendingPreview(null, null);
         return;
     }
-    // state.cmd 里姿态是 roll/pitch/yaw 三个独立字段, 不是 rpy 数组
+    // state.cmd 里姿态是 roll/pitch/yaw 三个独立字段, 不是 rpy 数组。
+    // 换算复用 target_payload —— 预览与下发必须走同一条规则, 否则会出现
+    // "预览画在一处、机器人走向另一处", 且无任何报错。
     onPendingPreview(
-        [c.x, mirrorY(c.y), c.z],
-        rpyToQuat(mirrorRpy([c.roll ?? 0, c.pitch ?? 0, c.yaw ?? 0])),
+        panelToWorldPosition(c, state.arm),
+        rpyToQuat(panelToWorldRpy([c.roll ?? 0, c.pitch ?? 0, c.yaw ?? 0], state.arm)),
     );
 }
 
@@ -401,18 +404,17 @@ function setPending(pending) {
  * @param {{x:number,y:number,z:number,rpy:number[],name:string}} preset
  */
 export function applyPreset(preset) {
-    const y = mirrorY(preset.y);
-    const rpy = mirrorRpy(preset.rpy);
     setPending(false);   // 预设即刻下发, 不存在"未下发"中间态
 
     setAxis("x", preset.x);
-    setAxis("y", y);
+    setAxis("y", mirrorY(preset.y));
     setAxis("z", preset.z);
-    setAxis("roll", rpy[0]);
-    setAxis("pitch", rpy[1]);
-    setAxis("yaw", rpy[2]);
+    setAxis("roll", preset.rpy[0]);
+    setAxis("pitch", preset.rpy[1]);
+    setAxis("yaw", preset.rpy[2]);
 
-    dispatch({ x: preset.x, y, z: preset.z, rpy }, preset.name);
+    // 镜像由 dispatch() 统一处理, 此处保持左臂约定原值
+    dispatch({ x: preset.x, y: preset.y, z: preset.z, rpy: preset.rpy }, preset.name);
 }
 
 /**
@@ -449,16 +451,25 @@ function currentCmd() {
  * @param {{x:number,y:number,z:number,rpy:number[]}} cmd
  * @param {string} presetName
  */
+/**
+ * 下发 6D 目标。
+ *
+ * 入参 `cmd` 一律是**左臂约定**的取值 —— 指令面板始终以左臂约定存储
+ * (遥测回流经 syncSlidersFromTelemetry 的 mirrorY 换算), 预设也按左臂约定
+ * 书写。右臂需要的符号翻转在此**唯一一处**完成。
+ *
+ * 此前镜像分散在调用方: 预设路径做了 mirrorY, 手动按钮路径没做。结果是
+ * 右臂下手动下发的 Y (与 RPY 的 Roll/Yaw) 符号相反, 与面板显示的、
+ * 与视口预览所画的都不一致, 且不报错。
+ *
+ * @param {{x:number,y:number,z:number,rpy?:number[]}} cmd 左臂约定
+ * @param {string} presetName
+ */
 export async function dispatch(cmd, presetName) {
     const btn = el("btnDispatchTarget");
     if (btn) btn.disabled = true;
 
-    const payload = {
-        x: cmd.x, y: cmd.y, z: cmd.z,
-        arm: state.arm,
-        preset_name: presetName,
-    };
-    if (Array.isArray(cmd.rpy) && cmd.rpy.length === 3) payload.rpy = cmd.rpy;
+    const payload = buildTargetPayload(cmd, state.arm, presetName);
 
     try {
         const resp = await fetch("/api/send_target", {
