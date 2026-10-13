@@ -62,8 +62,22 @@ class IKSolverNode(Node):
         self.get_logger().info(" [INIT] 人形机器人 9-DoF 躯干-手臂协同 IK 解算服务节点启动中...")
         self.get_logger().info("======================================================")
 
-        # 实例化 Pink 凸优化求解器 (封装 Pinocchio 运动学模型与 28 对碰撞检测器)
-        self.solver = HumanoidPinkIKSolver()
+        # ── 模型路径参数 ──
+        # 默认空字符串 = 使用 HumanoidPinkIKSolver 内置的仓库默认模型。
+        # 显式指定即可让同一份求解器代码适配任意 URDF, 无需改码。
+        self.declare_parameter("urdf_path", "")
+        self.declare_parameter("srdf_path", "")
+        urdf_arg = str(self.get_parameter("urdf_path").value or "").strip()
+        srdf_arg = str(self.get_parameter("srdf_path").value or "").strip()
+
+        # 实例化 Pink 凸优化求解器 (封装 Pinocchio 运动学模型与碰撞检测器)
+        self.solver = HumanoidPinkIKSolver(
+            urdf_path=urdf_arg or None,
+            srdf_path=srdf_arg or None,
+        )
+        self.get_logger().info(
+            f" [MODEL] URDF: {self.solver.urdf_path} | SRDF: {self.solver.srdf_path or '(无, 使用全量配对)'}"
+        )
         # 腰部关节集合别名 —— 统一由此派生, 9-DoF / 9-DoF 模式自动适配
         self._WN: list = list(self.solver.kin.waist_joint_names)
         self._WD: int = self.solver.kin.waist_dim

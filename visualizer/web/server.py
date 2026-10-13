@@ -69,10 +69,17 @@ SAFE_REACH_ENVELOPE = {
 class RobotTelemetryManager:
     """纯被动遥测与指令分发中枢：负责接收遥测、前向位姿计算、碰撞雷达与目标下发"""
 
-    def __init__(self, enable_ros: bool = True):
+    def __init__(
+        self,
+        enable_ros: bool = True,
+        urdf_path: Optional[str] = None,
+        srdf_path: Optional[str] = None,
+    ):
         self.lock = threading.Lock()
-        print("[Web 纯遥测后端] 正在加载 G1 运动学引擎与 28 对安全碰撞检测雷达...")
-        self.kin = HumanoidKinematicsModel()
+        print("[Web 纯遥测后端] 正在加载运动学引擎与安全碰撞检测雷达...")
+        # urdf/srdf 为 None 时沿用 HumanoidKinematicsModel 的仓库内默认模型。
+        # 显式传入即可让大屏适配任意 URDF, 而无需改码。
+        self.kin = HumanoidKinematicsModel(urdf_path=urdf_path, srdf_path=srdf_path)
         self.collision = HumanoidCollisionChecker(self.kin)
 
         # 加载 36 个 3D 官方 CAD STL 视觉网格拓扑
@@ -1001,6 +1008,10 @@ def main():
     parser = argparse.ArgumentParser(description="人形机器人 纯被动遥测与指令分发服务端")
     parser.add_argument("--port", type=int, default=8080, help="Web 监控端口 (默认 8080)")
     parser.add_argument("--no-ros", action="store_true", help="禁用 ROS 2 订阅")
+    parser.add_argument("--urdf", default=None,
+                        help="机器人 URDF 路径 (默认使用仓库内置模型)")
+    parser.add_argument("--srdf", default=None,
+                        help="MoveIt SRDF 路径, 提供后用于允许碰撞矩阵过滤")
     args = parser.parse_args()
 
     print("\n" + "=" * 80)
@@ -1008,7 +1019,11 @@ def main():
     print("=" * 80)
     print(" 架构原则：零 IK 计算 · 纯被动遥测 · 笛卡尔目标指令一键分发")
 
-    MANAGER = RobotTelemetryManager(enable_ros=not args.no_ros)
+    MANAGER = RobotTelemetryManager(
+        enable_ros=not args.no_ros,
+        urdf_path=args.urdf,
+        srdf_path=args.srdf,
+    )
 
     server = ThreadedHTTPServer(("0.0.0.0", args.port), DashboardHTTPHandler)
     print(f"\n🚀 Web 遥测监控大屏已启动: http://localhost:{args.port}")

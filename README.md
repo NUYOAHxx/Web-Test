@@ -363,16 +363,66 @@ pip install -r requirements.txt
 
 ## 6. 快速上手与运行指南
 
-### 方式一：启动 Web 实时数字孪生监控仪表盘 (标准 ROS 2 Launch)
+### 方式一：启动 Web 实时数字孪生监控仪表盘
 
-日常开发与调试推荐方式，通过标准 ROS 2 Launch 协同拉起后台 Headless IK 求解服务节点与 Web 前端数字孪生看板：
+**推荐用一键脚本**，它会自行准备 venv / ROS / 资源前缀，无需任何手工配置：
 
 ```bash
-ros2 launch launch/telemetry_system.launch.py port:=8080
+bash scripts/start_web.sh                      # 默认模型 + Pink 9-DoF 求解器
+bash scripts/start_web.sh --port 9090          # 换端口
+bash scripts/start_web.sh --solver dual_arm    # 换求解器
+bash scripts/start_web.sh --urdf <路径> --srdf <路径>   # 换机器人模型
+bash scripts/start_web.sh --rviz               # 同时拉起桌面端 RViz2
+bash scripts/start_web.sh --help
 ```
-- 默认端口为 `8080`（支持通过 `port:=xxxx` 传入任意自定义端口）。
-- 启动后浏览器访问：**`http://localhost:8080`**。
-- 可在 3D 视口中进行三维拖拽交互，或通过预设点控制机器人手臂并实时监控各关节状态与防碰撞安全雷达。
+
+启动后浏览器访问：**`http://localhost:8080`**。
+
+#### 首次使用前的环境准备
+
+仓库自带资源标记，**不需要**额外的 ROS 工作区。以下两项仅需一次：
+
+```bash
+# 1) 创建 venv —— 必须带 --system-site-packages
+#    rclpy / pinocchio 是针对系统解释器编译的 C 扩展, 隔离的 venv 反而 import 不到
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+> 脚本直接用 `.venv/bin/python3` 执行 launch 文件，而**不**经由 `ros2 launch`。
+> 原因是 `ros2` 命令的 shebang 指向系统 python，走它启动会让 launch 文件内的
+> `sys.executable` 解析成系统解释器，从而把求解器节点也拉起在缺少
+> pinocchio / rclpy 的环境里，且报错信息指向节点本身而非环境，难以及时定位。
+
+#### 启动参数
+
+| 参数 | 默认值 | 说明 |
+|---|---|---|
+| `--port` | `8080` | Web 大屏 HTTP 端口 |
+| `--urdf` | 仓库内置模型 | 机器人 URDF；IK 节点、大屏运动学、TF 树**共用**同一份 |
+| `--srdf` | 仓库内置 SRDF | 允许碰撞矩阵 (ACM)，用于过滤无意义碰撞对 |
+| `--solver` | `pink` | `pink` = 9-DoF 腰臂协同解；`dual_arm` = 双臂独立解 |
+| `--rviz` | 关 | 同时启动桌面端 RViz2 |
+
+换模型只需 `--urdf`：求解器与运动学类本就接受 `urdf_path` / `srdf_path`，
+启动脚本负责把同一路径透传给三个组件（IK 节点、大屏服务端、TF 广播），
+无需改码。
+
+#### 手动启动（不使用脚本）
+
+```bash
+source .venv/bin/activate
+source /opt/ros/jazzy/setup.bash
+export AMENT_PREFIX_PATH="$PWD/resources/ament/install/humanoid_description:$AMENT_PREFIX_PATH"
+.venv/bin/python3 launch/telemetry_system.launch.py port:=8080
+```
+
+`AMENT_PREFIX_PATH` 用于解析 URDF 中的 `package://humanoid_description/...`
+引用，对应标记位于 `resources/ament/`（随仓库提交，其 meshes/urdf/srdf 均为指向
+`resources/humanoid` 的相对符号链接，因此整仓可任意移动或改名）。
+
+> 测试无需准备上述环境：`tests/conftest.py` 会自动注入资源前缀，
+> `pytest tests/` 可直接运行。
 
 ---
 

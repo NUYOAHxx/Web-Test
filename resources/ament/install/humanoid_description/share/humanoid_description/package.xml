@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>humanoid_description</name>
+  <version>1.0.0</version>
+  <description>人形机器人模型资源 (仅用于解析 URDF 中的 package:// 引用)</description>
+  <maintainer email="noreply@example.com">repo</maintainer>
+  <license>Apache-2.0</license>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
