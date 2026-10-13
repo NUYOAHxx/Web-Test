@@ -34,6 +34,7 @@ if DIR_ROOT not in sys.path:
 import numpy as np
 import pinocchio as pin
 
+from core.kinematics import reachability  # noqa: E402
 from core.kinematics.humanoid_model import (
     HumanoidKinematicsModel,
     JOINT_LIMITS,
@@ -67,6 +68,11 @@ except ImportError:
 #
 # 现由机器人档案统一管理, 服务端校验与前端滑块读同一份运行时数据。
 # 计算失败时回退到下面的保守缺省值, 并明确告警 —— 缺省值只是兜底, 不是真源。
+
+#: 可达性索引的采样数与容差。采样越密判定越准, 代价是启动耗时。
+#: 6 万样本下典型采样间距约 10mm, 构建约 2.7s。
+REACH_INDEX_SAMPLES = 60000
+REACH_INDEX_TOLERANCE_M = 0.030
 
 FALLBACK_REACH_ENVELOPE = {
     "x": {"min": 0.05, "max": 0.45},
@@ -204,24 +210,39 @@ class RobotTelemetryManager:
         self._cached_stream_json: str = ""
         # 慢变量推送指纹 (仅服务端内部比对用, 不出现在任何报文中)
         self._last_stream_fps: Dict[str, Any] = {}
-        # 可达包络按臂实测 —— 同时作为后端校验与前端滑块范围的唯一真源。
-        # 必须早于 _build_model_info(): 后者要把包络装进 model_info 一并下发,
-        # 顺序颠倒会让前端收到空的 reach_envelope 而静默沿用 HTML 里的旧范围。
+
+        # ── 可达性索引 ───────────────────────────────────────────────────────────
+        #
+        # 滑块范围 (reach_envelope) 只用来**粗筛**明显离谱的目标, 不能当作可达性
+        # 判据: 末端可达集是非凸的, 包围盒的角点几乎必然落在集外。实测该包围盒
+        # 8 个角点全部无解 (残差 52~262mm), 旧版写死范围也有 6/8 无解 ——
+        # "用盒子判断可达"本身是错的思路。
+        #
+        # 真正的判据是稠密采样建的 KD 树: 查最近的若干候选位姿并逐个做自碰撞判定,
+        # 只要有一个无碰撞即视为可达。查询约 0.1~0.3 ms, 只在用户下发指令时触发。
+        self._reach_index: Dict[str, Any] = {}
         self._reach_envelope: Dict[str, Dict[str, Dict[str, float]]] = {}
         for _arm in ("left_arm", "right_arm"):
             try:
-                self._reach_envelope[_arm] = self.kin.compute_reach_envelope(_arm)
-                _env = self._reach_envelope[_arm]
-                print(f"[Web 纯遥测后端] {_arm} 实测可达包络: "
-                      f"X[{_env['x']['min']:+.3f},{_env['x']['max']:+.3f}] "
-                      f"Y[{_env['y']['min']:+.3f},{_env['y']['max']:+.3f}] "
-                      f"Z[{_env['z']['min']:+.3f},{_env['z']['max']:+.3f}] m | "
-                      f"Pitch[{_env['pitch']['min']:+.0f},{_env['pitch']['max']:+.0f}]° "
-                      f"(无碰撞样本 {_env['_samples']['collision_free']}/{_env['_samples']['total']})")
+                _t0 = time.time()
+                self._reach_index[_arm] = reachability.build_index(
+                    self.kin, _arm,
+                    samples=REACH_INDEX_SAMPLES,
+                    tolerance=REACH_INDEX_TOLERANCE_M,
+                )
+                self._reach_envelope[_arm] = self.kin.compute_reach_envelope(
+                    _arm, samples=4000, front_only=True)
+                _d = self._reach_index[_arm].describe()
+                print(f"[Web 纯遥测后端] {_arm} 可达性索引就绪 ({time.time() - _t0:.1f}s): "
+                      f"{_d['samples']} 采样, 容差 {_d['tolerance_mm']}mm, "
+                      f"包围盒 X[{_d['bbox']['x'][0]:+.3f},{_d['bbox']['x'][1]:+.3f}] "
+                      f"Y[{_d['bbox']['y'][0]:+.3f},{_d['bbox']['y'][1]:+.3f}] "
+                      f"Z[{_d['bbox']['z'][0]:+.3f},{_d['bbox']['z'][1]:+.3f}] m")
             except Exception as exc:
                 self._reach_envelope[_arm] = json.loads(json.dumps(FALLBACK_REACH_ENVELOPE))
-                print(f"[Web 纯遥测后端] [警告] {_arm} 可达包络实测失败 "
-                      f"({type(exc).__name__}: {exc}), 回退到保守缺省值")
+                print(f"[Web 纯遥测后端] [警告] {_arm} 可达性索引构建失败 "
+                      f"({type(exc).__name__}: {exc}), 退化为包围盒粗筛, "
+                      f"可能放过无解目标")
 
         # model_info 必须在包络与力矩上限就绪之后再组装
         self._model_info: Dict[str, Any] = self._build_model_info()
@@ -942,9 +963,9 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                 if arm not in ("left_arm", "right_arm"):
                     raise ValueError(f"Invalid arm '{arm}', must be 'left_arm' or 'right_arm'")
 
-                # 3. 可达工作空间校验 —— 位置与姿态走同一份实测包络。
-                #    该包络由模型实测得出并与前端滑块共用 (见 _reach_envelope),
-                #    不存在"滑块能选但后端拒绝"的可能。
+                # 3. 可达性判定。包围盒只做粗筛 —— 末端可达集是非凸的, 盒子角点几乎必然
+                #    落在集外 (实测 8/8 角点无解, 残差 52~262mm)。真正的判据是
+                #    稠密采样建的 KD 树: 查最近候选位姿并逐个做自碰撞判定。
                 env = (MANAGER._reach_envelope.get(arm)
                        if MANAGER else None) or FALLBACK_REACH_ENVELOPE
 
@@ -955,13 +976,21 @@ class DashboardHTTPHandler(SimpleHTTPRequestHandler):
                 bad = []
                 for axis, value, unit in (("x", x, "m"), ("y", y, "m"), ("z", z, "m")):
                     if not _in(axis, value):
-                        bad.append(f"{axis.upper()}={value:.3f} 允许 "
+                        bad.append(f"{axis.upper()}={value:.3f} 粗筛范围 "
                                    f"[{env[axis]['min']:.3f}, {env[axis]['max']:.3f}]{unit}")
                 if bad:
-                    raise ValueError(
-                        "目标超出该臂实测可达工作空间: " + "; ".join(bad)
-                        + "（范围由当前 URDF 在启动时实测得出）"
-                    )
+                    raise ValueError("目标超出该臂粗筛范围: " + "; ".join(bad))
+
+                index = MANAGER._reach_index.get(arm) if MANAGER else None
+                if index is not None:
+                    reachable, gap = index.query((x, y, z))
+                    if not reachable:
+                        raise ValueError(
+                            f"目标 [{x:.3f}, {y:.3f}, {z:.3f}] 不可达: "
+                            f"距最近的可达位姿 {gap * 1000.0:.0f}mm"
+                            f"（容差 {index.tolerance * 1000.0:.0f}mm）。"
+                            "可达工作空间是非凸的, 请把目标收进实测范围内再下发。"
+                        )
 
                 # 4. 6-DoF 空间朝向欧拉角解析 (Roll, Pitch, Yaw 单位: 度)
                 rpy_raw = data.get("rpy", None)
