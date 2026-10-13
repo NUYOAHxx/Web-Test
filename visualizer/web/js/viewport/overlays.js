@@ -73,11 +73,11 @@ let reachBoxBounds = null;
 
 function initReachBox() {
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(CORNER_BRACKET_VERTS * 3), 3));
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(REACH_BOX_VERTS * 3), 3));
     reachBox = addToScene(new THREE.LineSegments(
         geo,
         new THREE.LineBasicMaterial({
-            color: 0x00c8e0, transparent: true, opacity: 0.42, depthWrite: false,
+            color: 0x00c8e0, transparent: true, opacity: 0.40, depthWrite: false,
         })
     ));
     reachBox.renderOrder = 998;      // 压在机身之下, 不遮挡关节观察
@@ -88,20 +88,23 @@ function initReachBox() {
 }
 
 /**
- * 角括号: 每个角只画 1 段朝盒内的短线, 而不是把 12 条棱整条画出来。
+ * 范围盒的画法: 底面矩形 + 四角立柱, 不画顶面。
  *
- * 完整棱线横穿视野, 会把机器人整体切割成若干块, 视线被这些线反复打断;
- * 而可达范围的**角点**才是真正需要看清的位置 —— 目标球靠近某个角, 就说明
- * 快出界了。角括号保留了"范围到哪儿"的信息, 去掉了横贯画面的噪声。
+ * 迭代过两版, 两次都因"看起来不像盒子"被否:
+ *   · 12 条完整棱 —— 顶面线正好横穿机器人上半身, 把整体切割成几块;
+ *   · 每角 1 段朝内斜线 (角括号) —— 8 段互不相连, 视线无法把它们重建成
+ *     一个盒子, 实际观感是画面里飘着几根随机线段, 比棱线更糟。
  *
- * 每个角一段 (而非沿三轴各一段) 是刻意的: 三段轴向线在 8 个角上共 24 段,
- * 视觉上比 8 段更密, 且容易被误读成"网格"; 单段斜向短线是工程制图里的
- * 经典角括号样式, 8 段足够定位范围, 且完全不与机身轮廓交叠。
+ * 现取中间态:
+ *   · 底面矩形完整画出 —— 它把范围**锚在地面**上, 是"一个区域"最强的空间
+ *     暗示, 也是判断目标是否出界最常参照的一圈;
+ *   · 四角立柱给出高度感, 说明这是有体积的空间而非地面上的一个圈;
+ *   · 不画顶面 —— 顶面线正是穿过头部和胸腔的那些, 去掉后视线豁然开朗,
+ *     而底面 + 立柱已足以还原体积。
  *
- * 线段长度取各轴跨度的 18%, 方向朝包围盒内部 (下界角朝 +, 上界角朝 -)。
+ * 共 8 条线段 = 16 个顶点。
  */
-const BRACKET_RATIO = 0.18;
-const CORNER_BRACKET_VERTS = 8 * 2;   // 8 角 × 1 段 × 2 端点
+const REACH_BOX_VERTS = 16;
 
 /**
  * 按实测包围盒重绘线框。
@@ -121,31 +124,25 @@ export function updateReachBox(envelope, arm) {
 
     const lo = [env.x.min, env.y.min, env.z.min];
     const hi = [env.x.max, env.y.max, env.z.max];
-    const span = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-    const mid = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2];
 
+    // 底面 4 个角 (z = 下界) 与顶面 4 个角 (z = 上界) 一一对应
+    const b = [
+        [lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]],
+    ];
     const pos = reachBox.geometry.getAttribute("position");
+    const put = (x, y, z) => pos.setXYZ(k++, x, y, z);
     let k = 0;
-    for (const cx of [lo[0], hi[0]]) {
-        for (const cy of [lo[1], hi[1]]) {
-            for (const cz of [lo[2], hi[2]]) {
-                // 括号必须从角点**朝盒内**延伸。方向取决于该角位于哪一侧:
-                // 下界角朝 +、上界角朝 -。若一律按固定 -X/-Y/-Z 方向内缩,
-                // 下界角的线段就会向外扩出包围盒 (实测 x: -0.549 → -0.747),
-                // 既越界又让盒子尺寸不再是实测值。
-                const p = [cx, cy, cz];
-                const dir = [
-                    cx < mid[0] ? 1 : -1,
-                    cy < mid[1] ? 1 : -1,
-                    cz < mid[2] ? 1 : -1,
-                ];
-                pos.setXYZ(k++, cx, cy, cz);
-                pos.setXYZ(k++,
-                    cx + dir[0] * span[0] * BRACKET_RATIO,
-                    cy + dir[1] * span[1] * BRACKET_RATIO,
-                    cz + dir[2] * span[2] * BRACKET_RATIO);
-            }
-        }
+
+    // 底面矩形: 4 条边, 完整画出 —— 把范围锚在地面上
+    for (let i = 0; i < 4; i++) {
+        const p = b[i], q = b[(i + 1) % 4];
+        put(p[0], p[1], lo[2]);
+        put(q[0], q[1], lo[2]);
+    }
+    // 四角立柱: 从底面角点垂直连到顶面角点, 给出体积感
+    for (const [x, y] of b) {
+        put(x, y, lo[2]);
+        put(x, y, hi[2]);
     }
     pos.needsUpdate = true;
     reachBox.geometry.computeBoundingSphere();
