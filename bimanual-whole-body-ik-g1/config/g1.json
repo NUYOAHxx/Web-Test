@@ -1,0 +1,52 @@
+{
+  "robot_name": "Unitree G1 29-DoF rev_1_0 (fixed pelvis, reduced 16-DoF)",
+  "source": "Kinematic values reduced from Unitree g1_29dof_rev_1_0.urdf; see LICENSE_unitree_ros",
+  "base": {"xyz": [0.0, 0.0, 0.0]},
+  "torso": [
+    {"name": "waist_yaw_joint", "kind": "revolute", "axis": [0, 0, 1], "origin_xyz": [0.0, 0.0, 0.0], "lower": -2.618, "upper": 2.618, "velocity": 32.0},
+    {"name": "waist_pitch_joint", "kind": "revolute", "axis": [0, 1, 0], "origin_xyz": [-0.0039635, 0.0, 0.044], "lower": -0.52, "upper": 0.52, "velocity": 30.0}
+  ],
+  "shoulder_mounts": {
+    "left": {"xyz": [0.0039563, 0.10022, 0.24778], "rpy": [0.27931, 0.000054949, -0.00019159]},
+    "right": {"xyz": [0.0039563, -0.10021, 0.24778], "rpy": [-0.27931, 0.000054949, 0.00019159]}
+  },
+  "arms": {
+    "left": [
+      {"name": "left_shoulder_pitch_joint", "axis": [0, 1, 0], "lower": -3.0892, "upper": 2.6704, "velocity": 37.0},
+      {"name": "left_shoulder_roll_joint", "axis": [1, 0, 0], "origin_xyz": [0.0, 0.038, -0.013831], "origin_rpy": [-0.27925, 0.0, 0.0], "lower": -1.5882, "upper": 2.2515, "velocity": 37.0},
+      {"name": "left_shoulder_yaw_joint", "axis": [0, 0, 1], "origin_xyz": [0.0, 0.00624, -0.1032], "lower": -2.618, "upper": 2.618, "velocity": 37.0},
+      {"name": "left_elbow_joint", "axis": [0, 1, 0], "origin_xyz": [0.015783, 0.0, -0.080518], "lower": -1.0472, "upper": 2.0944, "velocity": 37.0},
+      {"name": "left_wrist_roll_joint", "axis": [1, 0, 0], "origin_xyz": [0.1, 0.00188791, -0.01], "lower": -1.972222054, "upper": 1.972222054, "velocity": 37.0},
+      {"name": "left_wrist_pitch_joint", "axis": [0, 1, 0], "origin_xyz": [0.038, 0.0, 0.0], "lower": -1.614429558, "upper": 1.614429558, "velocity": 22.0},
+      {"name": "left_wrist_yaw_joint", "axis": [0, 0, 1], "origin_xyz": [0.046, 0.0, 0.0], "lower": -1.614429558, "upper": 1.614429558, "velocity": 22.0}
+    ],
+    "right": [
+      {"name": "right_shoulder_pitch_joint", "axis": [0, 1, 0], "lower": -3.0892, "upper": 2.6704, "velocity": 37.0},
+      {"name": "right_shoulder_roll_joint", "axis": [1, 0, 0], "origin_xyz": [0.0, -0.038, -0.013831], "origin_rpy": [0.27925, 0.0, 0.0], "lower": -2.2515, "upper": 1.5882, "velocity": 37.0},
+      {"name": "right_shoulder_yaw_joint", "axis": [0, 0, 1], "origin_xyz": [0.0, -0.00624, -0.1032], "lower": -2.618, "upper": 2.618, "velocity": 37.0},
+      {"name": "right_elbow_joint", "axis": [0, 1, 0], "origin_xyz": [0.015783, 0.0, -0.080518], "lower": -1.0472, "upper": 2.0944, "velocity": 37.0},
+      {"name": "right_wrist_roll_joint", "axis": [1, 0, 0], "origin_xyz": [0.1, -0.00188791, -0.01], "lower": -1.972222054, "upper": 1.972222054, "velocity": 37.0},
+      {"name": "right_wrist_pitch_joint", "axis": [0, 1, 0], "origin_xyz": [0.038, 0.0, 0.0], "lower": -1.614429558, "upper": 1.614429558, "velocity": 22.0},
+      {"name": "right_wrist_yaw_joint", "axis": [0, 0, 1], "origin_xyz": [0.046, 0.0, 0.0], "lower": -1.614429558, "upper": 1.614429558, "velocity": 22.0}
+    ]
+  },
+  "tools": {
+    "left": {"xyz": [0.1215, 0.003, 0.0]},
+    "right": {"xyz": [0.1215, -0.003, 0.0]}
+  },
+  "com_proxy": {
+    "pelvis_xyz": [0.0, 0.0, -0.28],
+    "pelvis_weight": 24.0,
+    "torso_xyz": [0.0, 0.0, 0.15],
+    "torso_weight": 18.0,
+    "arm_segment_weight": 1.8
+  },
+  "nominal_q": {
+    "left_shoulder_pitch_joint": 0.3,
+    "left_shoulder_roll_joint": 0.25,
+    "left_elbow_joint": 0.9,
+    "right_shoulder_pitch_joint": 0.3,
+    "right_shoulder_roll_joint": -0.25,
+    "right_elbow_joint": 0.9
+  }
+}

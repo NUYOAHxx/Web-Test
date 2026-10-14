@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bimanual-whole-body-ik"
+version = "0.1.0"
+description = "Whole-body differential IK for bimanual robots with closed-chain object carrying"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "scipy>=1.10"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+bimanual-ik-demo = "bimanual_wbik.demo:main"
+bimanual-ik-benchmark = "bimanual_wbik.benchmark:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bimanual_wbik = ["default_robot.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

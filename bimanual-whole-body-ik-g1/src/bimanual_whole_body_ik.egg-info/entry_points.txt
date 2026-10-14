@@ -1,0 +1,3 @@
+[console_scripts]
+bimanual-ik-benchmark = bimanual_wbik.benchmark:main
+bimanual-ik-demo = bimanual_wbik.demo:main

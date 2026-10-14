@@ -1,0 +1,2981 @@
+{
+  "metadata": {
+    "benchmark": "bimanual whole-body IK multi-pose and trajectory benchmark",
+    "model": "Unitree G1 29-DoF rev_1_0 (fixed pelvis, reduced 16-DoF)",
+    "dof": 16,
+    "joint_names": [
+      "waist_yaw_joint",
+      "waist_pitch_joint",
+      "left_shoulder_pitch_joint",
+      "left_shoulder_roll_joint",
+      "left_shoulder_yaw_joint",
+      "left_elbow_joint",
+      "left_wrist_roll_joint",
+      "left_wrist_pitch_joint",
+      "left_wrist_yaw_joint",
+      "right_shoulder_pitch_joint",
+      "right_shoulder_roll_joint",
+      "right_shoulder_yaw_joint",
+      "right_elbow_joint",
+      "right_wrist_roll_joint",
+      "right_wrist_pitch_joint",
+      "right_wrist_yaw_joint"
+    ],
+    "created_utc": "2026-10-13T18:49:35Z",
+    "trajectory_steps": 3,
+    "notes": [
+      "目标位姿由参考模型中的可达关节构型生成。",
+      "搬运场景对 G1 关节链生成可达目标，并保持标定的双手刚性抓取关系。",
+      "轨迹按前一帧返回的关节解 warm-start。",
+      "求解耗时为 IK 调用周围的墙钟时间，不含写报告时间。",
+      "离散加速度是按采样点索引计算的平滑度代理，不是物理加速度。",
+      "这是离线运动学基准，不证明实时性或实机安全性。"
+    ]
+  },
+  "summary": {
+    "all": {
+      "samples": 16,
+      "successes": 16,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.03913620912589977,
+      "solve_time_median_s": 0.039704638002149295,
+      "solve_time_p95_s": 0.07483205225071288,
+      "solve_time_max_s": 0.07804243099235464,
+      "iterations_mean": 15.875,
+      "left_position_error_m_mean": 3.7518490498126194e-05,
+      "left_position_error_m_max": 0.00016508570068299265,
+      "left_orientation_error_rad_mean": 1.7518922535720027e-05,
+      "left_orientation_error_rad_max": 4.7546277370037035e-05,
+      "right_position_error_m_mean": 6.379570016398265e-05,
+      "right_position_error_m_max": 0.0003070211776231986,
+      "right_orientation_error_rad_mean": 2.1321670746305335e-05,
+      "right_orientation_error_rad_max": 6.919612350880323e-05,
+      "closure_error_mean": 3.125794851673154e-13,
+      "closure_error_max": 1.5264646420786097e-12,
+      "object_position_error_m_mean": 1.4599938355392932e-05,
+      "object_position_error_m_max": 4.497512603493238e-05,
+      "object_orientation_error_rad_mean": 1.206021263091303e-05,
+      "object_orientation_error_rad_max": 2.2328256575546037e-05,
+      "min_joint_limit_margin_native": 0.431431889693736
+    },
+    "mode:independent": {
+      "samples": 8,
+      "successes": 8,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.04642790725119994,
+      "solve_time_median_s": 0.06966728949919343,
+      "solve_time_p95_s": 0.0732838463060034,
+      "solve_time_max_s": 0.07376192600349896,
+      "iterations_mean": 20.0,
+      "left_position_error_m_mean": 6.053056564045959e-05,
+      "left_position_error_m_max": 0.00016508570068299265,
+      "left_orientation_error_rad_mean": 2.297763249243644e-05,
+      "left_orientation_error_rad_max": 4.7546277370037035e-05,
+      "right_position_error_m_mean": 0.00011228846129244532,
+      "right_position_error_m_max": 0.0003070211776231986,
+      "right_orientation_error_rad_mean": 3.0583128917199597e-05,
+      "right_orientation_error_rad_max": 6.919612350880323e-05,
+      "min_joint_limit_margin_native": 0.431431889693736
+    },
+    "suite:static_pose": {
+      "samples": 4,
+      "successes": 4,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.03503393074788619,
+      "solve_time_median_s": 0.03189504499459872,
+      "solve_time_p95_s": 0.06966428629384608,
+      "solve_time_max_s": 0.07167481699434575,
+      "iterations_mean": 14.0,
+      "left_position_error_m_mean": 8.975252422465742e-06,
+      "left_position_error_m_max": 2.775054389993329e-05,
+      "left_orientation_error_rad_mean": 1.4957841165953781e-05,
+      "left_orientation_error_rad_max": 3.818450941555424e-05,
+      "right_position_error_m_mean": 8.38073148157893e-06,
+      "right_position_error_m_max": 2.270762110746272e-05,
+      "right_orientation_error_rad_mean": 1.511239019961541e-05,
+      "right_orientation_error_rad_max": 3.8802705978229746e-05,
+      "closure_error_mean": 2.6426013532145053e-13,
+      "closure_error_max": 5.284575895726065e-13,
+      "object_position_error_m_mean": 3.824048693775162e-06,
+      "object_position_error_m_max": 7.648097387435674e-06,
+      "object_orientation_error_rad_mean": 1.0823427624131647e-05,
+      "object_orientation_error_rad_max": 2.1646855248220987e-05,
+      "min_joint_limit_margin_native": 0.5123143196664122
+    },
+    "mode:carry": {
+      "samples": 8,
+      "successes": 8,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.031844511000599596,
+      "solve_time_median_s": 0.029784810001729056,
+      "solve_time_p95_s": 0.07112252779188565,
+      "solve_time_max_s": 0.07804243099235464,
+      "iterations_mean": 11.75,
+      "left_position_error_m_mean": 1.4506415355792783e-05,
+      "left_position_error_m_max": 4.3516423805097686e-05,
+      "left_orientation_error_rad_mean": 1.2060212579003613e-05,
+      "left_orientation_error_rad_max": 2.232825657553534e-05,
+      "right_position_error_m_mean": 1.5302939035519987e-05,
+      "right_position_error_m_max": 4.6692870317591486e-05,
+      "right_orientation_error_rad_mean": 1.2060212575411073e-05,
+      "right_orientation_error_rad_max": 2.232825656349884e-05,
+      "closure_error_mean": 3.125794851673154e-13,
+      "closure_error_max": 1.5264646420786097e-12,
+      "object_position_error_m_mean": 1.4599938355392932e-05,
+      "object_position_error_m_max": 4.497512603493238e-05,
+      "object_orientation_error_rad_mean": 1.206021263091303e-05,
+      "object_orientation_error_rad_max": 2.2328256575546037e-05,
+      "min_joint_limit_margin_native": 0.4538232316602503
+    },
+    "suite:trajectory": {
+      "samples": 12,
+      "successes": 12,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.04050363525190429,
+      "solve_time_median_s": 0.039704638002149295,
+      "solve_time_p95_s": 0.075688153248484,
+      "solve_time_max_s": 0.07804243099235464,
+      "iterations_mean": 16.5,
+      "left_position_error_m_mean": 4.7032903190013e-05,
+      "left_position_error_m_max": 0.00016508570068299265,
+      "left_orientation_error_rad_mean": 1.837261632564211e-05,
+      "left_orientation_error_rad_max": 4.7546277370037035e-05,
+      "right_position_error_m_mean": 8.226735639145056e-05,
+      "right_position_error_m_max": 0.0003070211776231986,
+      "right_orientation_error_rad_mean": 2.339143092853531e-05,
+      "right_orientation_error_rad_max": 6.919612350880323e-05,
+      "closure_error_mean": 3.28685935115937e-13,
+      "closure_error_max": 1.5264646420786097e-12,
+      "object_position_error_m_mean": 1.819190157593219e-05,
+      "object_position_error_m_max": 4.497512603493238e-05,
+      "object_orientation_error_rad_mean": 1.247247429984016e-05,
+      "object_orientation_error_rad_max": 2.2328256575546037e-05,
+      "min_joint_limit_margin_native": 0.431431889693736
+    }
+  },
+  "trajectory_metrics": {
+    "independent/lateral_sweep": {
+      "samples": 3,
+      "successes": 3,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.0501589220026896,
+      "solve_time_median_s": 0.0723959840106545,
+      "solve_time_p95_s": 0.07362533180421452,
+      "solve_time_max_s": 0.07376192600349896,
+      "iterations_mean": 21.666666666666668,
+      "left_position_error_m_mean": 0.0001078087900815111,
+      "left_position_error_m_max": 0.00016508570068299265,
+      "left_orientation_error_rad_mean": 2.7316431122617065e-05,
+      "left_orientation_error_rad_max": 4.7546277370037035e-05,
+      "right_position_error_m_mean": 0.00020443757696024097,
+      "right_position_error_m_max": 0.0003070211776231986,
+      "right_orientation_error_rad_mean": 3.889049062155476e-05,
+      "right_orientation_error_rad_max": 6.919612350880323e-05,
+      "min_joint_limit_margin_native": 0.506135133583363,
+      "all_frames_success": true,
+      "left_target_path_length_m": 0.10877168944614285,
+      "right_target_path_length_m": 0.035823128928087124,
+      "left_achieved_path_length_m": 0.10871978534817404,
+      "right_achieved_path_length_m": 0.03571707084694513,
+      "joint_travel_by_joint_native": {
+        "waist_yaw_joint": 0.15363088623088791,
+        "waist_pitch_joint": 0.017805063605572043,
+        "left_shoulder_pitch_joint": 0.035878704474829215,
+        "left_shoulder_roll_joint": 0.030609287726999723,
+        "left_shoulder_yaw_joint": 0.07465788944920579,
+        "left_elbow_joint": 0.17829291108311496,
+        "left_wrist_roll_joint": 0.06819527605510094,
+        "left_wrist_pitch_joint": 0.015856609758015332,
+        "left_wrist_yaw_joint": 0.01419731716548229,
+        "right_shoulder_pitch_joint": 0.01169238028541475,
+        "right_shoulder_roll_joint": 0.014259486708165015,
+        "right_shoulder_yaw_joint": 0.1177855700750457,
+        "right_elbow_joint": 0.14612846534675106,
+        "right_wrist_roll_joint": 0.10784947887220846,
+        "right_wrist_pitch_joint": 0.04942452617972641,
+        "right_wrist_yaw_joint": 0.03280670949512594
+      },
+      "max_joint_step_by_joint_native": {
+        "waist_yaw_joint": 0.07954872186613181,
+        "waist_pitch_joint": 0.015834965011104492,
+        "left_shoulder_pitch_joint": 0.017970726613754262,
+        "left_shoulder_roll_joint": 0.017436305500752425,
+        "left_shoulder_yaw_joint": 0.0390371340685965,
+        "left_elbow_joint": 0.08945884587127295,
+        "left_wrist_roll_joint": 0.03688901917081133,
+        "left_wrist_pitch_joint": 0.011846188978508507,
+        "left_wrist_yaw_joint": 0.007863667796562192,
+        "right_shoulder_pitch_joint": 0.011363493099768973,
+        "right_shoulder_roll_joint": 0.00952873123983597,
+        "right_shoulder_yaw_joint": 0.05965713591575485,
+        "right_elbow_joint": 0.07605103946296532,
+        "right_wrist_roll_joint": 0.054089098422190555,
+        "right_wrist_pitch_joint": 0.031508190659848834,
+        "right_wrist_yaw_joint": 0.016584104528610123
+      },
+      "discrete_joint_acceleration_rms_by_joint_native": {
+        "waist_yaw_joint": 0.005466557501375702,
+        "waist_pitch_joint": 0.017805063605572043,
+        "left_shoulder_pitch_joint": 6.274875267930913e-05,
+        "left_shoulder_roll_joint": 0.004263323274505126,
+        "left_shoulder_yaw_joint": 0.0034163786879872066,
+        "left_elbow_joint": 0.0006247806594309457,
+        "left_wrist_roll_joint": 0.005582762286521728,
+        "left_wrist_pitch_joint": 0.015856609758015332,
+        "left_wrist_yaw_joint": 0.0015300184276420947,
+        "right_shoulder_pitch_joint": 0.01169238028541475,
+        "right_shoulder_roll_joint": 0.004797975771506924,
+        "right_shoulder_yaw_joint": 0.001528701756463996,
+        "right_elbow_joint": 0.005973613579179582,
+        "right_wrist_roll_joint": 0.0003287179721726541,
+        "right_wrist_pitch_joint": 0.013591855139971253,
+        "right_wrist_yaw_joint": 0.00036149956209430983
+      }
+    },
+    "independent/waist_wrist_sweep": {
+      "samples": 3,
+      "successes": 3,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.04791762133633407,
+      "solve_time_median_s": 0.06860809000500012,
+      "solve_time_p95_s": 0.07051464909454808,
+      "solve_time_max_s": 0.07072648899338674,
+      "iterations_mean": 20.666666666666668,
+      "left_position_error_m_mean": 4.4355870326403385e-05,
+      "left_position_error_m_max": 8.135981004854759e-05,
+      "left_orientation_error_rad_mean": 2.122908571869536e-05,
+      "left_orientation_error_rad_max": 3.311319386751877e-05,
+      "right_position_error_m_mean": 8.742911278379231e-05,
+      "right_position_error_m_max": 0.00018218105607702162,
+      "right_orientation_error_rad_mean": 2.9730284498234255e-05,
+      "right_orientation_error_rad_max": 6.317891273927145e-05,
+      "min_joint_limit_margin_native": 0.431431889693736,
+      "all_frames_success": true,
+      "left_target_path_length_m": 0.08994988161082001,
+      "right_target_path_length_m": 0.00844932775682337,
+      "left_achieved_path_length_m": 0.08991915318459595,
+      "right_achieved_path_length_m": 0.008390584741891556,
+      "joint_travel_by_joint_native": {
+        "waist_yaw_joint": 0.09599985149423056,
+        "waist_pitch_joint": 0.08856811030626402,
+        "left_shoulder_pitch_joint": 0.181825707851974,
+        "left_shoulder_roll_joint": 0.024385553074696864,
+        "left_shoulder_yaw_joint": 0.08215940216187266,
+        "left_elbow_joint": 0.016251988999552713,
+        "left_wrist_roll_joint": 0.10271649520719535,
+        "left_wrist_pitch_joint": 0.012217868109644625,
+        "left_wrist_yaw_joint": 0.017962086702528787,
+        "right_shoulder_pitch_joint": 0.10546191926593057,
+        "right_shoulder_roll_joint": 0.023914207600735593,
+        "right_shoulder_yaw_joint": 0.05983850644527906,
+        "right_elbow_joint": 0.008927910751230228,
+        "right_wrist_roll_joint": 0.07949679888775607,
+        "right_wrist_pitch_joint": 0.009418609908103153,
+        "right_wrist_yaw_joint": 0.025932639322719178
+      },
+      "max_joint_step_by_joint_native": {
+        "waist_yaw_joint": 0.048995906981587393,
+        "waist_pitch_joint": 0.05269630429969478,
+        "left_shoulder_pitch_joint": 0.09185165339537955,
+        "left_shoulder_roll_joint": 0.013419698657630541,
+        "left_shoulder_yaw_joint": 0.042593702848286265,
+        "left_elbow_joint": 0.00855058115276508,
+        "left_wrist_roll_joint": 0.05250447123764608,
+        "left_wrist_pitch_joint": 0.012139915814309782,
+        "left_wrist_yaw_joint": 0.009677573491806875,
+        "right_shoulder_pitch_joint": 0.054639119388191076,
+        "right_shoulder_roll_joint": 0.012129472607603164,
+        "right_shoulder_yaw_joint": 0.03078330246165189,
+        "right_elbow_joint": 0.005628168875361883,
+        "right_wrist_roll_joint": 0.040219570199244166,
+        "right_wrist_pitch_joint": 0.006697654260323938,
+        "right_wrist_yaw_joint": 0.013232539199797536
+      },
+      "discrete_joint_acceleration_rms_by_joint_native": {
+        "waist_yaw_joint": 0.0019919624689442306,
+        "waist_pitch_joint": 0.016824498293125545,
+        "left_shoulder_pitch_joint": 0.0018775989387851272,
+        "left_shoulder_roll_joint": 0.002453844240564218,
+        "left_shoulder_yaw_joint": 0.003028003534699869,
+        "left_elbow_joint": 0.0008491733059774464,
+        "left_wrist_roll_joint": 0.0022924472680968117,
+        "left_wrist_pitch_joint": 0.012217868109644625,
+        "left_wrist_yaw_joint": 0.0013930602810849624,
+        "right_shoulder_pitch_joint": 0.0038163195104515824,
+        "right_shoulder_roll_joint": 0.0003447376144707359,
+        "right_shoulder_yaw_joint": 0.0017280984780247144,
+        "right_elbow_joint": 0.002328426999493538,
+        "right_wrist_roll_joint": 0.0009423415107322614,
+        "right_wrist_pitch_joint": 0.009418609908103153,
+        "right_wrist_yaw_joint": 0.0005324390768758937
+      }
+    },
+    "carry/object_waist_yaw": {
+      "samples": 3,
+      "successes": 3,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.035910307997255586,
+      "solve_time_median_s": 0.02498783200280741,
+      "solve_time_p95_s": 0.07273697109339991,
+      "solve_time_max_s": 0.07804243099235464,
+      "iterations_mean": 13.333333333333334,
+      "left_position_error_m_mean": 1.8585384389035124e-05,
+      "left_position_error_m_max": 4.3516423805097686e-05,
+      "left_orientation_error_rad_mean": 1.0213749310791961e-05,
+      "left_orientation_error_rad_max": 1.7228798807841954e-05,
+      "right_position_error_m_mean": 1.983622464938166e-05,
+      "right_position_error_m_max": 4.6692870317591486e-05,
+      "right_orientation_error_rad_mean": 1.0213749449242124e-05,
+      "right_orientation_error_rad_max": 1.7228798991348826e-05,
+      "closure_error_mean": 6.13577534908659e-13,
+      "closure_error_max": 1.5264646420786097e-12,
+      "object_position_error_m_mean": 1.900976361670667e-05,
+      "object_position_error_m_max": 4.497512603493238e-05,
+      "object_orientation_error_rad_mean": 1.0213749449224987e-05,
+      "object_orientation_error_rad_max": 1.722879899132311e-05,
+      "min_joint_limit_margin_native": 0.5183840356172373,
+      "all_frames_success": true,
+      "left_target_path_length_m": 0.05486135224836483,
+      "right_target_path_length_m": 0.054859398302401566,
+      "left_achieved_path_length_m": 0.054858340826912405,
+      "right_achieved_path_length_m": 0.05485581468630682,
+      "joint_travel_by_joint_native": {
+        "waist_yaw_joint": 0.13879904191586498,
+        "waist_pitch_joint": 0.0016159643827626565,
+        "left_shoulder_pitch_joint": 0.04066955947844875,
+        "left_shoulder_roll_joint": 0.009141734444088556,
+        "left_shoulder_yaw_joint": 0.027773941055352847,
+        "left_elbow_joint": 0.004306668917942624,
+        "left_wrist_roll_joint": 0.026861602059109365,
+        "left_wrist_pitch_joint": 0.02838698020504716,
+        "left_wrist_yaw_joint": 0.008791437921752642,
+        "right_shoulder_pitch_joint": 0.04356157933788468,
+        "right_shoulder_roll_joint": 0.006610546124269423,
+        "right_shoulder_yaw_joint": 0.028773400852440133,
+        "right_elbow_joint": 0.004487122708200619,
+        "right_wrist_roll_joint": 0.02739012697185337,
+        "right_wrist_pitch_joint": 0.025812343721971675,
+        "right_wrist_yaw_joint": 0.010177211724636563
+      },
+      "max_joint_step_by_joint_native": {
+        "waist_yaw_joint": 0.06962751845553843,
+        "waist_pitch_joint": 0.0015458302418095724,
+        "left_shoulder_pitch_joint": 0.02111182155325303,
+        "left_shoulder_roll_joint": 0.004855635107384626,
+        "left_shoulder_yaw_joint": 0.01411831962128348,
+        "left_elbow_joint": 0.0039136315205102745,
+        "left_wrist_roll_joint": 0.013687274143091645,
+        "left_wrist_pitch_joint": 0.014580499544146119,
+        "left_wrist_yaw_joint": 0.0045850627611835615,
+        "right_shoulder_pitch_joint": 0.022415814753272312,
+        "right_shoulder_roll_joint": 0.003706891706269144,
+        "right_shoulder_yaw_joint": 0.014407168377929611,
+        "right_elbow_joint": 0.004187653599025509,
+        "right_wrist_roll_joint": 0.013739824371994846,
+        "right_wrist_pitch_joint": 0.013798394876536604,
+        "right_wrist_yaw_joint": 0.005227049037928505
+      },
+      "discrete_joint_acceleration_rms_by_joint_native": {
+        "waist_yaw_joint": 0.0004559949952118725,
+        "waist_pitch_joint": 0.0014756961008564882,
+        "left_shoulder_pitch_joint": 0.0015540836280573123,
+        "left_shoulder_roll_joint": 0.0005695357706806958,
+        "left_shoulder_yaw_joint": 0.00046269818721411324,
+        "left_elbow_joint": 0.0035205941230779247,
+        "left_wrist_roll_joint": 0.0005129462270739259,
+        "left_wrist_pitch_joint": 0.0007740188832450791,
+        "left_wrist_yaw_joint": 0.00037868760061448084,
+        "right_shoulder_pitch_joint": 0.001270050168659942,
+        "right_shoulder_roll_joint": 0.0008032372882688654,
+        "right_shoulder_yaw_joint": 4.0935903419088426e-05,
+        "right_elbow_joint": 0.004487122708200619,
+        "right_wrist_roll_joint": 8.952177213632229e-05,
+        "right_wrist_pitch_joint": 0.001784446031101533,
+        "right_wrist_yaw_joint": 0.0002768863512204473
+      }
+    },
+    "carry/object_waist_pitch": {
+      "samples": 3,
+      "successes": 3,
+      "failures": 0,
+      "success_rate": 1.0,
+      "solve_time_mean_s": 0.028027689671337914,
+      "solve_time_median_s": 0.034581788000650704,
+      "solve_time_p95_s": 0.043802918003348165,
+      "solve_time_max_s": 0.044827488003647886,
+      "iterations_mean": 10.333333333333334,
+      "left_position_error_m_mean": 1.7381567963102403e-05,
+      "left_position_error_m_max": 2.6177236838858635e-05,
+      "left_orientation_error_rad_mean": 1.4731199150464047e-05,
+      "left_orientation_error_rad_max": 2.232825657553534e-05,
+      "right_position_error_m_mean": 1.736651117238731e-05,
+      "right_position_error_m_max": 2.6127239510814054e-05,
+      "right_orientation_error_rad_mean": 1.4731199145110108e-05,
+      "right_orientation_error_rad_max": 2.232825656349884e-05,
+      "closure_error_mean": 4.3794335323214966e-14,
+      "closure_error_max": 9.925484899341454e-14,
+      "object_position_error_m_mean": 1.7374039535157713e-05,
+      "object_position_error_m_max": 2.6152238069817908e-05,
+      "object_orientation_error_rad_mean": 1.4731199150455333e-05,
+      "object_orientation_error_rad_max": 2.2328256575546037e-05,
+      "min_joint_limit_margin_native": 0.4538232316602503,
+      "all_frames_success": true,
+      "left_target_path_length_m": 0.025737155773350194,
+      "right_target_path_length_m": 0.025737155773350194,
+      "left_achieved_path_length_m": 0.025748529883647266,
+      "right_achieved_path_length_m": 0.025748534431725284,
+      "joint_travel_by_joint_native": {
+        "waist_yaw_joint": 1.4834995429915226e-07,
+        "waist_pitch_joint": 0.06617676833974974,
+        "left_shoulder_pitch_joint": 0.007299441995590739,
+        "left_shoulder_roll_joint": 0.0019643557284967916,
+        "left_shoulder_yaw_joint": 0.007291299669671606,
+        "left_elbow_joint": 0.004616663115603936,
+        "left_wrist_roll_joint": 0.005883625241313068,
+        "left_wrist_pitch_joint": 0.04020354850961081,
+        "left_wrist_yaw_joint": 0.0013702671439603214,
+        "right_shoulder_pitch_joint": 0.007299168229657205,
+        "right_shoulder_roll_joint": 0.0019643649407738994,
+        "right_shoulder_yaw_joint": 0.007291416638716875,
+        "right_elbow_joint": 0.004616838591292027,
+        "right_wrist_roll_joint": 0.005883769227442549,
+        "right_wrist_pitch_joint": 0.040203574697464876,
+        "right_wrist_yaw_joint": 0.001370336178462895
+      },
+      "max_joint_step_by_joint_native": {
+        "waist_yaw_joint": 1.1199057588900767e-07,
+        "waist_pitch_joint": 0.03322985414646743,
+        "left_shoulder_pitch_joint": 0.0036676946043830982,
+        "left_shoulder_roll_joint": 0.000990475285478326,
+        "left_shoulder_yaw_joint": 0.003656720120471951,
+        "left_elbow_joint": 0.0023793569496290967,
+        "left_wrist_roll_joint": 0.002968517891659461,
+        "left_wrist_pitch_joint": 0.020198096204284734,
+        "left_wrist_yaw_joint": 0.0007262654507202189,
+        "right_shoulder_pitch_joint": 0.003667487141734871,
+        "right_shoulder_roll_joint": 0.0009900368494247525,
+        "right_shoulder_yaw_joint": 0.003656860048989224,
+        "right_elbow_joint": 0.0023794978387575716,
+        "right_wrist_roll_joint": 0.0029686206357045276,
+        "right_wrist_pitch_joint": 0.020198018198257343,
+        "right_wrist_yaw_joint": 0.0007265647481038652
+      },
+      "discrete_joint_acceleration_rms_by_joint_native": {
+        "waist_yaw_joint": 7.563119747886309e-08,
+        "waist_pitch_joint": 0.000282939953185124,
+        "left_shoulder_pitch_joint": 3.5947213175457904e-05,
+        "left_shoulder_roll_joint": 1.6594842459860537e-05,
+        "left_shoulder_yaw_joint": 2.2140571272296315e-05,
+        "left_elbow_joint": 0.00014205078365425727,
+        "left_wrist_roll_joint": 5.3410542005854524e-05,
+        "left_wrist_pitch_joint": 0.0001926438989586568,
+        "left_wrist_yaw_joint": 8.226375748011635e-05,
+        "right_shoulder_pitch_joint": 3.58060538125371e-05,
+        "right_shoulder_roll_joint": 1.5708758075605456e-05,
+        "right_shoulder_yaw_joint": 2.2303459261573642e-05,
+        "right_elbow_joint": 0.00014215708622311585,
+        "right_wrist_roll_joint": 5.347204396650637e-05,
+        "right_wrist_pitch_joint": 0.00019246169904980903,
+        "right_wrist_yaw_joint": 8.279331774483528e-05
+      }
+    }
+  },
+  "samples": [
+    {
+      "sample_id": "independent/static/neutral",
+      "mode": "independent",
+      "suite": "static_pose",
+      "case_id": "neutral",
+      "step": 0,
+      "progress": null,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.005518810998182744,
+      "iterations": 1,
+      "left_position_error_m": 0.0,
+      "left_orientation_error_rad": 0.0,
+      "right_position_error_m": 0.0,
+      "right_orientation_error_rad": 0.0,
+      "closure_error": null,
+      "object_position_error_m": null,
+      "object_orientation_error_rad": null,
+      "min_joint_limit_margin_native": 0.52,
+      "q": [
+        0.0,
+        0.0,
+        0.3,
+        0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0,
+        0.3,
+        -0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": null
+    },
+    {
+      "sample_id": "independent/static/waist_yaw_left",
+      "mode": "independent",
+      "suite": "static_pose",
+      "case_id": "waist_yaw_left",
+      "step": 0,
+      "progress": null,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.07167481699434575,
+      "iterations": 32,
+      "left_position_error_m": 2.775054389993329e-05,
+      "left_orientation_error_rad": 3.818450941555424e-05,
+      "right_position_error_m": 2.270762110746272e-05,
+      "right_orientation_error_rad": 3.8802705978229746e-05,
+      "closure_error": null,
+      "object_position_error_m": null,
+      "object_orientation_error_rad": null,
+      "min_joint_limit_margin_native": 0.5123143196664122,
+      "q": [
+        0.12142931130288831,
+        0.007685680333587821,
+        0.3370762636383914,
+        0.225124277670287,
+        -0.028420803310314414,
+        0.9032909354122768,
+        0.01871914534398606,
+        -0.03340612258963021,
+        -0.003964772747750543,
+        0.2602966307556997,
+        -0.24309007399345045,
+        0.07055696926308117,
+        0.8990613313785268,
+        -0.06075363809485366,
+        0.019710497198491977,
+        0.02226180190538874
+      ],
+      "target_left_pose": [
+        [
+          0.322966711926,
+          -0.088415762378,
+          0.942271275138,
+          0.012210949725
+        ],
+        [
+          0.236054079328,
+          0.97168567509,
+          0.010267446513,
+          0.255330123414
+        ],
+        [
+          -0.916499304212,
+          0.21911093489,
+          0.334693028895,
+          -0.166129709402
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.388529860132,
+          -0.240837026416,
+          0.889405461245,
+          0.102271206292
+        ],
+        [
+          -0.118864773524,
+          0.944073452222,
+          0.307565411618,
+          -0.238397330996
+        ],
+        [
+          -0.913737223386,
+          -0.225217325079,
+          0.338173687745,
+          -0.165220722146
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.322932151527,
+          -0.08842337424,
+          0.942282405862,
+          0.012231738822
+        ],
+        [
+          0.23605077638,
+          0.971686291602,
+          0.010285022261,
+          0.255337129231
+        ],
+        [
+          -0.916512332967,
+          0.219105129105,
+          0.334661150896,
+          -0.16611271456
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.388552943455,
+          -0.240808603309,
+          0.889403073249,
+          0.102253432803
+        ],
+        [
+          -0.118862317844,
+          0.944081918685,
+          0.307540371671,
+          -0.238408137145
+        ],
+        [
+          -0.913727727241,
+          -0.225212227428,
+          0.338202739622,
+          -0.165211613561
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": null
+    },
+    {
+      "sample_id": "carry/static/home",
+      "mode": "carry",
+      "suite": "static_pose",
+      "case_id": "home",
+      "step": 0,
+      "progress": null,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.004670816008001566,
+      "iterations": 1,
+      "left_position_error_m": 6.938893903907228e-18,
+      "left_orientation_error_rad": 3.904822380799462e-17,
+      "right_position_error_m": 1.2412670766236366e-16,
+      "right_orientation_error_rad": 5.1726901925761333e-17,
+      "closure_error": 6.268107029455597e-17,
+      "object_position_error_m": 1.1464934308770758e-16,
+      "object_orientation_error_rad": 4.2308051526756253e-17,
+      "min_joint_limit_margin_native": 0.52,
+      "q": [
+        0.0,
+        0.0,
+        0.3,
+        0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0,
+        0.3,
+        -0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          5e-06
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "sample_id": "carry/static/yaw_left",
+      "mode": "carry",
+      "suite": "static_pose",
+      "case_id": "yaw_left",
+      "step": 0,
+      "progress": null,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.0582712789910147,
+      "iterations": 22,
+      "left_position_error_m": 8.150465789922737e-06,
+      "left_orientation_error_rad": 2.164685524822183e-05,
+      "right_position_error_m": 1.081530481872887e-05,
+      "right_orientation_error_rad": 2.164685482018016e-05,
+      "closure_error": 5.284575895726065e-13,
+      "object_position_error_m": 7.648097387435674e-06,
+      "object_orientation_error_rad": 2.1646855248220987e-05,
+      "min_joint_limit_margin_native": 0.5188643171079534,
+      "q": [
+        0.11090831391464148,
+        -0.00113568289204658,
+        0.33280873517325116,
+        0.2428668979195359,
+        0.022328256671861602,
+        0.9029597349404135,
+        -0.021595589658153447,
+        -0.02258412833354411,
+        0.007152819815694834,
+        0.2653558821207862,
+        -0.2555254277973454,
+        0.023029225458735477,
+        0.9023302152049086,
+        -0.021925700345865624,
+        0.021071108196928076,
+        0.008043006619400815
+      ],
+      "target_left_pose": [
+        [
+          0.320418414667,
+          -0.162641569761,
+          0.933209386648,
+          0.014563786214
+        ],
+        [
+          0.28952372148,
+          0.954823016407,
+          0.067000164467,
+          0.274034359629
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.39522698909,
+          -0.145970253799,
+          0.90691141359,
+          0.100024914513
+        ],
+        [
+          -0.174033252145,
+          0.957513424387,
+          0.229957537963,
+          -0.25553196752
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.320422913126,
+          -0.162621537396,
+          0.933211333149,
+          0.014568928867
+        ],
+        [
+          0.289511200857,
+          0.954827996109,
+          0.066983299596,
+          0.274036918422
+        ],
+        [
+          -0.901949234338,
+          0.248712149726,
+          0.353029524625,
+          -0.161347312714
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.395221956715,
+          -0.145950968098,
+          0.906916710532,
+          0.100019169164
+        ],
+        [
+          -0.174047310739,
+          0.957514789361,
+          0.229941213747,
+          -0.255531165702
+        ],
+        [
+          -0.901946305805,
+          -0.248724230959,
+          0.353028495137,
+          -0.161343967166
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": [
+        [
+          0.320418414667,
+          -0.162641569761,
+          0.933209386648,
+          0.057294350363
+        ],
+        [
+          0.28952372148,
+          0.954823016407,
+          0.067000164467,
+          0.009251196055
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "sample_id": "independent/trajectory/lateral_sweep/000",
+      "mode": "independent",
+      "suite": "trajectory",
+      "case_id": "lateral_sweep",
+      "step": 0,
+      "progress": 0.0,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.004318855993915349,
+      "iterations": 1,
+      "left_position_error_m": 0.0,
+      "left_orientation_error_rad": 0.0,
+      "right_position_error_m": 0.0,
+      "right_orientation_error_rad": 0.0,
+      "closure_error": null,
+      "object_position_error_m": null,
+      "object_orientation_error_rad": null,
+      "min_joint_limit_margin_native": 0.52,
+      "q": [
+        0.0,
+        0.0,
+        0.3,
+        0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0,
+        0.3,
+        -0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": null
+    },
+    {
+      "sample_id": "independent/trajectory/lateral_sweep/001",
+      "mode": "independent",
+      "suite": "trajectory",
+      "case_id": "lateral_sweep",
+      "step": 1,
+      "progress": 0.5,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.07376192600349896,
+      "iterations": 32,
+      "left_position_error_m": 0.00015834066956154068,
+      "left_orientation_error_rad": 4.7546277370037035e-05,
+      "right_position_error_m": 0.00030629155325752425,
+      "right_orientation_error_rad": 6.919612350880323e-05,
+      "closure_error": null,
+      "object_position_error_m": null,
+      "object_orientation_error_rad": null,
+      "min_joint_limit_margin_native": 0.5180299014055325,
+      "q": [
+        0.0740821643647561,
+        0.0019700985944675507,
+        0.31790797786107494,
+        0.23256369449924758,
+        -0.03562075538060929,
+        0.988834065211842,
+        0.031306256884289604,
+        -0.011846188978508507,
+        -0.007863667796562192,
+        0.288636506900231,
+        -0.24047126876016403,
+        0.05965713591575485,
+        0.9760510394629653,
+        -0.0537603804500179,
+        0.01791633551987758,
+        0.016584104528610123
+      ],
+      "target_left_pose": [
+        [
+          0.25484227845,
+          -0.019962656445,
+          0.966776554051,
+          0.006001331711
+        ],
+        [
+          0.219840559976,
+          0.974802367496,
+          -0.037821587918,
+          0.256577328578
+        ],
+        [
+          -0.941661054363,
+          0.222175238654,
+          0.252809457942,
+          -0.172947985934
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.293437976661,
+          -0.174098601621,
+          0.939991399304,
+          0.056854752465
+        ],
+        [
+          -0.164829040369,
+          0.959337187981,
+          0.229136525261,
+          -0.250260633775
+        ],
+        [
+          -0.941661054363,
+          -0.222175238654,
+          0.252809457942,
+          -0.172947985934
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.2547988783,
+          -0.01997658414,
+          0.966787705602,
+          0.006019714858
+        ],
+        [
+          0.21983934133,
+          0.97480360016,
+          -0.037796892976,
+          0.256549465022
+        ],
+        [
+          -0.941673083199,
+          0.222168578339,
+          0.252770502983,
+          -0.172793203991
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.293379712567,
+          -0.174069648183,
+          0.940014947666,
+          0.056845965323
+        ],
+        [
+          -0.164842303197,
+          0.959344466512,
+          0.229096507282,
+          -0.250193072815
+        ],
+        [
+          -0.941676886905,
+          -0.222166496469,
+          0.252758162115,
+          -0.172649367753
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": null
+    },
+    {
+      "sample_id": "independent/trajectory/lateral_sweep/002",
+      "mode": "independent",
+      "suite": "trajectory",
+      "case_id": "lateral_sweep",
+      "step": 2,
+      "progress": 1.0,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.0723959840106545,
+      "iterations": 32,
+      "left_position_error_m": 0.00016508570068299265,
+      "left_orientation_error_rad": 3.440301599781417e-05,
+      "right_position_error_m": 0.0003070211776231986,
+      "right_orientation_error_rad": 4.7475348355861046e-05,
+      "closure_error": null,
+      "object_position_error_m": null,
+      "object_orientation_error_rad": null,
+      "min_joint_limit_margin_native": 0.506135133583363,
+      "q": [
+        0.15363088623088791,
+        -0.01386486641663694,
+        0.3358787044748292,
+        0.21939071227300028,
+        -0.07465788944920579,
+        1.078292911083115,
+        0.06819527605510094,
+        -0.007835768199001683,
+        -0.01419731716548229,
+        0.2889653940858768,
+        -0.23574051329183499,
+        0.1177855700750457,
+        1.046128465346751,
+        -0.10784947887220846,
+        0.04942452617972641,
+        0.03280670949512594
+      ],
+      "target_left_pose": [
+        [
+          0.147068001913,
+          -0.032718820103,
+          0.988585090735,
+          -0.045184041364
+        ],
+        [
+          0.196549723204,
+          0.980488600843,
+          0.003210907291,
+          0.240575650748
+        ],
+        [
+          -0.969401469527,
+          0.193833904228,
+          0.15062937446,
+          -0.180835075678
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.21199866742,
+          -0.351684216626,
+          0.911797552524,
+          0.05206532637
+        ],
+        [
+          -0.123763305914,
+          0.915831113988,
+          0.382015725804,
+          -0.239170541832
+        ],
+        [
+          -0.969401469527,
+          -0.193833904228,
+          0.15062937446,
+          -0.180835075678
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.147038332275,
+          -0.032735187191,
+          0.98858896229,
+          -0.045159744488
+        ],
+        [
+          0.196548559314,
+          0.980488760883,
+          0.003233204978,
+          0.240551441582
+        ],
+        [
+          -0.969406206228,
+          0.193830331224,
+          0.150603486096,
+          -0.180673592345
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.21196659348,
+          -0.351655534753,
+          0.911816071434,
+          0.052055025644
+        ],
+        [
+          -0.123778697492,
+          0.915842739432,
+          0.381982866994,
+          -0.239106855339
+        ],
+        [
+          -0.96940651808,
+          -0.193831012758,
+          0.150600601583,
+          -0.180534909175
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": null
+    },
+    {
+      "sample_id": "independent/trajectory/waist_wrist_sweep/000",
+      "mode": "independent",
+      "suite": "trajectory",
+      "case_id": "waist_wrist_sweep",
+      "step": 0,
+      "progress": 0.0,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.004418285010615364,
+      "iterations": 1,
+      "left_position_error_m": 0.0,
+      "left_orientation_error_rad": 0.0,
+      "right_position_error_m": 0.0,
+      "right_orientation_error_rad": 0.0,
+      "closure_error": null,
+      "object_position_error_m": null,
+      "object_orientation_error_rad": null,
+      "min_joint_limit_margin_native": 0.52,
+      "q": [
+        0.0,
+        0.0,
+        0.3,
+        0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0,
+        0.3,
+        -0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": null
+    },
+    {
+      "sample_id": "independent/trajectory/waist_wrist_sweep/001",
+      "mode": "independent",
+      "suite": "trajectory",
+      "case_id": "waist_wrist_sweep",
+      "step": 1,
+      "progress": 0.5,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.07072648899338674,
+      "iterations": 31,
+      "left_position_error_m": 8.135981004854759e-05,
+      "left_orientation_error_rad": 3.057406328856731e-05,
+      "right_position_error_m": 8.010628227435532e-05,
+      "right_orientation_error_rad": 2.6011940755431308e-05,
+      "closure_error": null,
+      "object_position_error_m": null,
+      "object_orientation_error_rad": null,
+      "min_joint_limit_margin_native": 0.48412819399343077,
+      "q": [
+        -0.04700394451264316,
+        0.03587180600656924,
+        0.21002594554340556,
+        0.26341969865763054,
+        -0.042593702848286265,
+        0.9085505811527651,
+        0.05250447123764608,
+        0.012139915814309782,
+        0.008284513210721912,
+        0.2491772001222605,
+        -0.26178473499313243,
+        0.03078330246165189,
+        0.9056281688753619,
+        -0.040219570199244166,
+        0.0027209556477792145,
+        -0.012700100122921642
+      ],
+      "target_left_pose": [
+        [
+          0.404506849573,
+          0.137000920033,
+          0.904215105248,
+          0.102312109608
+        ],
+        [
+          0.202063798309,
+          0.950891749671,
+          -0.234467698884,
+          0.260803361521
+        ],
+        [
+          -0.891932973974,
+          0.277552928857,
+          0.356959299671,
+          -0.160092155562
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.358831534705,
+          -0.02221118215,
+          0.933138035389,
+          0.060735395461
+        ],
+        [
+          -0.250279772883,
+          0.960818425884,
+          0.119113340004,
+          -0.271096941182
+        ],
+        [
+          -0.899221866386,
+          -0.276287198163,
+          0.339212940709,
+          -0.161378206577
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.404513622264,
+          0.136981636639,
+          0.904214996904,
+          0.102278129758
+        ],
+        [
+          0.202050370489,
+          0.950900381595,
+          -0.234444262176,
+          0.260794483504
+        ],
+        [
+          -0.891932944334,
+          0.277532872838,
+          0.356974967339,
+          -0.160018766399
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.358819264547,
+          -0.022196684829,
+          0.933143098658,
+          0.060720660519
+        ],
+        [
+          -0.250270769395,
+          0.960823523677,
+          0.119091134578,
+          -0.271081278381
+        ],
+        [
+          -0.899229268528,
+          -0.27627063458,
+          0.339206808735,
+          -0.161301040686
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": null
+    },
+    {
+      "sample_id": "independent/trajectory/waist_wrist_sweep/002",
+      "mode": "independent",
+      "suite": "trajectory",
+      "case_id": "waist_wrist_sweep",
+      "step": 2,
+      "progress": 1.0,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.06860809000500012,
+      "iterations": 30,
+      "left_position_error_m": 5.170780093066257e-05,
+      "left_orientation_error_rad": 3.311319386751877e-05,
+      "right_position_error_m": 0.00018218105607702162,
+      "right_orientation_error_rad": 6.317891273927145e-05,
+      "closure_error": null,
+      "object_position_error_m": null,
+      "object_orientation_error_rad": null,
+      "min_joint_limit_margin_native": 0.431431889693736,
+      "q": [
+        -0.09599985149423056,
+        0.08856811030626402,
+        0.11817429214802601,
+        0.27438555307469686,
+        -0.08215940216187266,
+        0.9162519889995527,
+        0.10271649520719535,
+        0.01206196351897494,
+        0.017962086702528787,
+        0.19453808073406942,
+        -0.2739142076007356,
+        0.05983850644527906,
+        0.9089279107512303,
+        -0.07949679888775607,
+        -0.003976698612544723,
+        -0.025932639322719178
+      ],
+      "target_left_pose": [
+        [
+          0.443152366191,
+          0.276103371398,
+          0.85286746253,
+          0.145549664069
+        ],
+        [
+          0.163674947962,
+          0.91047429921,
+          -0.379798712331,
+          0.248218784965
+        ],
+        [
+          -0.881377610193,
+          0.307901735594,
+          0.358287635105,
+          -0.159198076581
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.354580735408,
+          -0.053027664412,
+          0.933520524083,
+          0.063210070599
+        ],
+        [
+          -0.265302222637,
+          0.951652807033,
+          0.154827857735,
+          -0.27477423609
+        ],
+        [
+          -0.896597586848,
+          -0.302564045574,
+          0.323369394941,
+          -0.162111802765
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.443163003119,
+          0.276086558951,
+          0.852867378104,
+          0.145519012374
+        ],
+        [
+          0.163657615595,
+          0.910486185966,
+          -0.379777684998,
+          0.24822204884
+        ],
+        [
+          -0.881375480442,
+          0.30788166092,
+          0.358310124535,
+          -0.159156561313
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.354524926516,
+          -0.053014448641,
+          0.933542470761,
+          0.063201020096
+        ],
+        [
+          -0.265299818121,
+          0.951658933092,
+          0.154794320218,
+          -0.274727337854
+        ],
+        [
+          -0.896620367259,
+          -0.302547092701,
+          0.323322089741,
+          -0.1619359944
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": null
+    },
+    {
+      "sample_id": "carry/trajectory/object_waist_yaw/000",
+      "mode": "carry",
+      "suite": "trajectory",
+      "case_id": "object_waist_yaw",
+      "step": 0,
+      "progress": 0.0,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.004700660996604711,
+      "iterations": 1,
+      "left_position_error_m": 6.938893903907228e-18,
+      "left_orientation_error_rad": 3.904822380799462e-17,
+      "right_position_error_m": 1.2412670766236366e-16,
+      "right_orientation_error_rad": 5.1726901925761333e-17,
+      "closure_error": 6.268107029455597e-17,
+      "object_position_error_m": 1.1464934308770758e-16,
+      "object_orientation_error_rad": 4.2308051526756253e-17,
+      "min_joint_limit_margin_native": 0.52,
+      "q": [
+        0.0,
+        0.0,
+        0.3,
+        0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0,
+        0.3,
+        -0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          5e-06
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "sample_id": "carry/trajectory/object_waist_yaw/001",
+      "mode": "carry",
+      "suite": "trajectory",
+      "case_id": "object_waist_yaw",
+      "step": 1,
+      "progress": 0.5,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.02498783200280741,
+      "iterations": 8,
+      "left_position_error_m": 4.3516423805097686e-05,
+      "left_orientation_error_rad": 1.7228798807841954e-05,
+      "right_position_error_m": 4.6692870317591486e-05,
+      "right_orientation_error_rad": 1.7228798991348826e-05,
+      "closure_error": 1.5264646420786097e-12,
+      "object_position_error_m": 4.497512603493238e-05,
+      "object_orientation_error_rad": 1.722879899132311e-05,
+      "min_joint_limit_margin_native": 0.5199298658590469,
+      "q": [
+        0.06917152346032655,
+        -7.013414095308418e-05,
+        0.321111821553253,
+        0.24571390066329607,
+        0.01411831962128348,
+        0.9003930373974324,
+        -0.013687274143091645,
+        -0.01380648066090104,
+        0.0045850627611835615,
+        0.2788542354153876,
+        -0.25370689170626914,
+        0.014366232474510523,
+        0.8997005308908249,
+        -0.013650302599858524,
+        0.013798394876536604,
+        0.004950162686708058
+      ],
+      "target_left_pose": [
+        [
+          0.337202836836,
+          -0.105093889209,
+          0.935547711921,
+          0.030969777378
+        ],
+        [
+          0.269789163213,
+          0.962857490664,
+          0.010920626639,
+          0.272667942772
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.384080062848,
+          -0.088291244972,
+          0.919068638016,
+          0.084522203117
+        ],
+        [
+          -0.197419479992,
+          0.964543378463,
+          0.175161696676,
+          -0.261070042571
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.337197870888,
+          -0.105078949926,
+          0.935551179867,
+          0.030970241235
+        ],
+        [
+          0.269779268246,
+          0.962860377564,
+          0.010910533552,
+          0.272669441499
+        ],
+        [
+          -0.901951629686,
+          0.248713304027,
+          0.353022591497,
+          -0.161309606949
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.38406898463,
+          -0.088280968983,
+          0.91907425465,
+          0.084515684332
+        ],
+        [
+          -0.197429988184,
+          0.964543021337,
+          0.175151819161,
+          -0.261069244391
+        ],
+        [
+          -0.901949230728,
+          -0.248723200577,
+          0.353021748173,
+          -0.161306866385
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": [
+        [
+          0.337202836836,
+          -0.105093889209,
+          0.935547711921,
+          0.057745990248
+        ],
+        [
+          0.269789163213,
+          0.962857490664,
+          0.010920626639,
+          0.0057989501
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "sample_id": "carry/trajectory/object_waist_yaw/002",
+      "mode": "carry",
+      "suite": "trajectory",
+      "case_id": "object_waist_yaw",
+      "step": 2,
+      "progress": 1.0,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.07804243099235464,
+      "iterations": 31,
+      "left_position_error_m": 1.2239729362000747e-05,
+      "left_orientation_error_rad": 1.3412449124494883e-05,
+      "right_position_error_m": 1.2815803630429362e-05,
+      "right_orientation_error_rad": 1.3412449356325815e-05,
+      "closure_error": 3.142052815770727e-13,
+      "object_position_error_m": 1.2054164815072982e-05,
+      "object_orientation_error_rad": 1.3412449356309542e-05,
+      "min_joint_limit_margin_native": 0.5183840356172373,
+      "q": [
+        0.13879904191586498,
+        -0.0016159643827626565,
+        0.34066955947844874,
+        0.24085826555591144,
+        0.027773941055352847,
+        0.9043066689179426,
+        -0.026861602059109365,
+        -0.02838698020504716,
+        0.008791437921752642,
+        0.2564384206621153,
+        -0.2566105461242694,
+        0.028773400852440133,
+        0.9038881844898504,
+        -0.02739012697185337,
+        0.025812343721971675,
+        0.010177211724636563
+      ],
+      "target_left_pose": [
+        [
+          0.308584253258,
+          -0.200694210545,
+          0.929783626708,
+          0.003593685152
+        ],
+        [
+          0.302105452448,
+          0.947555331751,
+          0.10426499351,
+          0.274397557484
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.401870323534,
+          -0.184143817481,
+          0.896990132357,
+          0.110163458494
+        ],
+        [
+          -0.158089179959,
+          0.950910262517,
+          0.266040380056,
+          -0.251327639468
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.308584656383,
+          -0.200681208394,
+          0.929786299341,
+          0.003596963543
+        ],
+        [
+          0.302099831859,
+          0.947558352096,
+          0.104253829491,
+          0.274398405793
+        ],
+        [
+          -0.901948558087,
+          0.248717152546,
+          0.353027727797,
+          -0.161341333131
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.40186487265,
+          -0.184132669775,
+          0.89699486289,
+          0.110160049279
+        ],
+        [
+          -0.158095987175,
+          0.950912137429,
+          0.26602963318,
+          -0.251328146759
+        ],
+        [
+          -0.90194804893,
+          -0.248719252998,
+          0.35302754881,
+          -0.161340751472
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": [
+        [
+          0.308584253258,
+          -0.200694210545,
+          0.929783626708,
+          0.056878571823
+        ],
+        [
+          0.302105452448,
+          0.947555331751,
+          0.10426499351,
+          0.011534959008
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "sample_id": "carry/trajectory/object_waist_pitch/000",
+      "mode": "carry",
+      "suite": "trajectory",
+      "case_id": "object_waist_pitch",
+      "step": 0,
+      "progress": 0.0,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.004673793009715155,
+      "iterations": 1,
+      "left_position_error_m": 6.938893903907228e-18,
+      "left_orientation_error_rad": 3.904822380799462e-17,
+      "right_position_error_m": 1.2412670766236366e-16,
+      "right_orientation_error_rad": 5.1726901925761333e-17,
+      "closure_error": 6.268107029455597e-17,
+      "object_position_error_m": 1.1464934308770758e-16,
+      "object_orientation_error_rad": 4.2308051526756253e-17,
+      "min_joint_limit_margin_native": 0.52,
+      "q": [
+        0.0,
+        0.0,
+        0.3,
+        0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0,
+        0.3,
+        -0.25,
+        0.0,
+        0.9,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "target_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.362452201134,
+          0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.901946813422,
+          -0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": [
+        [
+          0.362452201134,
+          -0.008443504471,
+          0.931964113647,
+          0.058036429826
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          5e-06
+        ],
+        [
+          -0.901946813422,
+          0.248718168062,
+          0.353031469749,
+          -0.161353095083
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "sample_id": "carry/trajectory/object_waist_pitch/001",
+      "mode": "carry",
+      "suite": "trajectory",
+      "case_id": "object_waist_pitch",
+      "step": 1,
+      "progress": 0.5,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.034581788000650704,
+      "iterations": 13,
+      "left_position_error_m": 2.6177236838858635e-05,
+      "left_orientation_error_rad": 2.1865340875817747e-05,
+      "right_position_error_m": 2.6127239510814054e-05,
+      "right_orientation_error_rad": 2.186534087177976e-05,
+      "closure_error": 3.20654759059358e-14,
+      "object_position_error_m": 2.6152238069817908e-05,
+      "object_orientation_error_rad": 2.1865340875777652e-05,
+      "min_joint_limit_margin_native": 0.48677014585353257,
+      "q": [
+        1.1199057588900767e-07,
+        -0.03322985414646743,
+        0.2963323053956169,
+        0.24902611955698153,
+        0.0036345795491996547,
+        0.8977626938340252,
+        -0.0029151073496536065,
+        -0.020005452305326077,
+        0.0007262654507202189,
+        0.2963325128582651,
+        -0.24902567190865085,
+        -0.0036345565897276506,
+        0.8977626592474656,
+        0.002915148591738021,
+        -0.020005556499207534,
+        -0.0007265647481038652
+      ],
+      "target_left_pose": [
+        [
+          0.415884327436,
+          -0.023342448563,
+          0.909117900103,
+          0.070238657753
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.878589710014,
+          0.247764303294,
+          0.408280505867,
+          -0.157265806195
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.415884327436,
+          0.023342448563,
+          0.909117900103,
+          0.070238657753
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.878589710014,
+          -0.247764303294,
+          0.408280505867,
+          -0.157265806195
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.415865122425,
+          -0.023337008155,
+          0.909126825036,
+          0.070242886736
+        ],
+        [
+          0.234777299529,
+          0.968539073924,
+          -0.082532914086,
+          0.268214003821
+        ],
+        [
+          -0.878598781911,
+          0.247764901332,
+          0.408260620305,
+          -0.157239972953
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.415865111274,
+          0.023337054157,
+          0.909126828956,
+          0.070242873997
+        ],
+        [
+          -0.234777160149,
+          0.968539117691,
+          0.082532796962,
+          -0.268203836394
+        ],
+        [
+          -0.878598824434,
+          -0.24776472591,
+          0.408260635253,
+          -0.157240021531
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": [
+        [
+          0.415884327436,
+          -0.023342448563,
+          0.909117900103,
+          0.070238657753
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          5e-06
+        ],
+        [
+          -0.878589710014,
+          0.247764303294,
+          0.408280505867,
+          -0.157265806195
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    {
+      "sample_id": "carry/trajectory/object_waist_pitch/002",
+      "mode": "carry",
+      "suite": "trajectory",
+      "case_id": "object_waist_pitch",
+      "step": 2,
+      "progress": 1.0,
+      "success": true,
+      "message": "Optimization terminated successfully",
+      "solve_time_s": 0.044827488003647886,
+      "iterations": 17,
+      "left_position_error_m": 2.5967467050441633e-05,
+      "left_orientation_error_rad": 2.232825657553534e-05,
+      "right_position_error_m": 2.597229400622375e-05,
+      "right_orientation_error_rad": 2.232825656349884e-05,
+      "closure_error": 9.925484899341454e-14,
+      "object_position_error_m": 2.5969880535540578e-05,
+      "object_orientation_error_rad": 2.2328256575546037e-05,
+      "min_joint_limit_margin_native": 0.4538232316602503,
+      "q": [
+        1.4834995429915226e-07,
+        -0.06617676833974974,
+        0.29270055800440925,
+        0.2480356442715032,
+        0.007291299669671606,
+        0.8953833368843961,
+        -0.005883625241313068,
+        -0.04020354850961081,
+        0.0013702671439603214,
+        0.2927008317703428,
+        -0.2480356350592261,
+        -0.007291416638716875,
+        0.895383161408708,
+        0.005883769227442549,
+        -0.040203574697464876,
+        -0.001370336178462895
+      ],
+      "target_left_pose": [
+        [
+          0.467819719262,
+          -0.038157385047,
+          0.882999843848,
+          0.08217383804
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          0.268213920107
+        ],
+        [
+          -0.852070632412,
+          0.245918754588,
+          0.462060173054,
+          -0.152454177746
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_right_pose": [
+        [
+          0.467819719262,
+          0.038157385047,
+          0.882999843848,
+          0.08217383804
+        ],
+        [
+          -0.234777229839,
+          0.968539095808,
+          0.082532855524,
+          -0.268203920107
+        ],
+        [
+          -0.852070632412,
+          -0.245918754588,
+          0.462060173054,
+          -0.152454177746
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_left_pose": [
+        [
+          0.467800693729,
+          -0.038151894784,
+          0.883010160684,
+          0.082177170266
+        ],
+        [
+          0.234777222515,
+          0.96853909799,
+          -0.082532850751,
+          0.268213917725
+        ],
+        [
+          -0.852081079906,
+          0.245919597815,
+          0.462040457835,
+          -0.152428424968
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "achieved_right_pose": [
+        [
+          0.467800694061,
+          0.038151893418,
+          0.883010160567,
+          0.082177170645
+        ],
+        [
+          -0.234777237163,
+          0.968539093626,
+          0.082532860297,
+          -0.26820392249
+        ],
+        [
+          -0.852081075689,
+          -0.245919615214,
+          0.462040456352,
+          -0.152428420149
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "target_object_pose": [
+        [
+          0.467819719262,
+          -0.038157385047,
+          0.882999843848,
+          0.08217383804
+        ],
+        [
+          0.234777229839,
+          0.968539095808,
+          -0.082532855524,
+          5e-06
+        ],
+        [
+          -0.852070632412,
+          0.245918754588,
+          0.462060173054,
+          -0.152454177746
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  ]
+}

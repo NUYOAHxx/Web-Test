@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+src/bimanual_wbik/__init__.py
+src/bimanual_wbik/benchmark.py
+src/bimanual_wbik/default_robot.json
+src/bimanual_wbik/demo.py
+src/bimanual_wbik/math3d.py
+src/bimanual_wbik/model.py
+src/bimanual_wbik/solver.py
+src/bimanual_whole_body_ik.egg-info/PKG-INFO
+src/bimanual_whole_body_ik.egg-info/SOURCES.txt
+src/bimanual_whole_body_ik.egg-info/dependency_links.txt
+src/bimanual_whole_body_ik.egg-info/entry_points.txt
+src/bimanual_whole_body_ik.egg-info/requires.txt
+src/bimanual_whole_body_ik.egg-info/top_level.txt
+tests/test_ik.py
