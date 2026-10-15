@@ -1,0 +1,698 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Pinocchio 阻尼最小二乘 IK 核心（工业级重构版：无状态度量 + SNS 限位投影 + 零漂移负载优化）。
+
+本模块只包含单 seed 数值算法和 Pinocchio 模型映射。候选打分与
+portfolio 编排保留在 ``ha_arm_ik.solver``。
+"""
+
+import math
+
+import numpy as np
+from scipy.linalg import cho_factor, cho_solve
+
+try:
+    import pinocchio as pin
+except Exception:
+    pin = None
+
+from ha_arm_ik.ik_common import (
+    TOOL_AXIS_X,
+    clip_to_bounds,
+    closest_direction_on_cone,
+    normalize,
+    normalize_cone_half_angle,
+    skew,
+    unique_seed_list,
+    validate_orientation_mode,
+)
+from ha_arm_ik.robot_model import WAIST_JOINT_NAMES
+
+# =============================================================================
+# 1. 基础数值与收敛容差参数
+# =============================================================================
+PIN_IK_MAX_ITER = 500
+PIN_IK_DAMPING = 1e-6
+PIN_IK_POS_TOL = 5e-4
+PIN_IK_ORI_TOL = 5e-4
+PIN_IK_MAX_STEP = 0.5             # 单次迭代关节步长上限（弧度）
+PIN_IK_STALL_ITERS = 25           # 连续微进展迭代次数上限 -> 放弃
+PIN_IK_STALL_DELTA_M = 5e-5       # 单次迭代进展阈值（米，= 0.05 mm）
+PIN_IK_MAX_VALID_CANDIDATES = 2
+WAIST_RETURN_TOL = 0.10           # 外层早停的腰部回中阈值
+N_NOISE_PER_BASE = 16
+NOISE_SCALES = [0.02, 0.05, 0.10, 0.20]
+
+# =============================================================================
+# 2. 零空间防漂移与流形稳态收敛参数
+# =============================================================================
+NULLSPACE_GAIN = 0.25             # 手臂冗余关节拉向 q_ref 的次任务增益
+WAIST_NULL_GAIN = 0.45            # 腰部关节拉向 q_ref（直立位）的次任务增益
+NULLSPACE_ERR_SCALE = 0.06        # 主任务误差小于此值时零空间整理全功率激活
+POSTURE_SETTLE_TOL = 1e-3         # 末端收敛后，零空间步长小于此阈值(rad)才算稳态收敛
+MAX_SETTLE_EXTRA_ITERS = 35       # 末端达标后允许继续在零空间整理姿态的最大步数
+
+# =============================================================================
+# 3. 无状态腰部自适应释放参数（路径无关，去返程对称）
+# =============================================================================
+WAIST_TASK_WEIGHT = 6.0           # 近距离时腰部关节空间代价（手臂 = 1.0，锁死稳重心）
+WAIST_TASK_WEIGHT_FAR = 1.0       # 远目标释放后的腰部权重（与手臂平权协同，防过度弯腰）
+WAIST_RELEASE_START = 0.75        # 肩->目标距离/最大臂展 达到此比例开始放腰
+WAIST_RELEASE_END = 0.94          # 达到此比例腰完全释放
+WAIST_RETURN_RELEASE_RAD = 0.20   # 返程解锁尺度(rad)：腰偏离 q_ref 时保持释放通道以便退回
+
+# =============================================================================
+# 4. 电机重力矩卸载、重心稳定与限位保护参数
+# =============================================================================
+GRAVITY_TORQUE_GAIN = 0.04        # 相对重力矩卸载增益（抑制远伸时腰/肩大力矩）
+COM_XY_GAIN = 0.12                # 相对质心(CoM)水平防倾倒增益（拉回待命重心投影）
+ WAIST_YAW_VIRTUAL_LIM = np.deg2rad(90.0)   # 腰部旋转(±360°)相对 q_ref 的最大允许工作偏角
+ARM_ROLL_VIRTUAL_LIM = np.deg2rad(150.0)   # 臂自转关节(±360°)相对 q_ref 的最大允许工作偏角
+MAX_SNS_CLAMP_PASSES = 3          # 单步内非对称限位碰撞重投影最大次数
+
+
+# =============================================================================
+# 配置与 Pinocchio 映射
+# =============================================================================
+def build_pinocchio_joint_maps(model, active_joint_names):
+    """建立 active_joint_names 与 Pinocchio 关节索引之间的映射。"""
+    name_to_joint_id = {}
+    name_to_q_idx = {}
+    name_to_v_idx = {}
+
+    for jid in range(1, model.njoints):
+        name = model.names[jid]
+        name_to_joint_id[name] = jid
+        name_to_q_idx[name] = model.joints[jid].idx_q
+        name_to_v_idx[name] = model.joints[jid].idx_v
+
+    active_q_indices = []
+    active_v_indices = []
+    active_names = []
+    effort_limits = []
+
+    for name in active_joint_names:
+        if name not in name_to_joint_id:
+            raise KeyError(
+                f"Active joint '{name}' not found in Pinocchio model. "
+                f"Available: {list(name_to_joint_id.keys())}"
+            )
+        active_q_indices.append(name_to_q_idx[name])
+        active_v_indices.append(name_to_v_idx[name])
+        active_names.append(name)
+
+        jid = name_to_joint_id[name]
+        eff = float(model.effortLimit[model.joints[jid].idx_v])
+        effort_limits.append(eff if eff > 1e-9 else 1.0)
+
+    return {
+        "name_to_joint_id": name_to_joint_id,
+        "name_to_q_idx": name_to_q_idx,
+        "name_to_v_idx": name_to_v_idx,
+        "active_q_indices": active_q_indices,
+        "active_v_indices": active_v_indices,
+        "active_names": active_names,
+        "effort_limits": np.array(effort_limits, dtype=float),
+    }
+
+
+def active_q_to_pinocchio_q(model, pin_maps, q_active):
+    """由活跃关节值构造完整的 Pinocchio q 向量（非活跃关节置为 neutral）。"""
+    q_full = pin.neutral(model)
+    for k, q_idx in enumerate(pin_maps["active_q_indices"]):
+        q_full[q_idx] = float(q_active[k])
+    return q_full
+
+
+def pinocchio_q_to_active_q(pin_maps, q_full):
+    """从完整 Pinocchio q 向量中提取活跃关节值。"""
+    return np.array(
+        [float(q_full[idx]) for idx in pin_maps["active_q_indices"]],
+        dtype=float,
+    )
+
+
+def estimate_arm_max_reach(pin_model, pin_maps, ee_frame_id):
+    """从 Pinocchio 模型解析肩->TCP 的最大几何距离。"""
+    arm_names = [
+        n for n in pin_maps["active_names"] if n not in WAIST_JOINT_NAMES
+    ]
+    if not arm_names:
+        return None
+
+    side_prefix = (
+        "LHand" if any(n.startswith("LHand") for n in arm_names) else "RHand"
+    )
+    reach = 0.0
+    for link_idx in (3, 5):
+        name = f"{side_prefix}_Link{link_idx}"
+        if name not in pin_maps["name_to_joint_id"]:
+            return None
+        jid = pin_maps["name_to_joint_id"][name]
+        seg = float(np.linalg.norm(pin_model.jointPlacements[jid].translation))
+        if seg <= 1e-9:
+            return None
+        reach += seg
+
+    frame = pin_model.frames[ee_frame_id]
+    tcp_off = float(np.linalg.norm(frame.placement.translation))
+    return reach + tcp_off
+
+
+def _build_effective_bounds(
+    lower, upper, q_ref, seed, waist_bool_mask
+):
+    """为 ±360° 大范围旋转关节构建围绕 q_ref 的虚拟工作边界，阻断多圈缠绕与分支翻转。"""
+    eff_lower = np.asarray(lower, dtype=float).copy()
+    eff_upper = np.asarray(upper, dtype=float).copy()
+    span = eff_upper - eff_lower
+
+    # 识别物理限位大于 300°（如 ±360°）的大范围自转关节
+    wide_joints = span > np.deg2rad(300.0)
+    for k in np.nonzero(wide_joints)[0]:
+        half_win = (
+            WAIST_YAW_VIRTUAL_LIM
+            if waist_bool_mask[k]
+            else ARM_ROLL_VIRTUAL_LIM
+        )
+        virt_low = min(q_ref[k] - half_win, seed[k] - 0.1)
+        virt_high = max(q_ref[k] + half_win, seed[k] + 0.1)
+        eff_lower[k] = max(eff_lower[k], virt_low)
+        eff_upper[k] = min(eff_upper[k], virt_high)
+
+    return eff_lower + 1e-9, eff_upper - 1e-9
+
+
+def _compute_nullspace_gradient_and_cost(
+    pin_model,
+    pin_data,
+    q_full,
+    q_active_cur,
+    q_ref,
+    ns_gain,
+    active_v_indices,
+    effort_limits,
+    movable_mask,
+    include_waist,
+    tau_g_ref,
+    com_xy_ref,
+):
+    """计算以 q_ref 为全局唯一零点的复合零空间负梯度与标量代价。
+
+    通过最小化相对于 q_ref 的偏离量：
+        H(q) = 0.5 * ||q - q_ref||^2_{ns}
+             + 0.5 * w_g * ||(tau_g(q) - tau_g(q_ref)) / eff_lim||^2
+             + 0.5 * w_c * ||CoM_xy(q) - CoM_xy(q_ref)||^2
+    保证在 q = q_ref 处所有梯度严格同时为 0，既消除远伸大力矩与重心偏移，
+    又绝不会在待命位姿附近产生偏置漂移或"倒立摆零力矩陷阱"。
+    """
+    diff_q = q_ref - q_active_cur
+    z_total = ns_gain * diff_q
+    cost = 0.5 * float(np.dot(ns_gain * (diff_q ** 2), movable_mask))
+
+    # 相对重力矩卸载项
+    if GRAVITY_TORQUE_GAIN > 0.0 and tau_g_ref is not None:
+        try:
+            dtau_dq_full = pin.computeGeneralizedGravityDerivatives(
+                pin_model, pin_data, q_full
+            )
+            tau_g_cur = pin_data.g[active_v_indices]
+            dtau_dq_active = dtau_dq_full[
+                np.ix_(active_v_indices, active_v_indices)
+            ]
+            tau_diff = tau_g_cur - tau_g_ref
+            inv_eff_sq = 1.0 / (effort_limits ** 2)
+            z_gravity = -GRAVITY_TORQUE_GAIN * (
+                dtau_dq_active.T @ (tau_diff * inv_eff_sq)
+            )
+            z_total += z_gravity
+            cost += 0.5 * GRAVITY_TORQUE_GAIN * float(
+                np.sum((tau_diff ** 2) * inv_eff_sq)
+            )
+        except Exception:
+            pass
+
+    # 相对整机质心 (CoM) 水平稳定项
+    if include_waist and COM_XY_GAIN > 0.0 and com_xy_ref is not None:
+        try:
+            J_com_full = pin.jacobianCenterOfMass(
+                pin_model, pin_data, q_full, False
+            )
+            com_xy_diff = pin_data.com[0][:2] - com_xy_ref
+            J_com_xy = J_com_full[:2, active_v_indices]
+            z_com = -COM_XY_GAIN * (J_com_xy.T @ com_xy_diff)
+            z_total += z_com
+            cost += 0.5 * COM_XY_GAIN * float(com_xy_diff @ com_xy_diff)
+        except Exception:
+            pass
+
+    return z_total * movable_mask, cost
+
+
+def _solve_sns_clamped_step(
+    J_active,
+    err,
+    z_total,
+    null_weight,
+    W_inv,
+    movable_mask,
+    q_active_cur,
+    eff_lower,
+    eff_upper,
+    damping,
+    max_step,
+):
+    """带 Active-Set 限位钳制重投影（SNS）的加权阻尼最小二乘求解。
+
+    当某关节（如非对称限位的 Link2/Link6/Link7）触碰物理边界时，
+    将其钳制在边界并从自由集中剔除，利用剩余自由关节重算伪逆与零空间投影，
+    避免粗暴 np.clip 破坏零空间正交性（J @ dq_null = 0）。
+    """
+    n_active = len(q_active_cur)
+    free_mask = movable_mask.copy()
+    dq_clamped = np.zeros(n_active, dtype=float)
+    dq_null_out = np.zeros(n_active, dtype=float)
+    task_dim = err.size
+
+    for pass_idx in range(MAX_SNS_CLAMP_PASSES):
+        if not np.any(free_mask):
+            break
+
+        # 补偿已被钳制关节对主任务产生的耦合误差
+        err_rem = err - J_active @ dq_clamped
+        J_free = J_active[:, free_mask]
+        W_inv_free = W_inv[np.ix_(free_mask, free_mask)]
+
+        A = J_free @ W_inv_free @ J_free.T
+        A.flat[:: task_dim + 1] += damping
+
+        chol_fac = None
+        try:
+            chol_fac = cho_factor(A, check_finite=False)
+            rhs = cho_solve(chol_fac, err_rem, check_finite=False)
+        except (np.linalg.LinAlgError, ValueError):
+            rhs = np.linalg.solve(A, err_rem)
+
+        dq_task_free = W_inv_free @ (J_free.T @ rhs)
+
+        # 在当前自由关节子空间上执行正交零空间投影
+        dq_null_free = np.zeros_like(dq_task_free)
+        if z_total is not None and null_weight > 0.0:
+            z_free = z_total[free_mask]
+            Jz = J_free @ z_free
+            if chol_fac is not None:
+                J_free_invA_Jz = cho_solve(chol_fac, Jz, check_finite=False)
+            else:
+                J_free_invA_Jz = np.linalg.solve(A, Jz)
+            dq_null_free = null_weight * (
+                z_free - W_inv_free @ (J_free.T @ J_free_invA_Jz)
+            )
+
+        dq_total = dq_clamped.copy()
+        dq_total[free_mask] = dq_task_free + dq_null_free
+
+        dq_null_out.fill(0.0)
+        dq_null_out[free_mask] = dq_null_free
+
+        # 全局步长限幅
+        dq_norm = math.sqrt(float(dq_total @ dq_total))
+        if dq_norm > max_step:
+            scale = max_step / dq_norm
+            dq_total *= scale
+            dq_null_out *= scale
+
+        # 检查自由关节是否越界
+        q_trial = q_active_cur + dq_total
+        under = (q_trial < eff_lower) & free_mask
+        over = (q_trial > eff_upper) & free_mask
+        violated = under | over
+
+        if not np.any(violated) or pass_idx == MAX_SNS_CLAMP_PASSES - 1:
+            return dq_total, dq_null_out
+
+        # 将越界最严重的关节（或所有越界且正在往边界外推的关节）钳制并移出自由集
+        dq_clamped[under] = eff_lower[under] - q_active_cur[under]
+        dq_clamped[over] = eff_upper[over] - q_active_cur[over]
+        free_mask[violated] = False
+
+    return dq_clamped, dq_null_out
+
+
+def pinocchio_ik_one_seed(
+    pin_model,
+    pin_data,
+    pin_maps,
+    ee_frame_id,
+    T_target,
+    seed,
+    lower,
+    upper,
+    max_iter=PIN_IK_MAX_ITER,
+    damping=PIN_IK_DAMPING,
+    pos_tol=PIN_IK_POS_TOL,
+    ori_tol=PIN_IK_ORI_TOL,
+    max_step=PIN_IK_MAX_STEP,
+    orientation_mode="full",
+    tool_axis=None,
+    tool_cone_half_angle=None,
+    joint_weights=None,
+    q_ref=None,
+    include_waist=False,
+    fixed_joint_mask=None,
+    waist_release=False,
+    waist_max_reach=None,
+):
+    """使用 Pinocchio FK + Jacobian 的阻尼最小二乘 IK（单主循环统一收敛与流形精修）。"""
+    orientation_mode = validate_orientation_mode(orientation_mode)
+    tool_cone_half_angle = normalize_cone_half_angle(tool_cone_half_angle)
+    if tool_axis is None:
+        tool_axis = TOOL_AXIS_X
+
+    tool_axis = normalize(tool_axis)
+    seed = np.asarray(seed, dtype=float)
+
+    if q_ref is None:
+        q_ref = seed.copy()
+    else:
+        q_ref = np.asarray(q_ref, dtype=float).copy()
+
+    if joint_weights is None:
+        joint_weights = np.ones(len(pin_maps["active_v_indices"]), dtype=float)
+    else:
+        joint_weights = np.asarray(joint_weights, dtype=float)
+
+    R_des = np.asarray(T_target[:3, :3], dtype=float, order="C")
+    p_des = np.asarray(T_target[:3, 3], dtype=float)
+    oMdes = pin.SE3(R_des, p_des)
+    d_des = normalize(R_des @ tool_axis)
+
+    active_q_indices = np.asarray(pin_maps["active_q_indices"], dtype=np.intp)
+    active_v_indices = np.asarray(pin_maps["active_v_indices"], dtype=np.intp)
+    effort_limits = pin_maps["effort_limits"]
+    n_active = len(active_v_indices)
+
+    W_inv_base = np.diag(1.0 / joint_weights)
+
+    ns_gain = np.full(n_active, NULLSPACE_GAIN, dtype=float)
+    for k, name in enumerate(pin_maps["active_names"]):
+        if name in WAIST_JOINT_NAMES:
+            ns_gain[k] = WAIST_NULL_GAIN
+    use_nullspace = bool(
+        np.any(ns_gain > 0.0)
+        or GRAVITY_TORQUE_GAIN > 0.0
+        or (include_waist and COM_XY_GAIN > 0.0)
+    )
+
+    fixed_joint_mask = (
+        np.asarray(fixed_joint_mask, dtype=bool)
+        if fixed_joint_mask is not None
+        else np.zeros(n_active, dtype=bool)
+    )
+    movable_mask = ~fixed_joint_mask
+    waist_bool_mask = np.array(
+        [name in WAIST_JOINT_NAMES for name in pin_maps["active_names"]],
+        dtype=bool,
+    )
+
+    # 构建有效关节限位（收窄 ±360° 关节的虚拟工作盒，防止多圈漂移）
+    eff_lower, eff_upper = _build_effective_bounds(
+        lower, upper, q_ref, seed, waist_bool_mask
+    )
+    q_init = np.clip(seed, eff_lower, eff_upper)
+    q_full = active_q_to_pinocchio_q(pin_model, pin_maps, q_init)
+
+    # 预计算参考姿态 q_ref 下的基准重力矩与基准质心投影
+    tau_g_ref = None
+    com_xy_ref = None
+    if use_nullspace:
+        q_ref_full = active_q_to_pinocchio_q(pin_model, pin_maps, q_ref)
+        if GRAVITY_TORQUE_GAIN > 0.0:
+            try:
+                pin.computeGeneralizedGravity(pin_model, pin_data, q_ref_full)
+                tau_g_ref = pin_data.g[active_v_indices].copy()
+            except Exception:
+                tau_g_ref = None
+        if include_waist and COM_XY_GAIN > 0.0:
+            try:
+                pin.centerOfMass(pin_model, pin_data, q_ref_full, False)
+                com_xy_ref = pin_data.com[0][:2].copy()
+            except Exception:
+                com_xy_ref = None
+
+    # 无状态腰部自适应释放初始化
+    waist_release_active = bool(
+        waist_release
+        and include_waist
+        and np.any(waist_bool_mask & movable_mask)
+    )
+    if waist_release_active and waist_max_reach is None:
+        waist_max_reach = estimate_arm_max_reach(
+            pin_model, pin_maps, ee_frame_id
+        )
+    waist_release_active = bool(waist_release_active and waist_max_reach)
+
+    shoulder_jid = None
+    if waist_release_active:
+        for name in pin_maps["active_names"]:
+            if name not in WAIST_JOINT_NAMES and name.endswith("_Link2"):
+                shoulder_jid = pin_maps["name_to_joint_id"][name]
+                break
+        if shoulder_jid is None:
+            waist_release_active = False
+
+    waist_indices = np.nonzero(waist_bool_mask & movable_mask)[0]
+    waist_w_inv_stiff = (
+        1.0 / WAIST_TASK_WEIGHT if WAIST_TASK_WEIGHT > 0 else 1.0
+    )
+    waist_w_inv_far = (
+        1.0 / WAIST_TASK_WEIGHT_FAR if WAIST_TASK_WEIGHT_FAR > 0 else 1e3
+    )
+
+    seed_diag = {
+        "converged": False,
+        "iters": 0,
+        "final_pos_err": float("nan"),
+        "final_ori_err": float("nan"),
+        "stalled": False,
+        "error_history": [],
+    }
+
+    prev_pos_err = None
+    stall_count = 0
+    settle_iters = 0
+    best_converged_q_full = None
+    best_converged_cost = float("inf")
+    W_inv_cur = W_inv_base.copy()
+
+    for it in range(max_iter):
+        pin.forwardKinematics(pin_model, pin_data, q_full)
+        pin.updateFramePlacements(pin_model, pin_data)
+
+        oMcur = pin_data.oMf[ee_frame_id]
+        if orientation_mode == "full":
+            err_se3 = pin.log6(oMcur.inverse() * oMdes)
+            pos_norm = math.sqrt(float(err_se3.linear @ err_se3.linear))
+            ori_norm = math.sqrt(float(err_se3.angular @ err_se3.angular))
+            ori_violation = ori_norm
+            err = err_se3.vector
+
+            J_full = pin.computeFrameJacobian(
+                pin_model, pin_data, q_full, ee_frame_id, pin.LOCAL
+            )
+            J_active = J_full[:, active_v_indices]
+
+        elif orientation_mode == "tool_dir":
+            R_cur = np.asarray(oMcur.rotation, dtype=float)
+            p_cur = np.asarray(oMcur.translation, dtype=float)
+            d_cur = normalize(R_cur @ tool_axis)
+
+            e_pos = p_des - p_cur
+            e_dir = d_des - d_cur
+            pos_norm = float(np.linalg.norm(e_pos))
+            ori_norm = float(
+                np.arccos(np.clip(float(np.dot(d_cur, d_des)), -1.0, 1.0))
+            )
+            ori_violation = ori_norm
+
+            J_full = pin.computeFrameJacobian(
+                pin_model, pin_data, q_full, ee_frame_id, pin.WORLD
+            )
+            J_active_full = J_full[:, active_v_indices]
+            Jv = J_active_full[:3, :]
+            Jw = J_active_full[3:, :]
+            J_dir = -skew(d_cur) @ Jw
+
+            err = np.concatenate([e_pos, e_dir])
+            J_active = np.vstack([Jv, J_dir])
+
+        else:  # "tool_cone"
+            R_cur = np.asarray(oMcur.rotation, dtype=float)
+            p_cur = np.asarray(oMcur.translation, dtype=float)
+            d_cur = normalize(R_cur @ tool_axis)
+
+            e_pos = p_des - p_cur
+            d_closest, ori_norm, cone_violation, inside = (
+                closest_direction_on_cone(
+                    d_current=d_cur,
+                    d_target=d_des,
+                    cone_half_angle=tool_cone_half_angle,
+                )
+            )
+            pos_norm = float(np.linalg.norm(e_pos))
+            ori_violation = cone_violation
+
+            J_full = pin.computeFrameJacobian(
+                pin_model, pin_data, q_full, ee_frame_id, pin.WORLD
+            )
+            J_active_full = J_full[:, active_v_indices]
+            Jv = J_active_full[:3, :]
+            Jw = J_active_full[3:, :]
+
+            if inside or cone_violation <= ori_tol:
+                e_dir = np.zeros(3, dtype=float)
+                J_dir = np.zeros_like(Jw)
+            else:
+                e_dir = d_closest - d_cur
+                J_dir = -skew(d_cur) @ Jw
+
+            err = np.concatenate([e_pos, e_dir])
+            J_active = np.vstack([Jv, J_dir])
+
+        seed_diag["iters"] = it + 1
+        seed_diag["final_pos_err"] = pos_norm
+        seed_diag["final_ori_err"] = ori_norm
+        seed_diag["error_history"].append(
+            {"iteration": it + 1, "pos_err": pos_norm, "ori_err": ori_norm}
+        )
+
+        q_active_cur = q_full[active_q_indices]
+        task_converged = (pos_norm < pos_tol) and (ori_violation < ori_tol)
+
+        # 计算零空间复合梯度与当前姿态代价
+        z_total = None
+        posture_cost = 0.0
+        null_weight = 0.0
+        if use_nullspace:
+            z_total, posture_cost = _compute_nullspace_gradient_and_cost(
+                pin_model,
+                pin_data,
+                q_full,
+                q_active_cur,
+                q_ref,
+                ns_gain,
+                active_v_indices,
+                effort_limits,
+                movable_mask,
+                include_waist,
+                tau_g_ref,
+                com_xy_ref,
+            )
+            err_norm = float(np.linalg.norm(err))
+            null_weight = 1.0 / (
+                1.0 + (err_norm / max(NULLSPACE_ERR_SCALE, 1e-6)) ** 2
+            )
+
+        # 统一收敛与流形稳态判据
+        if task_converged:
+            seed_diag["converged"] = True
+            if posture_cost < best_converged_cost:
+                best_converged_cost = posture_cost
+                best_converged_q_full = q_full.copy()
+
+            if not use_nullspace or settle_iters >= MAX_SETTLE_EXTRA_ITERS:
+                break
+            settle_iters += 1
+
+        # 无状态腰部自适应释放（纯瞬时几何函数，去返程完全对称）
+        if waist_release_active:
+            p_shoulder = pin_data.oMi[shoulder_jid].translation
+            dist = float(np.linalg.norm(p_des - p_shoulder))
+            r_start = WAIST_RELEASE_START * waist_max_reach
+            r_span = (WAIST_RELEASE_END - WAIST_RELEASE_START) * waist_max_reach
+            t_dist = np.clip((dist - r_start) / max(r_span, 1e-4), 0.0, 1.0)
+            alpha_dist = float(t_dist * t_dist * (3.0 - 2.0 * t_dist))
+
+            waist_dev = float(
+                np.linalg.norm((q_active_cur - q_ref)[waist_indices])
+            )
+            alpha_return = float(
+                np.clip(
+                    waist_dev / max(WAIST_RETURN_RELEASE_RAD, 1e-4), 0.0, 1.0
+                )
+            )
+            alpha = max(alpha_dist, alpha_return)
+
+            w_inv_waist = (
+                1.0 - alpha
+            ) * waist_w_inv_stiff + alpha * waist_w_inv_far
+            W_inv_cur[waist_indices, waist_indices] = w_inv_waist
+
+        # SNS 迭代限位钳制与加权阻尼最小二乘求解
+        dq_active, dq_null = _solve_sns_clamped_step(
+            J_active=J_active,
+            err=err,
+            z_total=z_total,
+            null_weight=null_weight,
+            W_inv=W_inv_cur,
+            movable_mask=movable_mask,
+            q_active_cur=q_active_cur,
+            eff_lower=eff_lower,
+            eff_upper=eff_upper,
+            damping=damping,
+            max_step=max_step,
+        )
+
+        # 若末端已收敛且零空间整理步长已趋于 0（稳态极小值点），直接完成收敛
+        if task_converged and float(np.linalg.norm(dq_null)) < POSTURE_SETTLE_TOL:
+            q_next = np.clip(q_active_cur + dq_active, eff_lower, eff_upper)
+            q_full[active_q_indices] = q_next
+            best_converged_q_full = q_full.copy()
+            break
+
+        q_active_next = np.clip(
+            q_active_cur + dq_active, eff_lower, eff_upper
+        )
+        q_full[active_q_indices] = q_active_next
+
+        # 停滞检查（仅在末端尚未达标时生效）
+        if not task_converged:
+            if prev_pos_err is not None and (
+                abs(prev_pos_err - pos_norm) < PIN_IK_STALL_DELTA_M
+            ):
+                stall_count += 1
+            else:
+                stall_count = 0
+            prev_pos_err = pos_norm
+
+            if stall_count >= PIN_IK_STALL_ITERS:
+                seed_diag["stalled"] = True
+                break
+
+    if best_converged_q_full is not None:
+        q_full = best_converged_q_full
+
+    return pinocchio_q_to_active_q(pin_maps, q_full), seed_diag
+
+
+def make_scatter_seeds(q_prev, q_ready, lower, upper, rng):
+    """从 q_prev、q_ready 和噪声生成 IK 兜底用的散布种子。"""
+    seeds = []
+    q_prev = clip_to_bounds(q_prev, lower, upper)
+    q_ready = clip_to_bounds(q_ready, lower, upper)
+
+    seeds.append(q_prev.copy())
+    seeds.append(q_ready.copy())
+    bases = [q_prev, q_ready]
+
+    for base in bases:
+        for scale in NOISE_SCALES:
+            for _ in range(max(1, N_NOISE_PER_BASE // len(NOISE_SCALES))):
+                q_seed = base + rng.normal(scale=scale, size=len(base))
+                q_seed = clip_to_bounds(q_seed, lower, upper)
+                seeds.append(q_seed)
+
+    q_mid = 0.5 * (lower + upper)
+    seeds.append(clip_to_bounds(q_mid, lower, upper))
+
+    return unique_seed_list(seeds)
