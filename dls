@@ -6,6 +6,7 @@
 本模块只包含单 seed 数值算法和 Pinocchio 模型映射。候选打分与
 portfolio 编排保留在 ``ha_arm_ik.solver``。
 """
+
 import math
 
 import numpy as np
@@ -15,6 +16,7 @@ try:
     import pinocchio as pin
 except Exception:
     pin = None
+
 from ha_arm_ik.ik_common import (
     TOOL_AXIS_X,
     clip_to_bounds,
@@ -31,146 +33,155 @@ PIN_IK_MAX_ITER = 500
 PIN_IK_DAMPING = 1e-6
 PIN_IK_POS_TOL = 5e-4
 PIN_IK_ORI_TOL = 5e-4
-PIN_IK_MAX_STEP = 0.5            # 单次迭代关节步长上限（弧度）
-PIN_IK_STALL_ITERS = 25          # 连续微进展迭代次数上限 -> 放弃
-PIN_IK_STALL_DELTA_M = 5e-5      # 单次迭代进展阈值（米，= 0.05 mm）
+PIN_IK_MAX_STEP = 0.5             # 单次迭代关节步长上限（弧度）
+PIN_IK_STALL_ITERS = 25           # 连续微进展迭代次数上限 -> 放弃
+PIN_IK_STALL_DELTA_M = 5e-5       # 单次迭代进展阈值（米，= 0.05 mm）
 PIN_IK_MAX_VALID_CANDIDATES = 2
-WAIST_TASK_WEIGHT = 2.0          # 腰部关节的关节空间代价（手臂 = 1.0）
-NULLSPACE_GAIN = 0.0             # 把 q 拉向 q_ref 的次任务增益
-WAIST_NULL_GAIN = 0.0            # 腰部关节额外的 q_ref 回拉增益
-NULLSPACE_ERR_SCALE = 0.1        # ns 增益达到 1.0 时的任务误差范数
-WAIST_POST_GAIN = 0.0            # 已禁用：对成功率/腰位无实测收益
+WAIST_TASK_WEIGHT = 2.0           # 腰部关节的关节空间代价（手臂 = 1.0）
+NULLSPACE_GAIN = 0.0              # 把 q 拉向 q_ref 的次任务增益
+WAIST_NULL_GAIN = 0.0             # 腰部关节额外的 q_ref 回拉增益
+NULLSPACE_ERR_SCALE = 0.1         # ns 增益达到 1.0 时的任务误差范数
+WAIST_POST_GAIN = 0.0             # 已禁用：对成功率/腰位无实测收益
 WAIST_POST_ITERS = 60
-WAIST_POST_STEP = 0.05           # 单次迭代姿态步长的最大 2-范数（弧度）
-WAIST_POST_TOL = 0.01            # |q_waist - q_ready| < tol 时停止（弧度）
-WAIST_RETURN_TOL = 0.10          # 腰部已接近中位时的早停阈值
+WAIST_POST_STEP = 0.05            # 单次迭代姿态步长的最大 2-范数（弧度）
+WAIST_POST_TOL = 0.01             # |q_waist - q_ready| < tol 时停止（弧度）
+WAIST_RETURN_TOL = 0.10           # 腰部已接近中位时的早停阈值
+
 # 腰部自适应释放（移植自 wdls_9r_pro.Wdls9RSolver）：
 # 近目标腰近乎锁定，远目标/停滞时腰权重渐进放宽。
-WAIST_TASK_WEIGHT_FAR = 0.3      # 腰完全释放后的权重（远目标）
-WAIST_STAG_STEP = 0.15           # 停滞解锁：每步增加的腰部释放量
-WAIST_STAG_DECAY = 0.20          # 有进展时释放量的衰减
-WAIST_STAG_ERR_POS = 5e-3        # 判定"误差大"的位置阈值（米）
-WAIST_STAG_ERR_ORI = 2e-2        # 判定"误差大"的姿态阈值（弧度）
-WAIST_STAG_DECREASE = 0.02       # 单步误差平方下降 <2% 视为停滞
-WAIST_STAG_MIN_STALL = 5         # 主停滞计数达此值后停滞解锁才允许激活
-WAIST_RELEASE_START = 0.72       # 肩->目标距离/最大臂展 达到此比例开始放腰
-WAIST_RELEASE_END = 0.94         # 达到此比例腰完全释放
+WAIST_TASK_WEIGHT_FAR = 0.3       # 腰完全释放后的权重（远目标）
+WAIST_STAG_STEP = 0.15            # 停滞解锁：每步增加的腰部释放量
+WAIST_STAG_DECAY = 0.20           # 有进展时释放量的衰减
+WAIST_STAG_ERR_POS = 5e-3         # 判定"误差大"的位置阈值（米）
+WAIST_STAG_ERR_ORI = 2e-2         # 判定"误差大"的姿态阈值（弧度）
+WAIST_STAG_DECREASE = 0.02        # 单步误差平方下降 <2% 视为停滞
+WAIST_STAG_MIN_STALL = 5          # 主停滞计数达此值后停滞解锁才允许激活
+WAIST_RELEASE_START = 0.72        # 肩->目标距离/最大臂展 达到此比例开始放腰
+WAIST_RELEASE_END = 0.94          # 达到此比例腰完全释放
+
 # 偏航（Body_Link）侧向独立释放：目标水平偏角超过死区后平滑释放转体，
 # 与俯仰（按距离）互不耦合。远权重单独设（wdls_9r_pro 中胸偏航远权重
 # 1.5，远高于俯仰的 3.0/180 之比），完全释放给 1.0 防止背后侧目标躯干
 # 过度旋转。
 WAIST_YAW_RELEASE_START = np.deg2rad(30.0)   # 偏角死区上限：<=30° 完全锁定
 WAIST_YAW_RELEASE_END = np.deg2rad(65.0)     # 偏角达到此值完全释放
-WAIST_YAW_WEIGHT_FAR = 1.0       # 偏航完全释放后的权重（俯仰仍用 FAR=0.3）
+WAIST_YAW_WEIGHT_FAR = 1.0        # 偏航完全释放后的权重（俯仰仍用 FAR=0.3）
 N_NOISE_PER_BASE = 16
 NOISE_SCALES = [0.02, 0.05, 0.10, 0.20]
+
+
 # =============================================================================
 # 配置与 Pinocchio 映射
 # =============================================================================
 def build_pinocchio_joint_maps(model, active_joint_names):
-    """
-建立 active_joint_names 与 Pinocchio 关节索引之间的映射。
+    """建立 active_joint_names 与 Pinocchio 关节索引之间的映射。
 
     Pinocchio model.joints[0] 是"universe"（固定根关节）。
     实际关节从索引 1 开始。
 
     返回
     -------
- maps : dict
+    maps : dict
         - "name_to_joint_id"  : {关节名: pinocchio joint id}
         - "name_to_q_idx"     : {关节名: model q 向量中的索引}
         - "name_to_v_idx"     : {关节名: model v 向量中的索引}
         - "active_q_indices"  : list[int]  活跃关节的 q 向量索引
-   - "active_v_indices"  : list[int]  活跃关节的 v 向量索引
+        - "active_v_indices"  : list[int]  活跃关节的 v 向量索引
         - "effort_limits"     : np.ndarray 活跃关节的力矩限制
     """
     name_to_joint_id = {}
     name_to_q_idx = {}
     name_to_v_idx = {}
-for jid in range(1, model.njoints):
+
+    for jid in range(1, model.njoints):
         name = model.names[jid]
         name_to_joint_id[name] = jid
         name_to_q_idx[name] = model.joints[jid].idx_q
         name_to_v_idx[name] = model.joints[jid].idx_v
- active_q_indices = []
+
+    active_q_indices = []
     active_v_indices = []
     active_names = []
     effort_limits = []
 
     for name in active_joint_names:
- if name not in name_to_joint_id:
+        if name not in name_to_joint_id:
             raise KeyError(
                 f"Active joint '{name}' not found in Pinocchio model. "
                 f"Available: {list(name_to_joint_id.keys())}"
             )
-active_q_indices.append(name_to_q_idx[name])
+        active_q_indices.append(name_to_q_idx[name])
         active_v_indices.append(name_to_v_idx[name])
         active_names.append(name)
 
         jid = name_to_joint_id[name]
         eff = float(model.effortLimit[model.joints[jid].idx_v])
-
-effort_limits.append(eff if eff > 1e-9 else 1.0)
+        effort_limits.append(eff if eff > 1e-9 else 1.0)
 
     return {
         "name_to_joint_id": name_to_joint_id,
         "name_to_q_idx": name_to_q_idx,
         "name_to_v_idx": name_to_v_idx,
         "active_q_indices": active_q_indices,
- "active_v_indices": active_v_indices,
+        "active_v_indices": active_v_indices,
         "active_names": active_names,
         "effort_limits": np.array(effort_limits, dtype=float),
     }
 
+
 def active_q_to_pinocchio_q(model, pin_maps, q_active):
-    """
-    由我们的活跃关节值构造完整的 Pinocchio q 向量。
+    """由我们的活跃关节值构造完整的 Pinocchio q 向量。
+
     非活跃关节置为 neutral（零位）构型。
     """
     q_full = pin.neutral(model)
- for k, q_idx in enumerate(pin_maps["active_q_indices"]):
+    for k, q_idx in enumerate(pin_maps["active_q_indices"]):
         q_full[q_idx] = float(q_active[k])
 
     return q_full
+
+
 def pinocchio_q_to_active_q(pin_maps, q_full):
-    """
-    从完整 Pinocchio q 向量中提取活跃关节值。
-    """
+    """从完整 Pinocchio q 向量中提取活跃关节值。"""
     return np.array(
         [float(q_full[idx]) for idx in pin_maps["active_q_indices"]],
         dtype=float,
- )
+    )
 
 
 def estimate_arm_max_reach(pin_model, pin_maps, ee_frame_id):
-    """
-从 Pinocchio 模型解析肩->TCP 的最大距离：
+    """从 Pinocchio 模型解析肩->TCP 的最大距离：
 
         ‖Link3 origin‖ + ‖Link5 origin‖ + ‖EE frame placement‖
 
     对应 wdls_9r_pro 的 r_stw_max（0.2378 + 0.1719）加 TCP 偏移。
     关节名按 LHand/RHand_Link{3,5} 约定查找；查不到时返回 None。
-"""
-    arm_names = [n for n in pin_maps["active_names"]
-                 if n not in WAIST_JOINT_NAMES]
+    """
+    arm_names = [
+        n for n in pin_maps["active_names"] if n not in WAIST_JOINT_NAMES
+    ]
     if not arm_names:
         return None
-    side_prefix = "LHand" if any(n.startswith("LHand") for n in arm_names) \
-        else "RHand"
+
+    side_prefix = (
+        "LHand" if any(n.startswith("LHand") for n in arm_names) else "RHand"
+    )
     reach = 0.0
     for link_idx in (3, 5):
         name = f"{side_prefix}_Link{link_idx}"
-if name not in pin_maps["name_to_joint_id"]:
+        if name not in pin_maps["name_to_joint_id"]:
             return None
         jid = pin_maps["name_to_joint_id"][name]
         seg = float(np.linalg.norm(pin_model.jointPlacements[jid].translation))
         if seg <= 1e-9:
             return None
- reach += seg
+        reach += seg
+
     # TCP 偏移取自 EE frame 相对其父关节的 placement
     frame = pin_model.frames[ee_frame_id]
     tcp_off = float(np.linalg.norm(frame.placement.translation))
     return reach + tcp_off
+
 
 def pinocchio_ik_one_seed(
     pin_model,
@@ -181,14 +192,14 @@ def pinocchio_ik_one_seed(
     seed,
     lower,
     upper,
- max_iter=PIN_IK_MAX_ITER,
+    max_iter=PIN_IK_MAX_ITER,
     damping=PIN_IK_DAMPING,
     pos_tol=PIN_IK_POS_TOL,
     ori_tol=PIN_IK_ORI_TOL,
     max_step=PIN_IK_MAX_STEP,
     orientation_mode="full",
     tool_axis=None,
-tool_cone_half_angle=None,
+    tool_cone_half_angle=None,
     joint_weights=None,
     q_ref=None,
     include_waist=False,
@@ -196,42 +207,42 @@ tool_cone_half_angle=None,
     waist_release=False,
     waist_max_reach=None,
 ):
-"""
-    使用 Pinocchio FK + Jacobian 的阻尼最小二乘 IK。
+    """使用 Pinocchio FK + Jacobian 的阻尼最小二乘 IK。
 
     返回 (q_active, seed_diag)，其中 seed_diag 与
     pink_ik_one_seed 的结构一致：
-    {"converged", "iters", "final_pos_err",
-    "final_ori_err", "stalled"}。
-orientation_mode:
+    {"converged", "iters", "final_pos_err", "final_ori_err", "stalled"}。
+
+    orientation_mode:
         "full"     : 原始全位姿 IK
         "tool_dir" : 位置 + 仅约束所选工具轴方向
 
     tool_axis:
         待对齐的局部 EE/TCP 轴。通常为 [1, 0, 0]。
 
-joint_weights:
+    joint_weights:
         可选的逐关节 DLS 度量权重（长度 == n_active）。
         大于 1 的值使对应关节更难移动。
 
     q_ref:
         收敛后腰部中性位投影的参考姿态。
-waist_release:
+
+    waist_release:
         启用腰部自适应释放（9-DOF 专用，移植自 wdls_9r_pro）：
         到达自适应 smoothstep + 停滞解锁，动态调制腰部权重。
         近目标腰近乎锁定（WAIST_TASK_WEIGHT），远目标/停滞时
         渐进放宽至 WAIST_TASK_WEIGHT_FAR。
 
-   waist_max_reach:
+    waist_max_reach:
         肩->TCP 最大距离（米）。None 时首次调用自动从模型解析。
     """
     orientation_mode = validate_orientation_mode(orientation_mode)
     tool_cone_half_angle = normalize_cone_half_angle(tool_cone_half_angle)
-if tool_axis is None:
+    if tool_axis is None:
         tool_axis = TOOL_AXIS_X
 
     tool_axis = normalize(tool_axis)
-seed = np.asarray(seed, dtype=float)
+    seed = np.asarray(seed, dtype=float)
     q_full = active_q_to_pinocchio_q(pin_model, pin_maps, seed)
 
     if q_ref is None:
@@ -239,23 +250,20 @@ seed = np.asarray(seed, dtype=float)
     else:
         q_ref = np.asarray(q_ref, dtype=float).copy()
 
-if joint_weights is None:
+    if joint_weights is None:
         joint_weights = np.ones(len(pin_maps["active_v_indices"]), dtype=float)
     else:
         joint_weights = np.asarray(joint_weights, dtype=float)
-R_des = np.asarray(T_target[:3, :3], dtype=float, order="C")
+
+    R_des = np.asarray(T_target[:3, :3], dtype=float, order="C")
     p_des = np.asarray(T_target[:3, 3], dtype=float)
 
-    oMdes = pin.SE3(
-        R_des,
-        p_des,
-    )
-d_des = normalize(R_des @ tool_axis)
+    oMdes = pin.SE3(R_des, p_des)
+    d_des = normalize(R_des @ tool_axis)
 
     active_q_indices = np.asarray(pin_maps["active_q_indices"], dtype=np.intp)
     active_v_indices = np.asarray(pin_maps["active_v_indices"], dtype=np.intp)
-
-n_active = len(active_v_indices)
+    n_active = len(active_v_indices)
 
     # 关节侧加权：最小二乘度量中的 W^-1。更大的腰部权重
     # 使腰部运动比手臂运动更"昂贵"。
@@ -263,14 +271,13 @@ n_active = len(active_v_indices)
 
     # 主任务迭代不使用零空间次任务。这避免了与可达性竞争。
     # 腰部回中在收敛后由下面的受约束投影施加。
-
-ns_gain = np.full(n_active, NULLSPACE_GAIN, dtype=float)
+    ns_gain = np.full(n_active, NULLSPACE_GAIN, dtype=float)
     for k, name in enumerate(pin_maps["active_names"]):
         if name in WAIST_JOINT_NAMES:
             ns_gain[k] = WAIST_NULL_GAIN
     use_nullspace = bool(np.any(ns_gain))
 
-seed_diag = {
+    seed_diag = {
         "converged": False,
         "iters": 0,
         "final_pos_err": float("nan"),
@@ -278,205 +285,240 @@ seed_diag = {
         "stalled": False,
         "error_history": [],
     }
-waist_neutral_refine = bool(include_waist and WAIST_POST_GAIN > 0.0)
+    waist_neutral_refine = bool(include_waist and WAIST_POST_GAIN > 0.0)
     fixed_joint_mask = (
         np.asarray(fixed_joint_mask, dtype=bool)
         if fixed_joint_mask is not None
         else np.zeros(n_active, dtype=bool)
     )
-movable_mask = ~fixed_joint_mask
+    movable_mask = ~fixed_joint_mask
     W_inv_movable = W_inv[np.ix_(movable_mask, movable_mask)]
     waist_mask = np.array(
-        [1.0 if name in WAIST_JOINT_NAMES else 0.0
-         for name in pin_maps["active_names"]],
+        [
+            1.0 if name in WAIST_JOINT_NAMES else 0.0
+            for name in pin_maps["active_names"]
+        ],
         dtype=float,
     )
-# 腰部自适应释放的初始化：找出可动的腰部关节在 movable 子空间中的
+
+    # 腰部自适应释放的初始化：找出可动的腰部关节在 movable 子空间中的
     # 位置，并解析肩关节 id 与最大臂展。任何前提不满足则整体旁路。
     waist_release_active = bool(
-        waist_release and include_waist
+        waist_release
+        and include_waist
         and np.any(waist_mask.astype(bool) & movable_mask)
     )
-if waist_release_active and waist_max_reach is None:
+    if waist_release_active and waist_max_reach is None:
         waist_max_reach = estimate_arm_max_reach(
-            pin_model, pin_maps, ee_frame_id,
+            pin_model,
+            pin_maps,
+            ee_frame_id,
         )
     waist_release_active = bool(waist_release_active and waist_max_reach)
-shoulder_jid = None
+
+    shoulder_jid = None
     if waist_release_active:
         shoulder_name = None
         for name in pin_maps["active_names"]:
-            if name not in WAIST_JOINT_NAMES and (
-                name.endswith("_Link2")
-            ):
- shoulder_name = name
+            if name not in WAIST_JOINT_NAMES and name.endswith("_Link2"):
+                shoulder_name = name
                 break
         if shoulder_name is None:
             waist_release_active = False
         else:
             shoulder_jid = pin_maps["name_to_joint_id"][shoulder_name]
-body_jid = None
+
+    body_jid = None
     yaw_joint_idx = None
     if waist_release_active:
         for k, name in enumerate(pin_maps["active_names"]):
             if name == "Body_Link" and movable_mask[k]:
                 yaw_joint_idx = k
                 break
-waist_movable_movable = np.array(
-        [bool(waist_mask[k]) and bool(movable_mask[k])
-         for k in range(n_active)],
+
+    waist_movable_movable = np.array(
+        [
+            bool(waist_mask[k]) and bool(movable_mask[k])
+            for k in range(n_active)
+        ],
         dtype=bool,
     )
+
     # movable 子空间中腰部对角元的 W_inv 基线值与完全释放值
-waist_w_inv_stiff = (
+    waist_w_inv_stiff = (
         1.0 / WAIST_TASK_WEIGHT if WAIST_TASK_WEIGHT > 0 else 1.0
     )
     waist_w_inv_far = (
         1.0 / WAIST_TASK_WEIGHT_FAR if WAIST_TASK_WEIGHT_FAR > 0 else 1e3
     )
     waist_w_inv_yaw_far = (
-1.0 / WAIST_YAW_WEIGHT_FAR if WAIST_YAW_WEIGHT_FAR > 0 else 1e3
+        1.0 / WAIST_YAW_WEIGHT_FAR if WAIST_YAW_WEIGHT_FAR > 0 else 1e3
     )
     stagnation = 0.0
     prev_err_sq = float("inf")
-def _waist_neutral_refine(q_start_full):
+
+    def _waist_neutral_refine(q_start_full):
         """在位姿流形上把已收敛的解投影到 q_ref 方向。"""
         q_work = q_start_full.copy()
         best_q_full = q_start_full.copy()
         best_waist_dist = float("inf")
         no_improvement = 0
-for _ in range(WAIST_POST_ITERS):
+
+        for _ in range(WAIST_POST_ITERS):
             pin.forwardKinematics(pin_model, pin_data, q_work)
             pin.updateFramePlacements(pin_model, pin_data)
             oMref = pin_data.oMf[ee_frame_id]
-if orientation_mode == "full":
+
+            if orientation_mode == "full":
                 refine_err_se3 = pin.log6(oMref.inverse() * oMdes)
                 refine_pos_err = np.linalg.norm(refine_err_se3.linear)
                 refine_ori_err = np.linalg.norm(refine_err_se3.angular)
-if refine_pos_err >= pos_tol or refine_ori_err >= ori_tol:
+                if refine_pos_err >= pos_tol or refine_ori_err >= ori_tol:
                     break
                 refine_J_full = pin.computeFrameJacobian(
-                    pin_model, pin_data, q_work, ee_frame_id, pin.LOCAL,
+                    pin_model,
+                    pin_data,
+                    q_work,
+                    ee_frame_id,
+                    pin.LOCAL,
                 )
-refine_J = refine_J_full[:, active_v_indices]
+                refine_J = refine_J_full[:, active_v_indices]
             elif orientation_mode == "tool_dir":
                 R_ref = np.asarray(oMref.rotation, dtype=float)
                 p_ref = np.asarray(oMref.translation, dtype=float)
-d_ref = normalize(R_ref @ tool_axis)
-                refine_pos_err = np.linalg.norm(p_des - p_ref)
-                refine_dir_err = np.arccos(np.clip(
-                    float(np.dot(d_ref, d_des)), -1.0, 1.0,
-                ))
-if refine_pos_err >= pos_tol or refine_dir_err >= ori_tol:
-                    break
-                refine_J_full = pin.computeFrameJacobian(
-pin_model, pin_data, q_work, ee_frame_id, pin.WORLD,
-                )[:, active_v_indices]
-                refine_J = np.vstack([
-                    refine_J_full[:3, :],
--skew(d_ref) @ refine_J_full[3:, :],
-                ])
-            else:
-                R_ref = np.asarray(oMref.rotation, dtype=float)
-p_ref = np.asarray(oMref.translation, dtype=float)
                 d_ref = normalize(R_ref @ tool_axis)
                 refine_pos_err = np.linalg.norm(p_des - p_ref)
-_, _, refine_dir_err, inside = closest_direction_on_cone(
+                refine_dir_err = np.arccos(
+                    np.clip(float(np.dot(d_ref, d_des)), -1.0, 1.0)
+                )
+                if refine_pos_err >= pos_tol or refine_dir_err >= ori_tol:
+                    break
+                refine_J_full = pin.computeFrameJacobian(
+                    pin_model,
+                    pin_data,
+                    q_work,
+                    ee_frame_id,
+                    pin.WORLD,
+                )[:, active_v_indices]
+                refine_J = np.vstack(
+                    [
+                        refine_J_full[:3, :],
+                        -skew(d_ref) @ refine_J_full[3:, :],
+                    ]
+                )
+            else:
+                R_ref = np.asarray(oMref.rotation, dtype=float)
+                p_ref = np.asarray(oMref.translation, dtype=float)
+                d_ref = normalize(R_ref @ tool_axis)
+                refine_pos_err = np.linalg.norm(p_des - p_ref)
+                _, _, refine_dir_err, inside = closest_direction_on_cone(
                     d_current=d_ref,
                     d_target=d_des,
-  cone_half_angle=tool_cone_half_angle,
+                    cone_half_angle=tool_cone_half_angle,
                 )
                 if refine_pos_err >= pos_tol or (
                     not inside and refine_dir_err >= ori_tol
-):
+                ):
                     break
                 refine_J_full = pin.computeFrameJacobian(
-                    pin_model, pin_data, q_work, ee_frame_id, pin.WORLD,
+                    pin_model,
+                    pin_data,
+                    q_work,
+                    ee_frame_id,
+                    pin.WORLD,
                 )[:, active_v_indices]
-if inside:
-                    refine_J = np.vstack([
-                        refine_J_full[:3, :],
-                        np.zeros_like(refine_J_full[3:, :]),
-                    ])
-else:
+                if inside:
+                    refine_J = np.vstack(
+                        [
+                            refine_J_full[:3, :],
+                            np.zeros_like(refine_J_full[3:, :]),
+                        ]
+                    )
+                else:
                     d_closest, _, _, _ = closest_direction_on_cone(
                         d_current=d_ref,
                         d_target=d_des,
                         cone_half_angle=tool_cone_half_angle,
                     )
-refine_J = np.vstack([
-                        refine_J_full[:3, :],
-                        -skew(d_ref) @ refine_J_full[3:, :],
-                    ])
-q_work_active = np.array(
-                [float(q_work[idx]) for idx in active_q_indices], dtype=float,
+                    refine_J = np.vstack(
+                        [
+                            refine_J_full[:3, :],
+                            -skew(d_ref) @ refine_J_full[3:, :],
+                        ]
+                    )
+
+            q_work_active = np.array(
+                [float(q_work[idx]) for idx in active_q_indices],
+                dtype=float,
             )
-            waist_dist = float(np.linalg.norm(
-q_ref[waist_mask.astype(bool)] - q_work_active[waist_mask.astype(bool)]
-            ))
+            waist_dist = float(
+                np.linalg.norm(
+                    q_ref[waist_mask.astype(bool)]
+                    - q_work_active[waist_mask.astype(bool)]
+                )
+            )
             if waist_dist < best_waist_dist:
                 best_waist_dist = waist_dist
-best_q_full = q_work.copy()
+                best_q_full = q_work.copy()
                 no_improvement = 0
             else:
                 no_improvement += 1
                 if no_improvement >= 5:
                     break
-if waist_dist < WAIST_POST_TOL:
+
+            if waist_dist < WAIST_POST_TOL:
                 break
 
             A = refine_J @ W_inv @ refine_J.T + damping * np.eye(err.size)
-J_w_pinv = W_inv @ refine_J.T @ np.linalg.inv(A)
+            J_w_pinv = W_inv @ refine_J.T @ np.linalg.inv(A)
             null_projector = np.eye(n_active) - J_w_pinv @ refine_J
             qerr = q_ref - q_work_active
             dq = WAIST_POST_GAIN * null_projector @ (waist_mask * qerr)
-dq_norm = np.linalg.norm(dq)
+            dq_norm = np.linalg.norm(dq)
             if dq_norm > WAIST_POST_STEP:
                 dq *= WAIST_POST_STEP / dq_norm
             if dq_norm < 1e-10:
                 break
 
-for k in range(n_active):
+            for k in range(n_active):
                 q_idx = active_q_indices[k]
                 q_work[q_idx] = np.clip(
                     q_work[q_idx] + dq[k],
                     lower[k] + 1e-9,
                     upper[k] - 1e-9,
                 )
-return best_q_full
+
+        return best_q_full
 
     prev_pos_err = None
     stall_count = 0
     dq_active = np.zeros(n_active, dtype=float)
 
-for it in range(max_iter):
+    for it in range(max_iter):
         pin.forwardKinematics(pin_model, pin_data, q_full)
         pin.updateFramePlacements(pin_model, pin_data)
 
         oMcur = pin_data.oMf[ee_frame_id]
-if orientation_mode == "full":
+        if orientation_mode == "full":
             # 原始全位姿 IK。
             err_se3 = pin.log6(oMcur.inverse() * oMdes)
 
-seed_diag["iters"] = it + 1
+            seed_diag["iters"] = it + 1
             pos_norm = math.sqrt(float(err_se3.linear @ err_se3.linear))
             ori_norm = math.sqrt(float(err_se3.angular @ err_se3.angular))
-seed_diag["final_pos_err"] = pos_norm
+            seed_diag["final_pos_err"] = pos_norm
             seed_diag["final_ori_err"] = ori_norm
             seed_diag["error_history"].append(
-{"iteration": it + 1, "pos_err": pos_norm, "ori_err": ori_norm}
+                {"iteration": it + 1, "pos_err": pos_norm, "ori_err": ori_norm}
             )
 
-            if (
-                pos_norm < pos_tol
-                and ori_norm < ori_tol
-            ):
-seed_diag["converged"] = True
+            if pos_norm < pos_tol and ori_norm < ori_tol:
+                seed_diag["converged"] = True
                 if waist_neutral_refine:
                     q_full = _waist_neutral_refine(q_full)
                 break
-err = err_se3.vector
 
+            err = err_se3.vector
             J_full = pin.computeFrameJacobian(
                 pin_model,
                 pin_data,
@@ -484,90 +526,38 @@ err = err_se3.vector
                 ee_frame_id,
                 pin.LOCAL,
             )
- J_active = J_full[:, active_v_indices]
+            J_active = J_full[:, active_v_indices]
+
         elif orientation_mode == "tool_dir":
             R_cur = np.asarray(oMcur.rotation, dtype=float)
             p_cur = np.asarray(oMcur.translation, dtype=float)
-d_cur = normalize(R_cur @ tool_axis)
+            d_cur = normalize(R_cur @ tool_axis)
 
             e_pos = p_des - p_cur
             e_dir = d_des - d_cur
 
             dir_angle = float(
-                np.arccos(
- np.clip(float(np.dot(d_cur, d_des)), -1.0, 1.0)
-                )
+                np.arccos(np.clip(float(np.dot(d_cur, d_des)), -1.0, 1.0))
             )
 
             seed_diag["iters"] = it + 1
-seed_diag["final_pos_err"] = float(np.linalg.norm(e_pos))
-            seed_diag["final_ori_err"] = dir_angle
-            seed_diag["error_history"].append(
-                {
-                    "iteration": it + 1,
-"pos_err": seed_diag["final_pos_err"],
-                    "ori_err": dir_angle,
-                }
-            )
-if np.linalg.norm(e_pos) < pos_tol and dir_angle < ori_tol:
-                seed_diag["converged"] = True
-                if waist_neutral_refine:
-                    q_full = _waist_neutral_refine(q_full)
-                break
-# 使用 WORLD 帧雅可比，因为 e_pos 和 e_dir
-            # 表达在 Pinocchio 根/世界系中。
-            J_full = pin.computeFrameJacobian(
-                pin_model,
-                pin_data,
-                q_full,
-ee_frame_id,
-                pin.WORLD,
-            )
-J_active_full = J_full[:, active_v_indices]
-
-            Jv = J_active_full[:3, :]
-            Jw = J_active_full[3:, :]
-# d_dot = omega x d = -skew(d) @ omega
-            J_dir = -skew(d_cur) @ Jw
-
-            err = np.concatenate([
-                e_pos,
-                e_dir,
-            ])
-J_active = np.vstack([
-                Jv,
-                J_dir,
-            ])
-
-
-        elif orientation_mode == "tool_cone":
-R_cur = np.asarray(oMcur.rotation, dtype=float)
-            p_cur = np.asarray(oMcur.translation, dtype=float)
-
-            d_cur = normalize(R_cur @ tool_axis)
-
-            e_pos = p_des - p_cur
-d_closest, dir_angle, cone_violation, inside = closest_direction_on_cone(
-                d_current=d_cur,
-                d_target=d_des,
-                cone_half_angle=tool_cone_half_angle,
-            )
-seed_diag["iters"] = it + 1
             seed_diag["final_pos_err"] = float(np.linalg.norm(e_pos))
             seed_diag["final_ori_err"] = dir_angle
             seed_diag["error_history"].append(
-{
+                {
                     "iteration": it + 1,
                     "pos_err": seed_diag["final_pos_err"],
                     "ori_err": dir_angle,
                 }
             )
-if np.linalg.norm(e_pos) < pos_tol and cone_violation < ori_tol:
+
+            if np.linalg.norm(e_pos) < pos_tol and dir_angle < ori_tol:
                 seed_diag["converged"] = True
                 if waist_neutral_refine:
                     q_full = _waist_neutral_refine(q_full)
                 break
-# 使用 WORLD 帧雅可比，因为 e_pos 和 e_dir
+
+            # 使用 WORLD 帧雅可比，因为 e_pos 和 e_dir
             # 表达在 Pinocchio 根/世界系中。
             J_full = pin.computeFrameJacobian(
                 pin_model,
@@ -575,125 +565,173 @@ if np.linalg.norm(e_pos) < pos_tol and cone_violation < ori_tol:
                 q_full,
                 ee_frame_id,
                 pin.WORLD,
-)
-
+            )
             J_active_full = J_full[:, active_v_indices]
 
             Jv = J_active_full[:3, :]
             Jw = J_active_full[3:, :]
-if inside or cone_violation <= ori_tol:
+            # d_dot = omega x d = -skew(d) @ omega
+            J_dir = -skew(d_cur) @ Jw
+
+            err = np.concatenate([e_pos, e_dir])
+            J_active = np.vstack([Jv, J_dir])
+
+        elif orientation_mode == "tool_cone":
+            R_cur = np.asarray(oMcur.rotation, dtype=float)
+            p_cur = np.asarray(oMcur.translation, dtype=float)
+            d_cur = normalize(R_cur @ tool_axis)
+
+            e_pos = p_des - p_cur
+            d_closest, dir_angle, cone_violation, inside = (
+                closest_direction_on_cone(
+                    d_current=d_cur,
+                    d_target=d_des,
+                    cone_half_angle=tool_cone_half_angle,
+                )
+            )
+
+            seed_diag["iters"] = it + 1
+            seed_diag["final_pos_err"] = float(np.linalg.norm(e_pos))
+            seed_diag["final_ori_err"] = dir_angle
+            seed_diag["error_history"].append(
+                {
+                    "iteration": it + 1,
+                    "pos_err": seed_diag["final_pos_err"],
+                    "ori_err": dir_angle,
+                }
+            )
+
+            if np.linalg.norm(e_pos) < pos_tol and cone_violation < ori_tol:
+                seed_diag["converged"] = True
+                if waist_neutral_refine:
+                    q_full = _waist_neutral_refine(q_full)
+                break
+
+            # 使用 WORLD 帧雅可比，因为 e_pos 和 e_dir
+            # 表达在 Pinocchio 根/世界系中。
+            J_full = pin.computeFrameJacobian(
+                pin_model,
+                pin_data,
+                q_full,
+                ee_frame_id,
+                pin.WORLD,
+            )
+            J_active_full = J_full[:, active_v_indices]
+
+            Jv = J_active_full[:3, :]
+            Jw = J_active_full[3:, :]
+
+            if inside or cone_violation <= ori_tol:
                 # 方向已在锥内。不约束姿态。
                 e_dir = np.zeros(3, dtype=float)
                 J_dir = np.zeros_like(Jw)
             else:
-
-# 我们要让 d_cur 朝锥边界上最近的点移动。
+                # 我们要让 d_cur 朝锥边界上最近的点移动。
                 e_dir = d_closest - d_cur
-
                 # d_dot = omega x d = -skew(d) @ omega
                 J_dir = -skew(d_cur) @ Jw
 
-err = np.concatenate([
-                e_pos,
-                e_dir,
-            ])
+            err = np.concatenate([e_pos, e_dir])
+            J_active = np.vstack([Jv, J_dir])
 
-            J_active = np.vstack([
-                Jv,
-                J_dir,
-            ])
-
-# 腰部自适应释放（移植自 wdls_9r_pro）：两关节解耦。
+        # 腰部自适应释放（移植自 wdls_9r_pro）：两关节解耦。
         # 1) 俯仰（Hip）：肩->目标距离占最大臂展的比例经 smoothstep 释放，
         #    解决"够不着"的工作空间半径问题；
         # 2) 偏航（Body）：目标水平偏角（相对躯干当前朝向）超过 30° 死区
         #    后平滑释放转体，解决侧向目标的肩部别扭问题；
-# 3) 停滞解锁——误差大但每步误差平方下降 <2% 时逐步解除两关节。
+        # 3) 停滞解锁——误差大但每步误差平方下降 <2% 时逐步解除两关节。
         # 几何释放与停滞解锁取大得到各自 alpha（0=锁定, 1=释放）。
         if waist_release_active:
             err_sq = float(err @ err)
-err_big = (
+            err_big = (
                 seed_diag["final_pos_err"] > WAIST_STAG_ERR_POS
                 or seed_diag["final_ori_err"] > WAIST_STAG_ERR_ORI
             )
-if err_big and err_sq > (1.0 - WAIST_STAG_DECREASE) * prev_err_sq:
+            if err_big and err_sq > (1.0 - WAIST_STAG_DECREASE) * prev_err_sq:
                 # 门控：只有主停滞检测已累积（stall_count>=MIN_STALL）
                 # 才允许解锁增长，避免过早干扰正常收敛路径。
                 if stall_count >= WAIST_STAG_MIN_STALL:
-stagnation = min(stagnation + WAIST_STAG_STEP, 1.0)
+                    stagnation = min(stagnation + WAIST_STAG_STEP, 1.0)
             else:
                 stagnation = max(stagnation - WAIST_STAG_DECAY, 0.0)
             prev_err_sq = err_sq
-# 俯仰释放：按肩->目标距离
+
+            # 俯仰释放：按肩->目标距离
             p_shoulder = pin_data.oMi[shoulder_jid].translation
             vec_to_target = p_des - p_shoulder
             dist = float(np.linalg.norm(vec_to_target))
- r_start = WAIST_RELEASE_START * waist_max_reach
+            r_start = WAIST_RELEASE_START * waist_max_reach
             r_span = (WAIST_RELEASE_END - WAIST_RELEASE_START) * waist_max_reach
             t = np.clip((dist - r_start) / max(r_span, 1e-4), 0.0, 1.0)
-alpha_pitch = max(float(t * t * (3.0 - 2.0 * t)), 
-stagnation)
+            alpha_pitch = max(float(t * t * (3.0 - 2.0 * t)), stagnation)
 
             # 偏航释放：目标水平偏角取在固定基座系（世界 +X 为正前向），
             # 对每个目标恒定——避免以躯干当前朝向为基准时"边转边收紧"
             # 造成的权重振荡。
-target_yaw = math.atan2(vec_to_target[1], vec_to_target[0])
+            target_yaw = math.atan2(vec_to_target[1], vec_to_target[0])
             yaw_diff = abs(target_yaw)
             t_yaw = np.clip(
-(yaw_diff - WAIST_YAW_RELEASE_START)
+                (yaw_diff - WAIST_YAW_RELEASE_START)
                 / max(WAIST_YAW_RELEASE_END - WAIST_YAW_RELEASE_START, 1e-6),
-                0.0, 1.0,
+                0.0,
+                1.0,
             )
-alpha_yaw = max(float(t_yaw * t_yaw * (3.0 - 2.0 * t_yaw)), stagnation)
+            alpha_yaw = max(
+                float(t_yaw * t_yaw * (3.0 - 2.0 * t_yaw)), stagnation
+            )
 
             # 只重调 movable 子空间中腰部对角元（数量固定且很小）。
-            w_inv_pitch = (1.0 - alpha_pitch) * waist_w_inv_stiff \
-                + alpha_pitch * waist_w_inv_far
-w_inv_yaw = (1.0 - alpha_yaw) * waist_w_inv_stiff \
-                + alpha_yaw * waist_w_inv_yaw_far
+            w_inv_pitch = (
+                1.0 - alpha_pitch
+            ) * waist_w_inv_stiff + alpha_pitch * waist_w_inv_far
+            w_inv_yaw = (
+                1.0 - alpha_yaw
+            ) * waist_w_inv_stiff + alpha_yaw * waist_w_inv_yaw_far
             idx = np.nonzero(waist_movable_movable)[0]
             for k in idx:
-if yaw_joint_idx is not None and k == yaw_joint_idx:
+                if yaw_joint_idx is not None and k == yaw_joint_idx:
                     W_inv_movable[k, k] = w_inv_yaw
                 else:
                     W_inv_movable[k, k] = w_inv_pitch
-# 关节侧加权阻尼最小二乘：
+
+        # 关节侧加权阻尼最小二乘：
         #   J+_W = W^-1 J^T (J W^-1 J^T + λI)^-1
         J_solve = J_active[:, movable_mask]
         A = J_solve @ W_inv_movable @ J_solve.T
-        A.flat[::err.size + 1] += damping
+        A.flat[:: err.size + 1] += damping
 
-dq_active.fill(0.0)
+        dq_active.fill(0.0)
         try:
             rhs = cho_solve(
-                cho_factor(A, check_finite=False), err, check_finite=False,
+                cho_factor(A, check_finite=False),
+                err,
+                check_finite=False,
             )
-
-except (np.linalg.LinAlgError, ValueError):
+        except (np.linalg.LinAlgError, ValueError):
             rhs = np.linalg.solve(A, err)
         dq_active[movable_mask] = W_inv_movable @ (J_solve.T @ rhs)
-# 零空间次任务：把冗余自由度拉向 q_ref
+
+        # 零空间次任务：把冗余自由度拉向 q_ref
         # （腰部回中，手臂保持与 seed 的连续性）。
         # 增益随任务误差缩放，在接近收敛时衰减，
         # 不会阻碍主任务的推进。
         q_active_cur = q_full[active_q_indices]
-if use_nullspace:
+        if use_nullspace:
             qerr = q_ref - q_active_cur
             J_w_pinv_movable = W_inv_movable @ J_solve.T @ np.linalg.inv(A)
             J_w_pinv = np.zeros((n_active, err.size), dtype=float)
- J_w_pinv[movable_mask] = J_w_pinv_movable
+            J_w_pinv[movable_mask] = J_w_pinv_movable
             N = np.eye(n_active) - J_w_pinv @ J_active
             err_scale = min(
                 1.0,
                 float(np.linalg.norm(err)) / NULLSPACE_ERR_SCALE,
             )
-dq_null = N @ (ns_gain * err_scale * qerr)
+            dq_null = N @ (ns_gain * err_scale * qerr)
             dq_active += dq_null
 
         dq_norm = math.sqrt(float(dq_active @ dq_active))
-
         if dq_norm > max_step:
- dq_active *= max_step / dq_norm
+            dq_active *= max_step / dq_norm
 
         q_active_next = q_active_cur + dq_active
         np.clip(
@@ -702,12 +740,13 @@ dq_null = N @ (ns_gain * err_scale * qerr)
             upper - 1e-9,
             out=q_active_next,
         )
-q_full[active_q_indices] = q_active_next
+        q_full[active_q_indices] = q_active_next
 
         # 停滞检查（对应 solver_pink.PINK_STALL_*）：放在所有分支
         # 都已更新 final_pos_err 之后的单一点上，因此覆盖全部模式。
         if prev_pos_err is not None and (
- abs(prev_pos_err - seed_diag["final_pos_err"]) < PIN_IK_STALL_DELTA_M
+            abs(prev_pos_err - seed_diag["final_pos_err"])
+            < PIN_IK_STALL_DELTA_M
         ):
             stall_count += 1
         else:
@@ -720,28 +759,28 @@ q_full[active_q_indices] = q_active_next
 
     if it == max_iter - 1:
         seed_diag["iters"] = max_iter
-return pinocchio_q_to_active_q(pin_maps, q_full), seed_diag
+
+    return pinocchio_q_to_active_q(pin_maps, q_full), seed_diag
 
 
 def make_scatter_seeds(q_prev, q_ready, lower, upper, rng):
-    """
-    从 q_prev、q_ready 和噪声生成 IK 兜底用的散布种子。
-    """
+    """从 q_prev、q_ready 和噪声生成 IK 兜底用的散布种子。"""
     seeds = []
-q_prev = clip_to_bounds(q_prev, lower, upper)
+    q_prev = clip_to_bounds(q_prev, lower, upper)
     q_ready = clip_to_bounds(q_ready, lower, upper)
 
     seeds.append(q_prev.copy())
     seeds.append(q_ready.copy())
-bases = [q_prev, q_ready]
+    bases = [q_prev, q_ready]
 
     for base in bases:
         for scale in NOISE_SCALES:
-for _ in range(max(1, N_NOISE_PER_BASE // len(NOISE_SCALES))):
+            for _ in range(max(1, N_NOISE_PER_BASE // len(NOISE_SCALES))):
                 q_seed = base + rng.normal(scale=scale, size=len(base))
                 q_seed = clip_to_bounds(q_seed, lower, upper)
                 seeds.append(q_seed)
- q_mid = 0.5 * (lower + upper)
+
+    q_mid = 0.5 * (lower + upper)
     seeds.append(clip_to_bounds(q_mid, lower, upper))
 
     return unique_seed_list(seeds)
