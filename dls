@@ -59,13 +59,6 @@ WAIST_STAG_MIN_STALL = 5          # 主停滞计数达此值后停滞解锁才�
 WAIST_RELEASE_START = 0.72        # 肩->目标距离/最大臂展 达到此比例开始放腰
 WAIST_RELEASE_END = 0.94          # 达到此比例腰完全释放
 
-# 偏航（Body_Link）侧向独立释放：目标水平偏角超过死区后平滑释放转体，
-# 与俯仰（按距离）互不耦合。远权重单独设（wdls_9r_pro 中胸偏航远权重
-# 1.5，远高于俯仰的 3.0/180 之比），完全释放给 1.0 防止背后侧目标躯干
-# 过度旋转。
-WAIST_YAW_RELEASE_START = np.deg2rad(30.0)   # 偏角死区上限：<=30° 完全锁定
-WAIST_YAW_RELEASE_END = np.deg2rad(65.0)     # 偏角达到此值完全释放
-WAIST_YAW_WEIGHT_FAR = 1.0        # 偏航完全释放后的权重（俯仰仍用 FAR=0.3）
 N_NOISE_PER_BASE = 16
 NOISE_SCALES = [0.02, 0.05, 0.10, 0.20]
 
@@ -328,14 +321,6 @@ def pinocchio_ik_one_seed(
         else:
             shoulder_jid = pin_maps["name_to_joint_id"][shoulder_name]
 
-    body_jid = None
-    yaw_joint_idx = None
-    if waist_release_active:
-        for k, name in enumerate(pin_maps["active_names"]):
-            if name == "Body_Link" and movable_mask[k]:
-                yaw_joint_idx = k
-                break
-
     waist_movable_movable = np.array(
         [
             bool(waist_mask[k]) and bool(movable_mask[k])
@@ -350,9 +335,6 @@ def pinocchio_ik_one_seed(
     )
     waist_w_inv_far = (
         1.0 / WAIST_TASK_WEIGHT_FAR if WAIST_TASK_WEIGHT_FAR > 0 else 1e3
-    )
-    waist_w_inv_yaw_far = (
-        1.0 / WAIST_YAW_WEIGHT_FAR if WAIST_YAW_WEIGHT_FAR > 0 else 1e3
     )
     stagnation = 0.0
     prev_err_sq = float("inf")
@@ -634,13 +616,11 @@ def pinocchio_ik_one_seed(
             err = np.concatenate([e_pos, e_dir])
             J_active = np.vstack([Jv, J_dir])
 
-        # 腰部自适应释放（移植自 wdls_9r_pro）：两关节解耦。
-        # 1) 俯仰（Hip）：肩->目标距离占最大臂展的比例经 smoothstep 释放，
+        # 腰部自适应释放（移植自 wdls_9r_pro）：
+        # 1) 距离释放：肩->目标距离占最大臂展的比例经 smoothstep 释放，
         #    解决"够不着"的工作空间半径问题；
-        # 2) 偏航（Body）：目标水平偏角（相对躯干当前朝向）超过 30° 死区
-        #    后平滑释放转体，解决侧向目标的肩部别扭问题；
-        # 3) 停滞解锁——误差大但每步误差平方下降 <2% 时逐步解除两关节。
-        # 几何释放与停滞解锁取大得到各自 alpha（0=锁定, 1=释放）。
+        # 2) 停滞解锁：误差大但每步误差平方下降 <2% 时逐步解除腰部锁定。
+        # 几何释放与停滞解锁取大得到 alpha（0=锁定, 1=释放）。
         if waist_release_active:
             err_sq = float(err @ err)
             err_big = (
@@ -656,43 +636,21 @@ def pinocchio_ik_one_seed(
                 stagnation = max(stagnation - WAIST_STAG_DECAY, 0.0)
             prev_err_sq = err_sq
 
-            # 俯仰释放：按肩->目标距离
+            # 按肩->目标距离计算释放量
             p_shoulder = pin_data.oMi[shoulder_jid].translation
             vec_to_target = p_des - p_shoulder
             dist = float(np.linalg.norm(vec_to_target))
             r_start = WAIST_RELEASE_START * waist_max_reach
             r_span = (WAIST_RELEASE_END - WAIST_RELEASE_START) * waist_max_reach
             t = np.clip((dist - r_start) / max(r_span, 1e-4), 0.0, 1.0)
-            alpha_pitch = max(float(t * t * (3.0 - 2.0 * t)), stagnation)
-
-            # 偏航释放：目标水平偏角取在固定基座系（世界 +X 为正前向），
-            # 对每个目标恒定——避免以躯干当前朝向为基准时"边转边收紧"
-            # 造成的权重振荡。
-            target_yaw = math.atan2(vec_to_target[1], vec_to_target[0])
-            yaw_diff = abs(target_yaw)
-            t_yaw = np.clip(
-                (yaw_diff - WAIST_YAW_RELEASE_START)
-                / max(WAIST_YAW_RELEASE_END - WAIST_YAW_RELEASE_START, 1e-6),
-                0.0,
-                1.0,
-            )
-            alpha_yaw = max(
-                float(t_yaw * t_yaw * (3.0 - 2.0 * t_yaw)), stagnation
-            )
+            alpha = max(float(t * t * (3.0 - 2.0 * t)), stagnation)
 
             # 只重调 movable 子空间中腰部对角元（数量固定且很小）。
-            w_inv_pitch = (
-                1.0 - alpha_pitch
-            ) * waist_w_inv_stiff + alpha_pitch * waist_w_inv_far
-            w_inv_yaw = (
-                1.0 - alpha_yaw
-            ) * waist_w_inv_stiff + alpha_yaw * waist_w_inv_yaw_far
+            w_inv_waist = (
+                1.0 - alpha
+            ) * waist_w_inv_stiff + alpha * waist_w_inv_far
             idx = np.nonzero(waist_movable_movable)[0]
-            for k in idx:
-                if yaw_joint_idx is not None and k == yaw_joint_idx:
-                    W_inv_movable[k, k] = w_inv_yaw
-                else:
-                    W_inv_movable[k, k] = w_inv_pitch
+            W_inv_movable[idx, idx] = w_inv_waist
 
         # 关节侧加权阻尼最小二乘：
         #   J+_W = W^-1 J^T (J W^-1 J^T + λI)^-1
