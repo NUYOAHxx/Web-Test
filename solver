@@ -11,19 +11,22 @@ Features:
   2. direct-psi IK with analytical Jacobian
   3. optional SSIK candidates
   4. optional Pinocchio damped least-squares IK fallback
-  5. optional Pinocchio gravity torque cost
+  5. optional Pinocchio gravity torque & CoM stability evaluation
   6. left / right arm configuration
 
 Target frames:
   - local: target pose is expressed in the arm base frame.
   - world: target pose is expressed in the robot/world frame.
 """
-import xml.etree.ElementTree as ET
+
 from collections import defaultdict, deque
 from enum import Enum
 import math
 from pathlib import Path
+import xml.etree.ElementTree as ET
+
 import numpy as np
+from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation as R
 
 try:
@@ -31,53 +34,11 @@ try:
 except Exception:
     ssik = None
 
-
-
 try:
     import pinocchio as pin
 except Exception:
     pin = None
 
-from ha_arm_ik.ik_common import (
-    ORIENTATION_MODES,
-    TOOL_AXIS_X,
-    TOOL_CONE_HALF_ANGLE,
-    clip_to_bounds,
-    closest_direction_on_cone,
-    invert_T,
-    make_T,
-    make_T_from_xyz_rpy,
-    make_translation_T,
-    normalize,
-    normalize_cone_half_angle,
-    ORI_TOL,
-    POS_TOL,
-    pose_error,
-    pose_errors,
-    project_to_plane,
-    rpy_to_R,
-    SAFE_MARGIN,
-    rotx,
-    roty,
-    rotz,
-    skew,
-    target_frames,
-    transform_point,
-    tool_cone_angle_error,
-    tool_cone_residual,
-    tool_direction_angle_error,
-    tool_direction_from_T,
-    tool_direction_residual,
-    unique_seed_list,
-    validate_orientation_mode,
-    validate_q_vector,
-    validate_transform4x4,
-    wrap_to_pi,
-    rot_axis,
-    T_origin,
-    T_prismatic,
-    T_revolute,
-)
 from ha_arm_ik.ik_candidate import (
     PHI_TIE_TOL,
     W_LIMIT,
@@ -101,25 +62,63 @@ from ha_arm_ik.ik_candidate import (
     status_from_str,
     update_candidate_final_cost_with_torque,
 )
-
-from ha_arm_ik.ik_common import joint_limit_barrier_jac
 from ha_arm_ik.ik_common import (
+    ORIENTATION_MODES,
+    ORI_TOL,
+    POS_TOL,
+    SAFE_MARGIN,
+    TOOL_AXIS_X,
+    TOOL_CONE_HALF_ANGLE,
+    T_origin,
+    T_prismatic,
+    T_revolute,
+    clip_to_bounds,
+    closest_direction_on_cone,
+    invert_T,
     joint_center_from_bounds,
     joint_dist,
     joint_limit_barrier,
+    joint_limit_barrier_jac,
     joint_limit_penalty,
     joint_margin,
     joint_margin_from_bounds,
     joint_range_scale,
+    make_T,
+    make_T_from_xyz_rpy,
+    make_translation_T,
+    normalize,
+    normalize_cone_half_angle,
+    pose_error,
+    pose_errors,
+    project_to_plane,
+    rot_axis,
+    rotx,
+    roty,
+    rotz,
+    rpy_to_R,
+    sew_angle_from_points,
+    skew,
+    target_frames,
+    tool_cone_angle_error,
+    tool_cone_residual,
+    tool_direction_angle_error,
+    tool_direction_from_T,
+    tool_direction_residual,
+    transform_point,
+    unique_seed_list,
+    validate_orientation_mode,
+    validate_q_vector,
+    validate_transform4x4,
+    wrap_to_pi,
 )
 from ha_arm_ik.robot_model import (
     ARM_CONFIGS,
     E_JOINT,
     REF_DIR,
     S_JOINT,
-    SerialChain,
     W_JOINT,
     WAIST_JOINT_NAMES,
+    SerialChain,
     estimate_chain_max_reach_from_joint,
     get_fixed_joint_origin,
     get_urdf_root_link,
@@ -127,13 +126,15 @@ from ha_arm_ik.robot_model import (
     parse_vec,
 )
 from ha_arm_ik.solver_dls import (
+    COM_XY_GAIN,
+    GRAVITY_TORQUE_GAIN,
+    JOINT_LIMIT_GAIN,
     N_NOISE_PER_BASE,
     NOISE_SCALES,
     NULLSPACE_ERR_SCALE,
     NULLSPACE_GAIN,
     PIN_IK_DAMPING,
     PIN_IK_MAX_ITER,
-
     PIN_IK_MAX_STEP,
     PIN_IK_MAX_VALID_CANDIDATES,
     PIN_IK_ORI_TOL,
@@ -143,31 +144,20 @@ from ha_arm_ik.solver_dls import (
     WAIST_NULL_GAIN,
     WAIST_RETURN_TOL,
     WAIST_TASK_WEIGHT,
+    WAIST_TASK_WEIGHT_FAR,
     active_q_to_pinocchio_q,
     build_pinocchio_joint_maps,
+    evaluate_pose_physics,
     make_scatter_seeds,
     pinocchio_ik_one_seed,
     pinocchio_q_to_active_q,
 )
+
 # =============================================================================
 # CONFIG
 # =============================================================================
 
 G_WORLD = np.array([0.0, 0.0, -9.81], dtype=float)
-
-# ---------------- Workspace max-radius check ----------------
-# Workspace check uses shoulder joint position, usually J1/J2 shared origin.
-# We use s_joint, i.e. Left_J2 / Right_J2, as the anchor.
-#
-# Max J2 -> J7 radius is estimated once from URDF:
-#   sum of joint-origin translation lengths after J2.
-#
-
-# For TCP target check:
-#   max J2 -> TCP radius = max J2 -> J7 radius + ||tcp_offset_xyz||
-#
-# This is only a max-distance pre-check.
-# It does not guarantee IK success.
 
 # ---------------- direct-psi solve config ----------------
 PORTFOLIO_DIRECT_MAX_NFEV = 150
@@ -179,7 +169,6 @@ PORTFOLIO_Q_REF_MODE = "ready"  # "ready" or "prev"
 DIRECT_LOCAL_NOISE_SCALES = (0.002, 0.005, 0.01, 0.02, 0.04)
 
 # ---------------- Optional modules ----------------
-
 USE_DIRECT_PSI = False
 USE_LOCAL_SEEDS = False
 USE_SSIK = False
@@ -198,6 +187,7 @@ SSIK_TOP_K_FOR_DIRECT = 10
 PIN_TOP_K_FOR_DIRECT = 15
 RNG_SEED = 120
 
+
 def unique_add(solutions, q, tol=1e-4):
     q = np.asarray(q, dtype=float)
 
@@ -207,6 +197,8 @@ def unique_add(solutions, q, tol=1e-4):
 
     solutions.append(q.copy())
     return True
+
+
 # =============================================================================
 # Analytical Jacobian direct-psi IK
 # =============================================================================
@@ -219,18 +211,18 @@ def geometric_jacobian(chain, q, fk_result=None):
     T_ee = link_T[chain.ee_link]
     p_ee = T_ee[:3, 3]
 
-   n = len(chain.active_joints)
+    n = len(chain.active_joints)
     J = np.zeros((6, n))
-   for i, aj in enumerate(chain.active_joints):
+    for i, aj in enumerate(chain.active_joints):
         T_j = joint_origin_T[aj["name"]]
         z_i = T_j[:3, :3] @ np.asarray(aj["axis"], dtype=float)
         p_i = T_j[:3, 3]
         if aj["type"] in ("revolute", "continuous"):
             J[:3, i] = np.cross(z_i, p_ee - p_i)
             J[3:, i] = z_i
-
         elif aj["type"] == "prismatic":
             J[:3, i] = z_i
+
     return J
 
 
@@ -256,11 +248,11 @@ def joint_position_jacobian(chain, joint_name, joint_origin_T):
 
         if aj["type"] in ("revolute", "continuous"):
             J[:, i] = np.cross(z_i, p_target - p_i)
-
         elif aj["type"] == "prismatic":
             J[:, i] = z_i
 
     return J
+
 
 def dpsi_dq(
     chain,
@@ -272,7 +264,6 @@ def dpsi_dq(
     ref_dir=REF_DIR,
     eps=1e-7,
 ):
-
     if fk_result is None:
         fk_result = chain.fk_all(q)
 
@@ -293,32 +284,42 @@ def dpsi_dq(
     dpsi_dS = np.zeros(3)
     dpsi_dE = np.zeros(3)
     dpsi_dW = np.zeros(3)
-   for k in range(3):
+    for k in range(3):
         try:
             Sp = S.copy()
             Sp[k] += eps
-            dpsi_dS[k] = wrap_to_pi(sew_angle_from_points(Sp, E, W, ref_dir) - psi0) / eps
+            dpsi_dS[k] = (
+                wrap_to_pi(sew_angle_from_points(Sp, E, W, ref_dir) - psi0)
+                / eps
+            )
         except Exception:
             pass
-       try:
+        try:
             Ep = E.copy()
             Ep[k] += eps
-            dpsi_dE[k] = wrap_to_pi(sew_angle_from_points(S, Ep, W, ref_dir) - psi0) / eps
+            dpsi_dE[k] = (
+                wrap_to_pi(sew_angle_from_points(S, Ep, W, ref_dir) - psi0)
+                / eps
+            )
         except Exception:
             pass
         try:
             Wp = W.copy()
             Wp[k] += eps
-            dpsi_dW[k] = wrap_to_pi(sew_angle_from_points(S, E, Wp, ref_dir) - psi0) / eps
+            dpsi_dW[k] = (
+                wrap_to_pi(sew_angle_from_points(S, E, Wp, ref_dir) - psi0)
+                / eps
+            )
         except Exception:
             pass
+
     return (dpsi_dS @ J_S + dpsi_dE @ J_E + dpsi_dW @ J_W).reshape(1, n)
 
 
 def evaluate_direct_psi_solution(
     chain,
     T_target,
-   psi_des,
+    psi_des,
     q,
     q_ref=None,
     S_joint=S_JOINT,
@@ -326,7 +327,7 @@ def evaluate_direct_psi_solution(
     W_joint=W_JOINT,
     ref_dir=REF_DIR,
     orientation_mode="full",
- tool_axis=None,
+    tool_axis=None,
     tool_cone_half_angle=None,
 ):
     lower, upper = chain.bounds()
@@ -349,7 +350,6 @@ def evaluate_direct_psi_solution(
     if orientation_mode == "full":
         _, drot = pose_error(Tq, T_target)
         ori_err = float(np.linalg.norm(drot))
-
     elif orientation_mode == "tool_dir":
         tool_dir_angle_err = tool_direction_angle_error(
             T_current=Tq,
@@ -357,12 +357,12 @@ def evaluate_direct_psi_solution(
             tool_axis=tool_axis,
         )
         ori_err = tool_dir_angle_err
-   elif orientation_mode == "tool_cone":
+    elif orientation_mode == "tool_cone":
         tool_cone_violation, tool_dir_angle_err = tool_cone_angle_error(
             T_current=Tq,
             T_target=T_target,
             tool_axis=tool_axis,
-           cone_half_angle=tool_cone_half_angle,
+            cone_half_angle=tool_cone_half_angle,
         )
         ori_err = tool_cone_violation
 
@@ -391,15 +391,24 @@ def evaluate_direct_psi_solution(
         "psi": float(psi_q),
         "psi_err": psi_err,
         "margin": margin,
-       "margin_idx": margin_idx,
+        "margin_idx": margin_idx,
         "q_ref_dq": q_ref_dq,
         "tool_dir_angle_err": float(tool_dir_angle_err),
-        "tool_dir_angle_err_deg": float(np.rad2deg(tool_dir_angle_err)) if np.isfinite(tool_dir_angle_err) else np.nan,
+        "tool_dir_angle_err_deg": (
+            float(np.rad2deg(tool_dir_angle_err))
+            if np.isfinite(tool_dir_angle_err)
+            else np.nan
+        ),
         "tool_cone_half_angle": float(tool_cone_half_angle),
         "tool_cone_half_angle_deg": float(np.rad2deg(tool_cone_half_angle)),
         "tool_cone_violation": float(tool_cone_violation),
-        "tool_cone_violation_deg": float(np.rad2deg(tool_cone_violation)) if np.isfinite(tool_cone_violation) else np.nan,
+        "tool_cone_violation_deg": (
+            float(np.rad2deg(tool_cone_violation))
+            if np.isfinite(tool_cone_violation)
+            else np.nan
+        ),
     }
+
 
 class DirectPsiProblem:
     def __init__(
@@ -494,7 +503,6 @@ class DirectPsiProblem:
                     T_target=self.T_target,
                     tool_axis=self.tool_axis,
                 )
-
             elif self.orientation_mode == "tool_cone":
                 e_ori, _, _, _, _, _, _ = tool_cone_residual(
                     T_current=T_ee,
@@ -510,11 +518,13 @@ class DirectPsiProblem:
             psi_q = sew_angle_from_points(S, E, W, self.ref_dir)
             e_psi = wrap_to_pi(psi_q - self.psi_des)
 
-            return np.concatenate([
-                self.w_pos * dp,
-                self.w_ori * e_ori,
-                [self.w_psi * e_psi],
-            ])
+            return np.concatenate(
+                [
+                    self.w_pos * dp,
+                    self.w_ori * e_ori,
+                    [self.w_psi * e_psi],
+                ]
+            )
 
         except Exception:
             return np.ones(7) * 1e3
@@ -527,9 +537,7 @@ class DirectPsiProblem:
             Jw = J_geom[3:, :]
 
             if self.orientation_mode == "full":
-                # Original full-pose orientation Jacobian.
                 J_ori = self.R_target.T @ Jw
-
             elif self.orientation_mode == "tool_dir":
                 link_T, _ = fk_result
                 T_ee = link_T[self.chain.ee_link]
@@ -537,8 +545,6 @@ class DirectPsiProblem:
                     T_ee,
                     tool_axis=self.tool_axis,
                 )
-                # e_dir = d_current - d_target
-                # d_dot = omega x d = -skew(d) @ omega
                 J_ori = -skew(d_current) @ Jw
             elif self.orientation_mode == "tool_cone":
                 link_T, _ = fk_result
@@ -548,7 +554,6 @@ class DirectPsiProblem:
                     T_ee,
                     tool_axis=self.tool_axis,
                 )
-
                 d_target = tool_direction_from_T(
                     self.T_target,
                     tool_axis=self.tool_axis,
@@ -557,16 +562,12 @@ class DirectPsiProblem:
                 _, _, violation, inside = closest_direction_on_cone(
                     d_current=d_current,
                     d_target=d_target,
-                   cone_half_angle=self.tool_cone_half_angle,
+                    cone_half_angle=self.tool_cone_half_angle,
                 )
 
                 if inside or violation <= 0.0:
-                    # Already inside cone: no orientation constraint.
                     J_ori = np.zeros_like(Jw)
                 else:
-                    # Approximate Jacobian:
-                    # residual = d_current - d_boundary
-                    # ignore boundary derivative for robustness/simplicity.
                     J_ori = -skew(d_current) @ Jw
 
             J_psi = dpsi_dq(
@@ -579,29 +580,41 @@ class DirectPsiProblem:
                 self.ref_dir,
             )
 
-            return np.vstack([
-                self.w_pos * Jv,
-                self.w_ori * J_ori,
-                self.w_psi * J_psi,
-            ])
+            return np.vstack(
+                [
+                    self.w_pos * Jv,
+                    self.w_ori * J_ori,
+                    self.w_psi * J_psi,
+                ]
+            )
 
         except Exception:
             return np.eye(7, self.n) * 1e-6
 
-  def residual_reg(self, q):
+    def residual_reg(self, q):
         try:
             base = self.residual_task(q)
             n = self.n
 
-            e_seed = (q - self.q_ref) / self.q_scale if self.q_ref is not None else np.zeros(n)
-            e_bias = (q - self.q_bias) / self.q_scale if self.q_bias is not None else np.zeros(n)
+            e_seed = (
+                (q - self.q_ref) / self.q_scale
+                if self.q_ref is not None
+                else np.zeros(n)
+            )
+            e_bias = (
+                (q - self.q_bias) / self.q_scale
+                if self.q_bias is not None
+                else np.zeros(n)
+            )
             e_center = (q - self.q_center) / self.q_scale
-            return np.concatenate([
-                base,
-                self.w_seed * e_seed,
-                self.w_bias * e_bias,
-                self.w_center * e_center,
-            ])
+            return np.concatenate(
+                [
+                    base,
+                    self.w_seed * e_seed,
+                    self.w_bias * e_bias,
+                    self.w_center * e_center,
+                ]
+            )
 
         except Exception:
             return np.ones(7 + 3 * self.n) * 1e3
@@ -612,15 +625,25 @@ class DirectPsiProblem:
             n = self.n
 
             inv_scale = np.diag(1.0 / self.q_scale)
-            J_seed = self.w_seed * inv_scale if self.q_ref is not None else np.zeros((n, n))
-            J_bias = self.w_bias * inv_scale if self.q_bias is not None else np.zeros((n, n))
+            J_seed = (
+                self.w_seed * inv_scale
+                if self.q_ref is not None
+                else np.zeros((n, n))
+            )
+            J_bias = (
+                self.w_bias * inv_scale
+                if self.q_bias is not None
+                else np.zeros((n, n))
+            )
             J_center = self.w_center * inv_scale
-           return np.vstack([
-                J_task,
-                J_seed,
-                J_bias,
-                J_center,
-            ])
+            return np.vstack(
+                [
+                    J_task,
+                    J_seed,
+                    J_bias,
+                    J_center,
+                ]
+            )
 
         except Exception:
             m = 7 + 3 * self.n
@@ -670,9 +693,13 @@ def solve_direct_psi(
     q_scale = joint_range_scale(lower, upper)
     q_center_arr = joint_center_from_bounds(lower, upper)
 
-    q_ref_arr = clip_to_bounds(q_ref, lower, upper) if q_ref is not None else None
-    q_bias_arr = clip_to_bounds(q_bias, lower, upper) if q_bias is not None else None
-   prob = DirectPsiProblem(
+    q_ref_arr = (
+        clip_to_bounds(q_ref, lower, upper) if q_ref is not None else None
+    )
+    q_bias_arr = (
+        clip_to_bounds(q_bias, lower, upper) if q_bias is not None else None
+    )
+    prob = DirectPsiProblem(
         chain=chain,
         T_target=T_target,
         psi_des=psi_des,
@@ -680,7 +707,7 @@ def solve_direct_psi(
         q_bias=q_bias_arr,
         q_center=q_center_arr,
         q_scale=q_scale,
-       lower=lower,
+        lower=lower,
         upper=upper,
         w_pos=w_pos,
         w_ori=w_ori,
@@ -707,11 +734,12 @@ def solve_direct_psi(
         if seed.shape != lower.shape:
             continue
 
-       seed = clip_to_bounds(seed, lower, upper)
+        seed = clip_to_bounds(seed, lower, upper)
         dup = any(np.linalg.norm(seed - old) < 1e-8 for old in clean_seeds)
 
         if not dup:
             clean_seeds.append(seed)
+
     for si, seed in enumerate(clean_seeds):
         prob._cache_q = None
 
@@ -733,7 +761,7 @@ def solve_direct_psi(
         if refine_task:
             prob._cache_q = None
 
-             res2 = least_squares(
+            res2 = least_squares(
                 prob.residual_task,
                 q,
                 jac=prob.jacobian_task,
@@ -748,6 +776,7 @@ def solve_direct_psi(
 
             q = res2.x
             res_used = res2
+
         try:
             info = evaluate_direct_psi_solution(
                 chain,
@@ -756,12 +785,12 @@ def solve_direct_psi(
                 q,
                 q_ref=q_ref_arr,
                 S_joint=S_joint,
-              E_joint=E_joint,
+                E_joint=E_joint,
                 W_joint=W_joint,
                 ref_dir=ref_dir,
                 orientation_mode=orientation_mode,
                 tool_axis=tool_axis,
-               tool_cone_half_angle=tool_cone_half_angle,
+                tool_cone_half_angle=tool_cone_half_angle,
             )
         except Exception as e:
             if verbose:
@@ -772,11 +801,7 @@ def solve_direct_psi(
         ori_err = info["ori_err"]
         psi_err = info["psi_err"]
 
-        ok = (
-            pos_err < pos_tol
-            and ori_err < ori_tol
-            and psi_err < psi_tol
-        )
+        ok = pos_err < pos_tol and ori_err < ori_tol and psi_err < psi_tol
 
         if verbose:
             print(
@@ -784,33 +809,31 @@ def solve_direct_psi(
                 f"pos={pos_err:.3e} ori={ori_err:.3e} psi={psi_err:.3e} "
                 f"margin={info['margin']:.3e} nfev={res_used.nfev}"
             )
+
         if ok and unique_add(unique_solutions, q):
             item = dict(info)
-            item.update({
-                "cost": float(res_used.cost),
-                "success": bool(res_used.success),
-                "message": res_used.message,
-
-                "nfev": int(res_used.nfev),
-            })
+            item.update(
+                {
+                    "cost": float(res_used.cost),
+                    "success": bool(res_used.success),
+                    "message": res_used.message,
+                    "nfev": int(res_used.nfev),
+                }
+            )
             results.append(item)
 
-            # Early exit: enough distinct solutions collected, stop
-            # grinding through the remaining seeds.
-
-           if max_solutions is not None and len(results) >= max_solutions:
+            if max_solutions is not None and len(results) >= max_solutions:
                 break
 
     PSI_BUCKET = np.deg2rad(2.0)
 
     def sort_key(s):
-
         dq = s.get("q_ref_dq", np.nan)
         if not np.isfinite(dq):
             dq = 0.0
 
         psi_bucket = int(s["psi_err"] / PSI_BUCKET)
-       return (
+        return (
             psi_bucket,
             dq,
             -s.get("margin", -1e9),
@@ -834,9 +857,8 @@ def solve_direct_psi(
         )
 
     return results
-# =============================================================================
-# Candidate scoring / selection
-# =============================================================================
+
+
 # =============================================================================
 # Seeds / SSIK
 # =============================================================================
@@ -850,6 +872,7 @@ def make_direct_local_seeds(q_prev, q_ready, lower, upper, rng):
     for scale in DIRECT_LOCAL_NOISE_SCALES:
         q_noise = q_prev + rng.normal(scale=scale, size=len(q_prev))
         seeds.append(clip_to_bounds(q_noise, lower, upper))
+
     seeds.append(q_ready.copy())
 
     for scale in DIRECT_LOCAL_NOISE_SCALES:
@@ -885,21 +908,18 @@ def call_ssik_solve(arm, T_target, q_seed=None):
 
     try:
         return arm.solve(T_target, **kwargs)
-
     except TypeError:
         kwargs.pop("max_solutions", None)
-
         try:
-           return arm.solve(T_target, **kwargs)
-
+            return arm.solve(T_target, **kwargs)
         except TypeError:
             kwargs.pop("q_seed", None)
-
             try:
                 return arm.solve(T_target, **kwargs)
-
             except TypeError:
                 return arm.solve(T_target)
+
+
 def collect_ssik_candidates_and_seeds(
     arm,
     chain,
@@ -916,6 +936,7 @@ def collect_ssik_candidates_and_seeds(
 ):
     if arm is None:
         return [], []
+
     try:
         q_seed = q_ready if SSIK_USE_READY_AS_SEED else None
         sols = call_ssik_solve(arm, T_target, q_seed=q_seed)
@@ -943,7 +964,7 @@ def collect_ssik_candidates_and_seeds(
             T_target,
             psi_ready,
             q_prev,
-           q_ready,
+            q_ready,
             lower,
             upper,
             orientation_mode=orientation_mode,
@@ -957,15 +978,18 @@ def collect_ssik_candidates_and_seeds(
         info["fallback_used"] = True
 
         ssik_candidates.append(info)
-    ssik_candidates.sort(key=candidate_sort_key)
 
-    ssik_seeds_for_direct = [c["q"] for c in ssik_candidates[:SSIK_TOP_K_FOR_DIRECT]]
+    ssik_candidates.sort(key=candidate_sort_key)
+    ssik_seeds_for_direct = [
+        c["q"] for c in ssik_candidates[:SSIK_TOP_K_FOR_DIRECT]
+    ]
 
     return ssik_candidates, ssik_seeds_for_direct
+
+
 # =============================================================================
 # Pinocchio helpers
 # =============================================================================
-
 def require_pinocchio():
     if pin is None:
         raise RuntimeError(
@@ -973,24 +997,16 @@ def require_pinocchio():
             "USE_TORQUE_COST is enabled.  Install with:  pip install pin"
         )
 
-def load_pinocchio_model(urdf_path):
-    """
-    Load URDF into Pinocchio model + data.
 
-    Returns
-    -------
-    model : pin.Model
-    data  : pin.Data
-    """
+def load_pinocchio_model(urdf_path):
+    """Load URDF into Pinocchio model + data."""
     model = pin.buildModelFromUrdf(str(urdf_path))
     data = model.createData()
     return model, data
 
 
 def get_pinocchio_frame_id(model, frame_name):
-    """
-    Get Pinocchio frame id by name.  Raises KeyError if not found.
-    """
+    """Get Pinocchio frame id by name. Raises KeyError if not found."""
     if not model.existFrame(frame_name):
         available = [model.frames[i].name for i in range(model.nframes)]
         raise KeyError(
@@ -999,6 +1015,8 @@ def get_pinocchio_frame_id(model, frame_name):
         )
 
     return model.getFrameId(frame_name)
+
+
 # =============================================================================
 # Pinocchio DLS candidate orchestration
 # =============================================================================
@@ -1022,27 +1040,7 @@ def collect_pinocchio_candidates_and_seeds(
     include_waist=False,
     dls_params=None,
 ):
-    """
-   Run Pinocchio damped-LS IK from many seeds.
-
-    Parameters
-    ----------
-    T_target_pin : np.ndarray
-        4x4 target pose in Pinocchio model root frame (for IK).
-    T_target_local : np.ndarray
-        4x4 target pose in arm base/local frame (for scoring via SerialChain).
-    include_waist : bool
-        9-DOF waist+arm mode: first try with the waist fixed at q_ready, then
-        fall back to waist+arm seeds and prefer a low-waist valid solution.
-    dls_params : dict, optional
-        {"max_iter", "damping", "max_step"} overrides for the per-seed DLS.
-
-    Returns
-    -------
-   (candidates, seeds_for_direct, per_seed)
-        per_seed entries mirror pink_ik_one_seed's seed_diag plus
-        {"seed_idx", "pose_ok", "margin"}.
-    """
+    """Run Pinocchio damped-LS IK from deterministic and scattered seeds."""
     scatter_seeds = make_scatter_seeds(
         q_prev=q_prev,
         q_ready=q_ready,
@@ -1051,37 +1049,50 @@ def collect_pinocchio_candidates_and_seeds(
         rng=rng,
     )
     fixed_joint_masks = [None] * len(scatter_seeds)
+
+    # 計算確定性基準種子的數量（q_ready 與 q_prev），確保兩者均被評估後再早停
+    has_distinct_prev = float(np.linalg.norm(q_prev - q_ready)) > 1e-4
+    min_det_idx = 1 if has_distinct_prev else 0
+
     if include_waist:
         fixed_waist_mask = np.array(
-          [name in WAIST_JOINT_NAMES for name in pin_maps["active_names"]],
+            [name in WAIST_JOINT_NAMES for name in pin_maps["active_names"]],
             dtype=bool,
         )
-       scatter_seeds.insert(0, q_ready.copy())
+        scatter_seeds.insert(0, q_ready.copy())
         fixed_joint_masks.insert(0, fixed_waist_mask)
+        min_det_idx += 1
 
     pin_candidates = []
-   per_seed = []
+    per_seed = []
     unique_qs = []
     arm_first_failed = False
     valid_safe_count = 0
-  if include_waist:
+
+    eff_waist_weight = WAIST_TASK_WEIGHT
+    if dls_params and dls_params.get("waist_task_weight") is not None:
+        eff_waist_weight = float(dls_params["waist_task_weight"])
+
+    if include_waist:
         joint_weights = np.array(
             [
-                WAIST_TASK_WEIGHT if n in WAIST_JOINT_NAMES else 1.0
+                eff_waist_weight if n in WAIST_JOINT_NAMES else 1.0
                 for n in pin_maps["active_names"]
             ],
             dtype=float,
         )
-        null_ref = q_ready
     else:
         joint_weights = None
-        null_ref = None
+
+    # 始終將零空間參考錨定在固定的 q_ready，徹底消除往返解算漂移
+    null_ref = q_ready
+
     for seed_idx, seed in enumerate(scatter_seeds):
         try:
             q, seed_diag = pinocchio_ik_one_seed(
                 pin_model=pin_model,
                 pin_data=pin_data,
-             pin_maps=pin_maps,
+                pin_maps=pin_maps,
                 ee_frame_id=ee_frame_id,
                 T_target=T_target_pin,
                 seed=seed,
@@ -1109,6 +1120,7 @@ def collect_pinocchio_candidates_and_seeds(
                 }
             )
             continue
+
         duplicate = False
         for old in unique_qs:
             if np.linalg.norm(q - old) < 1e-5:
@@ -1117,9 +1129,8 @@ def collect_pinocchio_candidates_and_seeds(
 
         if duplicate:
             continue
-      unique_qs.append(q.copy())
+        unique_qs.append(q.copy())
 
-        # Score using SerialChain FK (always in local/base frame)
         info = score_candidate(
             chain,
             q,
@@ -1131,7 +1142,7 @@ def collect_pinocchio_candidates_and_seeds(
             upper,
             orientation_mode=orientation_mode,
             tool_axis=tool_axis,
-           tool_cone_half_angle=tool_cone_half_angle,
+            tool_cone_half_angle=tool_cone_half_angle,
             apply_waist_return=include_waist,
         )
 
@@ -1153,40 +1164,53 @@ def collect_pinocchio_candidates_and_seeds(
             }
         )
 
-####################有解早停
+        # 有解早停：當鎖腰種子(seed 0)直接成功，或確定性基準種子(q_ready & q_prev)已評估完畢時早停
         if info["pose_ok"] and info["margin"] >= SAFE_MARGIN:
             valid_safe_count += 1
-            need_fast_fallback = arm_first_failed and seed_idx > 0
-            waist_is_neutral = (
-               not include_waist
-                or info["waist_dev"] <= WAIST_RETURN_TOL
-            )
+            locked_waist_succeeded = include_waist and seed_idx == 0
+            det_seeds_done = seed_idx >= min_det_idx
 
-            if waist_is_neutral or need_fast_fallback:
-                return pin_candidates, [info["q"]], per_seed
+            if locked_waist_succeeded or det_seeds_done:
+                need_fast_fallback = arm_first_failed and seed_idx > 0
+                waist_is_neutral = (
+                    not include_waist or info["waist_dev"] <= WAIST_RETURN_TOL
+                )
 
-            if valid_safe_count >= PIN_IK_MAX_VALID_CANDIDATES:
-                sorted_valid = sorted(
-                    pin_candidates,
-                    key=candidate_sort_key,
-                )
-                return (
-                    pin_candidates,
-                    [candidate["q"] for candidate in sorted_valid[:PIN_TOP_K_FOR_DIRECT]],
-                    per_seed,
-                )
-################
+                if waist_is_neutral or need_fast_fallback:
+                    sorted_valid = sorted(
+                        pin_candidates, key=candidate_sort_key
+                    )
+                    return (
+                        pin_candidates,
+                        [
+                            c["q"]
+                            for c in sorted_valid[:PIN_TOP_K_FOR_DIRECT]
+                        ],
+                        per_seed,
+                    )
+
+                if valid_safe_count >= PIN_IK_MAX_VALID_CANDIDATES:
+                    sorted_valid = sorted(
+                        pin_candidates,
+                        key=candidate_sort_key,
+                    )
+                    return (
+                        pin_candidates,
+                        [
+                            c["q"]
+                            for c in sorted_valid[:PIN_TOP_K_FOR_DIRECT]
+                        ],
+                        per_seed,
+                    )
+
     sorted_pin = sorted(pin_candidates, key=candidate_sort_key)
-
     pin_seeds_for_direct = [c["q"] for c in sorted_pin[:PIN_TOP_K_FOR_DIRECT]]
     return pin_candidates, pin_seeds_for_direct, per_seed
 
 
 # =============================================================================
-# Torque cost helpers  (Pinocchio)
-# =
+# Torque cost helpers (Pinocchio)
 # =============================================================================
-
 def gravity_torque_for_active_q(
     pin_model,
     pin_data,
@@ -1194,16 +1218,13 @@ def gravity_torque_for_active_q(
     active_joint_names,
     q_active,
 ):
-    """
-    Compute gravity compensation torques for active joints using Pinocchio.
-
-    Equivalent to:
-        PyBullet calculateInverseDynamics(q, qd=0, qdd=0)
-    """
+    """Compute gravity compensation torques for active joints using Pinocchio."""
     q_active = np.asarray(q_active, dtype=float)
     q_full = active_q_to_pinocchio_q(pin_model, pin_maps, q_active)
 
-    tau_gravity_full = pin.computeGeneralizedGravity(pin_model, pin_data, q_full)
+    tau_gravity_full = pin.computeGeneralizedGravity(
+        pin_model, pin_data, q_full
+    )
     tau_active = np.array(
         [float(tau_gravity_full[idx]) for idx in pin_maps["active_v_indices"]],
         dtype=float,
@@ -1211,11 +1232,12 @@ def gravity_torque_for_active_q(
 
     return tau_active
 
+
 def get_active_joint_efforts(pin_maps):
-    """
-    Return effort limits for active joints from Pinocchio maps.
-    """
+    """Return effort limits for active joints from Pinocchio maps."""
     return pin_maps["effort_limits"].copy()
+
+
 def add_torque_metrics_to_candidate(
     candidate,
     pin_model,
@@ -1223,12 +1245,10 @@ def add_torque_metrics_to_candidate(
     pin_maps,
     active_joint_names,
     joint_efforts_active,
-):    
-    if candidate is None:
+):
+    if candidate is None or "q" not in candidate:
         return
 
-    if "q" not in candidate:
-        return
     tau = gravity_torque_for_active_q(
         pin_model=pin_model,
         pin_data=pin_data,
@@ -1243,13 +1263,15 @@ def add_torque_metrics_to_candidate(
     candidate["tau_gravity"] = tau
     candidate["torque_ratio"] = ratio
     candidate["torque_cost"] = float(np.mean(ratio ** 2))
-      candidate["torque_l2"] = float(np.linalg.norm(tau))
+    candidate["torque_l2"] = float(np.linalg.norm(tau))
     candidate["max_abs_tau"] = float(np.max(np.abs(tau)))
     candidate["max_usage"] = float(np.max(ratio))
     candidate["max_usage_joint_idx"] = max_idx
-   candidate["max_usage_joint_name"] = active_joint_names[max_idx]
+    candidate["max_usage_joint_name"] = active_joint_names[max_idx]
 
     update_candidate_final_cost_with_torque(candidate)
+
+
 def add_torque_metrics_to_candidates(
     candidates,
     pin_model,
@@ -1267,19 +1289,17 @@ def add_torque_metrics_to_candidates(
                 pin_model=pin_model,
                 pin_data=pin_data,
                 pin_maps=pin_maps,
-
                 active_joint_names=active_joint_names,
                 joint_efforts_active=joint_efforts_active,
             )
-
         except Exception as e:
-           c["torque_error"] = repr(e)
+            c["torque_error"] = repr(e)
             update_candidate_final_cost_with_torque(c)
+
 
 # =============================================================================
 # Standalone solver class
 # =============================================================================
-
 class HAArmIKSolver:
     def __init__(
         self,
@@ -1296,8 +1316,6 @@ class HAArmIKSolver:
         self.verbose = verbose
         self.include_waist = bool(include_waist)
 
-        # Tuning parameters: instance attrs seeded from module constants so
-        # callers can override per-instance without editing solver.py.
         cfg_tune = dict(config) if config else {}
         self.max_direct_nfev = cfg_tune.get(
             "max_direct_nfev", PORTFOLIO_DIRECT_MAX_NFEV
@@ -1309,7 +1327,7 @@ class HAArmIKSolver:
             "direct_ori_tol", PORTFOLIO_DIRECT_ORI_TOL
         )
         self.direct_psi_tol = cfg_tune.get(
-           "direct_psi_tol", PORTFOLIO_DIRECT_PSI_TOL
+            "direct_psi_tol", PORTFOLIO_DIRECT_PSI_TOL
         )
         self.portfolio_q_ref_mode = cfg_tune.get(
             "portfolio_q_ref_mode", PORTFOLIO_Q_REF_MODE
@@ -1318,6 +1336,21 @@ class HAArmIKSolver:
         self.dls_max_iter = cfg_tune.get("dls_max_iter", PIN_IK_MAX_ITER)
         self.dls_damping = cfg_tune.get("dls_damping", PIN_IK_DAMPING)
         self.dls_max_step = cfg_tune.get("dls_max_step", PIN_IK_MAX_STEP)
+
+        # 可選的零空間與物理負載覆蓋參數（預設為 None 時動態讀取 solver_dls 全局常量）
+        self.dls_nullspace_gain = cfg_tune.get("dls_nullspace_gain", None)
+        self.dls_waist_null_gain = cfg_tune.get("dls_waist_null_gain", None)
+        self.dls_waist_task_weight = cfg_tune.get(
+            "dls_waist_task_weight", None
+        )
+        self.dls_waist_task_weight_far = cfg_tune.get(
+            "dls_waist_task_weight_far", None
+        )
+        self.dls_gravity_torque_gain = cfg_tune.get(
+            "dls_gravity_torque_gain", None
+        )
+        self.dls_com_xy_gain = cfg_tune.get("dls_com_xy_gain", None)
+        self.dls_joint_limit_gain = cfg_tune.get("dls_joint_limit_gain", None)
 
         self.urdf = str(Path(urdf).expanduser().resolve())
         if not Path(self.urdf).is_file():
@@ -1330,10 +1363,7 @@ class HAArmIKSolver:
         cfg = ARM_CONFIGS[self.side]
 
         if self.include_waist:
-            # 9-DOF chain: base_Base -> Hip_Link1 -> Body_Link -> arm 7.
-            # Only the Pinocchio DLS path supports redundant chains;
-         # SEW/arm-angle geometry assumes a fixed arm base.
-            self.base_link = get_urdf_root_link(self.urdf)
+            self.base_link = self.urdf_root_link
             use_ssik = False
             use_direct_psi = False
             if verbose:
@@ -1344,14 +1374,12 @@ class HAArmIKSolver:
         else:
             self.base_link = cfg["base_link"]
 
-
         self.ee_link = cfg["ee_link"]
         self.s_joint = cfg["s_joint"]
         self.e_joint = cfg["e_joint"]
         self.w_joint = cfg["w_joint"]
         self.ref_dir = REF_DIR.copy()
-      # If the URDF already contains world -> arm_base fixed joint,
-        # use that transform and do not mount it again.
+
         mount_from_urdf = get_fixed_joint_origin(
             self.urdf,
             parent_link="world",
@@ -1360,44 +1388,44 @@ class HAArmIKSolver:
 
         if mount_from_urdf is not None:
             self.urdf_has_world_mount = True
-
             self.mount_xyz, self.mount_rpy = mount_from_urdf
         else:
             self.urdf_has_world_mount = False
             self.mount_xyz = cfg["mount_xyz"]
             self.mount_rpy = cfg["mount_rpy"]
+
         self.use_ssik = bool(use_ssik and ssik is not None)
         self.use_pinocchio_ik = bool(use_pinocchio_ik)
         self.use_torque_cost = bool(use_torque_cost)
         self.use_direct_psi = bool(use_direct_psi)
 
-    if use_ssik and ssik is None:
+        if use_ssik and ssik is None:
             print("[WARN] ssik import failed. SSIK disabled.")
 
         if (self.use_pinocchio_ik or self.use_torque_cost) and pin is None:
-            print("[WARN] pinocchio import failed. Pinocchio IK and torque cost disabled.")
+            print(
+                "[WARN] pinocchio import failed. "
+                "Pinocchio IK and torque cost disabled."
+            )
             self.use_pinocchio_ik = False
             self.use_torque_cost = False
 
         self.mount_quat = tuple(
             float(v) for v in R.from_matrix(rpy_to_R(self.mount_rpy)).as_quat()
         )
-       if self.urdf_has_world_mount or self.urdf_root_link != self.base_link:
-            # "world" differs from solver base: base sits on top of a mount.
+        if self.urdf_has_world_mount or self.urdf_root_link != self.base_link:
             self.T_world_from_base = make_T_from_xyz_rpy(
                 self.mount_xyz,
                 self.mount_rpy,
             )
         else:
-            # base_link IS the URDF root (9-DOF waist mode): local frame is
-            # already base_Base, no mount to apply.
             self.T_world_from_base = np.eye(4)
 
         self.T_base_from_world = invert_T(self.T_world_from_base)
 
         R_world_from_base = rpy_to_R(self.mount_rpy)
         self.g_mounted_base = R_world_from_base.T @ G_WORLD
-       self.chain = SerialChain(
+        self.chain = SerialChain(
             self.urdf,
             self.base_link,
             self.ee_link,
@@ -1406,8 +1434,7 @@ class HAArmIKSolver:
             w_joint=self.w_joint,
         )
 
-        # Workspace max-radius check.
-       self.workspace_anchor_joint = self.s_joint
+        self.workspace_anchor_joint = self.s_joint
         self.workspace_anchor_local_xyz = joint_origin_position_at_zero(
             self.chain,
             self.workspace_anchor_joint,
@@ -1421,8 +1448,7 @@ class HAArmIKSolver:
         self.workspace_max_radius = self.workspace_max_j7_radius_from_anchor
 
         self.lower, self.upper = self.chain.bounds()
-    if self.include_waist:
-            # Waist joints in front, at neutral (home) configuration.
+        if self.include_waist:
             q_ready_arm = clip_to_bounds(
                 cfg["q_ready"],
                 self.lower[2:],
@@ -1431,16 +1457,14 @@ class HAArmIKSolver:
             self.q_ready = np.concatenate(
                 [np.zeros(2, dtype=float), q_ready_arm]
             )
-            self.q_ready = clip_to_bounds(
-                self.q_ready, self.lower, self.upper
-            )
+            self.q_ready = clip_to_bounds(self.q_ready, self.lower, self.upper)
         else:
             self.q_ready = clip_to_bounds(
                 cfg["q_ready"],
                 self.lower,
                 self.upper,
             )
-      self.q_prev = self.q_ready.copy()
+        self.q_prev = self.q_ready.copy()
 
         self.active_joint_names = [
             j["name"] for j in self.chain.active_joints
@@ -1458,81 +1482,91 @@ class HAArmIKSolver:
                 base=self.base_link,
                 ee=self.ee_link,
             )
+
         # ---- Pinocchio (shared for IK + torque) ----
         self.pin_model = None
         self.pin_data = None
         self.pin_maps = None
         self.pin_ee_frame_id = None
         self.joint_efforts_active = None
-       if self.use_pinocchio_ik or self.use_torque_cost:
+        if self.use_pinocchio_ik or self.use_torque_cost:
             require_pinocchio()
 
             self.pin_model, self.pin_data = load_pinocchio_model(self.urdf)
-            if self.urdf_has_world_mount:
-                # URDF root is world.
+            if (
+                self.urdf_has_world_mount
+                or self.urdf_root_link != self.base_link
+            ):
                 g = G_WORLD
-
-            elif self.urdf_root_link != self.base_link:
-              # Example:
-                #   URDF root       = base_Base
-                #   solver base     = Body_Link
-                #             # Pinocchio model is rooted at base_Base, so gravity should be expressed
-                # in base_Base/root frame. We assume base_Base Z is world Z.
-                g = G_WORLD
-
             else:
-              # Old behavior:
-                # Pinocchio root == solver base_link.
-                # Gravity must be expressed in solver base frame.
                 g = self.g_mounted_base
-         self.pin_model.gravity.linear = np.array(g, dtype=float)
+            self.pin_model.gravity.linear = np.array(g, dtype=float)
 
             self.pin_maps = build_pinocchio_joint_maps(
                 self.pin_model,
                 self.active_joint_names,
             )
-
             self.joint_efforts_active = get_active_joint_efforts(self.pin_maps)
 
         if self.use_pinocchio_ik:
             self.pin_ee_frame_id = get_pinocchio_frame_id(
                 self.pin_model,
-              self.ee_link,
+                self.ee_link,
             )
 
         self._check_model()
 
         if self.verbose:
             self.print_info()
-   def _check_model(self):
+
+    def _check_model(self):
         if self.pin_maps is not None:
             missing = [
-                name for name in self.active_joint_names
+                name
+                for name in self.active_joint_names
                 if name not in self.pin_maps["name_to_joint_id"]
             ]
-
-        if missing:
+            if missing:
                 raise RuntimeError(
                     f"Missing active joints in Pinocchio model: {missing}"
                 )
-   def print_info(self):
+
+    def evaluate_physics(self, q_active):
+        """計算給定關節角下的重力矩、電機負載百分比、整機重心偏移與傾覆力矩。"""
+        require_pinocchio()
+        if self.pin_model is None:
+            self.pin_model, self.pin_data = load_pinocchio_model(self.urdf)
+            self.pin_maps = build_pinocchio_joint_maps(
+                self.pin_model, self.active_joint_names
+            )
+        return evaluate_pose_physics(
+            self.pin_model,
+            self.pin_data,
+            self.pin_maps,
+            q_active,
+            q_ref=self.q_ready,
+        )
+
+    def print_info(self):
         T_ready_local = self.chain.fk(self.q_ready)
         T_ready_world = self.T_world_from_base @ T_ready_local
 
         print("")
         print("=" * 80)
-
-    print("HAArmIKSolver")
+        print("HAArmIKSolver")
         print("=" * 80)
         print("URDF:", self.urdf)
         print("side:", self.side)
         print("include_waist:", self.include_waist)
         print("BASE_LINK:", self.base_link)
-       print("EE_LINK:", self.ee_link)
+        print("EE_LINK:", self.ee_link)
         print("active joints:", self.active_joint_names)
-        print("Q_READY:", np.array2string(self.q_ready, precision=6, separator=", "))
+        print(
+            "Q_READY:",
+            np.array2string(self.q_ready, precision=6, separator=", "),
+        )
         print("psi_ready rad:", self.psi_ready)
-     print("psi_ready deg:", np.rad2deg(self.psi_ready))
+        print("psi_ready deg:", np.rad2deg(self.psi_ready))
         print("EE ready local xyz:", T_ready_local[:3, 3])
         print("EE ready world xyz:", T_ready_world[:3, 3])
         print("workspace anchor joint:", self.workspace_anchor_joint)
@@ -1546,22 +1580,28 @@ class HAArmIKSolver:
         print("USE_SSIK:", self.use_ssik)
         print("USE_PINOCCHIO_IK:", self.use_pinocchio_ik)
         print("USE_TORQUE_COST:", self.use_torque_cost)
-        
         print("W_TORQUE:", W_TORQUE)
-       print("G_MOUNTED_BASE:", np.round(self.g_mounted_base, 6))
+        print("G_MOUNTED_BASE:", np.round(self.g_mounted_base, 6))
         if self.pin_model is not None:
             print("Pinocchio model nq:", self.pin_model.nq)
             print("Pinocchio model nv:", self.pin_model.nv)
-     if self.joint_efforts_active is not None:
+        if self.joint_efforts_active is not None:
             print("joint effort limits:", self.joint_efforts_active)
         print("=" * 80)
-    print("URDF root link:", self.urdf_root_link)
+        print("URDF root link:", self.urdf_root_link)
         print("solver base link:", self.base_link)
-        print("Pinocchio target frame mode:",
-         "world/root" if (self.urdf_has_world_mount or self.urdf_root_link != self.base_link)
-            else "local/solver_base")
+        print(
+            "Pinocchio target frame mode:",
+            "world/root"
+            if (
+                self.urdf_has_world_mount
+                or self.urdf_root_link != self.base_link
+            )
+            else "local/solver_base",
+        )
         print("")
-  def target_to_local(self, T_target, frame="local"):
+
+    def target_to_local(self, T_target, frame="local"):
         return target_frames(
             T_target,
             frame=frame,
@@ -1570,7 +1610,6 @@ class HAArmIKSolver:
         )
 
     def workspace_diagnostic(
-
         self,
         T_target,
         frame="local",
@@ -1578,23 +1617,21 @@ class HAArmIKSolver:
         tcp_offset_xyz=None,
         margin=None,
     ):
-        """
-        Simple max-radius workspace check from J1/J2 shoulder joint to target TCP.
-        """
+        """Simple max-radius workspace check from J1/J2 shoulder joint to target TCP."""
         T_target = np.asarray(T_target, dtype=float)
 
         if T_target.shape != (4, 4):
-           raise ValueError("T_target must be 4x4 matrix.")
+            raise ValueError("T_target must be 4x4 matrix.")
 
         if tcp_offset_xyz is None:
             tcp_offset_xyz = np.zeros(3)
 
         tcp_offset_xyz = np.asarray(tcp_offset_xyz, dtype=float)
-     if tcp_offset_xyz.shape != (3,):
+        if tcp_offset_xyz.shape != (3,):
             raise ValueError(
                 f"tcp_offset_xyz must be length 3, got shape {tcp_offset_xyz.shape}"
             )
-       tcp_offset_norm = float(np.linalg.norm(tcp_offset_xyz))
+        tcp_offset_norm = float(np.linalg.norm(tcp_offset_xyz))
         T_j7_to_tcp = make_translation_T(tcp_offset_xyz)
 
         if target_is_tcp:
@@ -1603,11 +1640,18 @@ class HAArmIKSolver:
         else:
             T_j7_input = T_target
             T_tcp_input = T_j7_input @ T_j7_to_tcp
-        T_j7_local, T_j7_world = self.target_to_local(T_j7_input, frame=frame)
-        T_tcp_local, T_tcp_world = self.target_to_local(T_tcp_input, frame=frame)
 
-        p_anchor_local = np.asarray(self.workspace_anchor_local_xyz, dtype=float)
-        p_anchor_world = transform_point(self.T_world_from_base, p_anchor_local)
+        T_j7_local, T_j7_world = self.target_to_local(T_j7_input, frame=frame)
+        T_tcp_local, T_tcp_world = self.target_to_local(
+            T_tcp_input, frame=frame
+        )
+
+        p_anchor_local = np.asarray(
+            self.workspace_anchor_local_xyz, dtype=float
+        )
+        p_anchor_world = transform_point(
+            self.T_world_from_base, p_anchor_local
+        )
 
         p_j7_local = T_j7_local[:3, 3]
         p_tcp_local = T_tcp_local[:3, 3]
@@ -1615,48 +1659,40 @@ class HAArmIKSolver:
         p_tcp_world = T_tcp_world[:3, 3]
 
         dist_anchor_to_j7 = float(np.linalg.norm(p_j7_local - p_anchor_local))
-        dist_anchor_to_tcp = float(np.linalg.norm(p_tcp_local - p_anchor_local))
-       max_j7_radius = float(self.workspace_max_j7_radius_from_anchor)
+        dist_anchor_to_tcp = float(
+            np.linalg.norm(p_tcp_local - p_anchor_local)
+        )
+        max_j7_radius = float(self.workspace_max_j7_radius_from_anchor)
         max_tcp_radius = max_j7_radius + tcp_offset_norm
 
         ok = dist_anchor_to_tcp <= max_tcp_radius
-
-    if ok:
-            reason = "OK_MAX_TCP_RADIUS"
-        else:
-            reason = "OUT_OF_MAX_TCP_RADIUS"
+        reason = "OK_MAX_TCP_RADIUS" if ok else "OUT_OF_MAX_TCP_RADIUS"
 
         return {
-     "ok": bool(ok),
+            "ok": bool(ok),
             "reason": reason,
             "frame": frame,
             "target_is_tcp": bool(target_is_tcp),
-
-          "anchor_joint": self.workspace_anchor_joint,
+            "anchor_joint": self.workspace_anchor_joint,
             "anchor_local_xyz": p_anchor_local.copy(),
             "anchor_world_xyz": p_anchor_world.copy(),
             "tcp_offset_xyz": tcp_offset_xyz.copy(),
             "tcp_offset_norm": tcp_offset_norm,
-
             "T_j7_local": T_j7_local,
             "T_j7_world": T_j7_world,
-         "T_tcp_local": T_tcp_local,
+            "T_tcp_local": T_tcp_local,
             "T_tcp_world": T_tcp_world,
-
             "required_j7_local_xyz": p_j7_local.copy(),
             "required_j7_world_xyz": p_j7_world.copy(),
-
-         "tcp_local_xyz": p_tcp_local.copy(),
+            "tcp_local_xyz": p_tcp_local.copy(),
             "tcp_world_xyz": p_tcp_world.copy(),
-
             "dist_anchor_to_required_j7": dist_anchor_to_j7,
-
             "dist_anchor_to_tcp": dist_anchor_to_tcp,
-
             "workspace_max_j7_radius_from_anchor": max_j7_radius,
             "workspace_max_tcp_radius_from_anchor": max_tcp_radius,
         }
-   def print_workspace_diagnostic(self, info, prefix="[WORKSPACE]"):
+
+    def print_workspace_diagnostic(self, info, prefix="[WORKSPACE]"):
         ok = bool(info["ok"])
         reason = info["reason"]
         level = "OK" if ok else "WARN"
@@ -1666,26 +1702,66 @@ class HAArmIKSolver:
         print("")
         print(f"{prefix} {level}: side={self.side}, reason={reason}")
         print(f"{prefix} frame                       : {info['frame']}")
-        print(f"{prefix} target_is_tcp               : {info['target_is_tcp']}")
+        print(
+            f"{prefix} target_is_tcp               : {info['target_is_tcp']}"
+        )
         print(f"{prefix} anchor_joint                : {anchor_joint}")
-        print(f"{prefix} anchor local xyz            : {np.round(info['anchor_local_xyz'], 6)}")
-        print(f"{prefix} anchor world xyz            : {np.round(info['anchor_world_xyz'], 6)}")
-        print(f"{prefix} tcp_offset_xyz              : {np.round(info['tcp_offset_xyz'], 6)}")
-        print(f"{prefix} tcp_offset_norm             : {info['tcp_offset_norm']:.6f} m")
-        print(f"{prefix} TCP local xyz               : {np.round(info['tcp_local_xyz'], 6)}")
-        print(f"{prefix} required J7 local xyz       : {np.round(info['required_j7_local_xyz'], 6)}")
-       print(f"{prefix} TCP world xyz               : {np.round(info['tcp_world_xyz'], 6)}")
-        print(f"{prefix} required J7 world xyz       : {np.round(info['required_j7_world_xyz'], 6)}")
-        print(f"{prefix} dist {anchor_joint}->TCP     : {info['dist_anchor_to_tcp']:.6f} m")
-        print(f"{prefix} dist {anchor_joint}->J7      : {info['dist_anchor_to_required_j7']:.6f} m")
-
-        print(f"{prefix} max {anchor_joint}->J7       : {info['workspace_max_j7_radius_from_anchor']:.6f} m")
-        print(f"{prefix} max {anchor_joint}->TCP      : {info['workspace_max_tcp_radius_from_anchor']:.6f} m")
-
+        print(
+            f"{prefix} anchor local xyz            : "
+            f"{np.round(info['anchor_local_xyz'], 6)}"
+        )
+        print(
+            f"{prefix} anchor world xyz            : "
+            f"{np.round(info['anchor_world_xyz'], 6)}"
+        )
+        print(
+            f"{prefix} tcp_offset_xyz              : "
+            f"{np.round(info['tcp_offset_xyz'], 6)}"
+        )
+        print(
+            f"{prefix} tcp_offset_norm             : "
+            f"{info['tcp_offset_norm']:.6f} m"
+        )
+        print(
+            f"{prefix} TCP local xyz               : "
+            f"{np.round(info['tcp_local_xyz'], 6)}"
+        )
+        print(
+            f"{prefix} required J7 local xyz       : "
+            f"{np.round(info['required_j7_local_xyz'], 6)}"
+        )
+        print(
+            f"{prefix} TCP world xyz               : "
+            f"{np.round(info['tcp_world_xyz'], 6)}"
+        )
+        print(
+            f"{prefix} required J7 world xyz       : "
+            f"{np.round(info['required_j7_world_xyz'], 6)}"
+        )
+        print(
+            f"{prefix} dist {anchor_joint}->TCP     : "
+            f"{info['dist_anchor_to_tcp']:.6f} m"
+        )
+        print(
+            f"{prefix} dist {anchor_joint}->J7      : "
+            f"{info['dist_anchor_to_required_j7']:.6f} m"
+        )
+        print(
+            f"{prefix} max {anchor_joint}->J7       : "
+            f"{info['workspace_max_j7_radius_from_anchor']:.6f} m"
+        )
+        print(
+            f"{prefix} max {anchor_joint}->TCP      : "
+            f"{info['workspace_max_tcp_radius_from_anchor']:.6f} m"
+        )
 
         if not ok:
-            print(f"{prefix} WARNING: Target TCP is outside max shoulder-to-TCP radius.")
-            print(f"{prefix}          This is likely a TCP target / tcp_offset / frame issue.")
+            print(
+                f"{prefix} WARNING: Target TCP is outside max shoulder-to-TCP radius."
+            )
+            print(
+                f"{prefix}          This is likely a TCP target / tcp_offset / frame issue."
+            )
 
         print("")
 
@@ -1710,16 +1786,22 @@ class HAArmIKSolver:
             self.print_workspace_diagnostic(info)
 
         return info["ok"], info
- def _collect_portfolio(self, T_target_local, T_target_world, q_prev, q_ready,
-                           lower, upper, rng, orientation_mode, tool_axis,
-                           tool_cone_half_angle):
-        """
-      Run the SSIK + Pinocchio-DLS stages.
 
-        Returns (candidates, direct_seeds, per_seed) where direct_seeds feed
-        the direct-psi stage and per_seed holds per-seed DLS diagnostics.
-        """
-     candidates = []
+    def _collect_portfolio(
+        self,
+        T_target_local,
+        T_target_world,
+        q_prev,
+        q_ready,
+        lower,
+        upper,
+        rng,
+        orientation_mode,
+        tool_axis,
+        tool_cone_half_angle,
+    ):
+        """Run the SSIK + Pinocchio-DLS stages."""
+        candidates = []
         all_direct_seeds = []
         per_seed = []
 
@@ -1729,8 +1811,7 @@ class HAArmIKSolver:
                 chain=self.chain,
                 T_target=T_target_local,
                 psi_ready=self.psi_ready,
-
-               q_prev=q_prev,
+                q_prev=q_prev,
                 q_ready=q_ready,
                 lower=lower,
                 upper=upper,
@@ -1745,14 +1826,26 @@ class HAArmIKSolver:
                 all_direct_seeds.extend(ssik_seeds)
 
         if self.use_pinocchio_ik:
-            # Pinocchio root may differ from the solver base: world mount or
-            # 7-DOF (base=Body_Link, root=base_Base) -> target in root frame;
-            # 9-DOF (root == base) -> target already in the right frame.
-
-            if self.urdf_has_world_mount or self.urdf_root_link != self.base_link:
+            if (
+                self.urdf_has_world_mount
+                or self.urdf_root_link != self.base_link
+            ):
                 T_target_pin = T_target_world
             else:
                 T_target_pin = T_target_local
+
+            dls_params = {
+                "max_iter": self.dls_max_iter,
+                "damping": self.dls_damping,
+                "max_step": self.dls_max_step,
+                "nullspace_gain": self.dls_nullspace_gain,
+                "waist_null_gain": self.dls_waist_null_gain,
+                "waist_task_weight": self.dls_waist_task_weight,
+                "waist_task_weight_far": self.dls_waist_task_weight_far,
+                "gravity_torque_gain": self.dls_gravity_torque_gain,
+                "com_xy_gain": self.dls_com_xy_gain,
+                "joint_limit_gain": self.dls_joint_limit_gain,
+            }
 
             pin_candidates, pin_seeds, pin_per_seed = (
                 collect_pinocchio_candidates_and_seeds(
@@ -1773,11 +1866,7 @@ class HAArmIKSolver:
                     tool_axis=tool_axis,
                     tool_cone_half_angle=tool_cone_half_angle,
                     include_waist=self.include_waist,
-                    dls_params={
-                        "max_iter": self.dls_max_iter,
-                        "damping": self.dls_damping,
-                        "max_step": self.dls_max_step,
-                    },
+                    dls_params=dls_params,
                 )
             )
             candidates.extend(pin_candidates)
@@ -1785,15 +1874,23 @@ class HAArmIKSolver:
 
             if self.use_direct_psi:
                 all_direct_seeds.extend(pin_seeds)
+
         return candidates, unique_seed_list(all_direct_seeds), per_seed
 
-    def _solve_direct_psi_stage(self, T_target_local, q_prev, q_ready, lower,
-                                upper, direct_seeds, orientation_mode,
-                                tool_axis, tool_cone_half_angle, verbose):
-        """
-        direct-psi stage: solve from the collected seeds, score each solution,
-        and return the candidates.
-        """
+    def _solve_direct_psi_stage(
+        self,
+        T_target_local,
+        q_prev,
+        q_ready,
+        lower,
+        upper,
+        direct_seeds,
+        orientation_mode,
+        tool_axis,
+        tool_cone_half_angle,
+        verbose,
+    ):
+        """direct-psi stage: solve from the collected seeds and score."""
         direct_sols = solve_direct_psi(
             self.chain,
             T_target_local,
@@ -1825,14 +1922,14 @@ class HAArmIKSolver:
         )
 
         candidates = []
-       for sol in direct_sols:
+        for sol in direct_sols:
             info = score_candidate(
                 self.chain,
                 sol["q"],
                 T_target_local,
                 self.psi_ready,
                 q_prev,
-                 q_ready,
+                q_ready,
                 lower,
                 upper,
                 orientation_mode=orientation_mode,
@@ -1851,14 +1948,23 @@ class HAArmIKSolver:
 
         return candidates
 
-    def _finalize_result(self, candidates, per_seed, T_target_local,
-                         T_target_world, frame, orientation_mode, tool_axis,
-                         tool_cone_half_angle, q_prev, update_prev,
-                         allow_approximate):
+    def _finalize_result(
+        self,
+        candidates,
+        per_seed,
+        T_target_local,
+        T_target_world,
+        frame,
+        orientation_mode,
+        tool_axis,
+        tool_cone_half_angle,
+        q_prev,
+        update_prev,
+        allow_approximate,
+    ):
         """Torque metrics -> select best -> approximate fallback -> result."""
         if self.use_torque_cost and len(candidates) > 0:
-
-           add_torque_metrics_to_candidates(
+            add_torque_metrics_to_candidates(
                 candidates=candidates,
                 pin_model=self.pin_model,
                 pin_data=self.pin_data,
@@ -1867,61 +1973,73 @@ class HAArmIKSolver:
                 joint_efforts_active=self.joint_efforts_active,
             )
 
-       best, status = select_best_candidate(
+        best, status = select_best_candidate(
             candidates,
             use_torque=self.use_torque_cost,
         )
-          best["solve_engine"] = "dls"
+
+        if best is not None:
+            best["solve_engine"] = "dls"
             best["target_frame"] = frame
             best["T_target_local"] = T_target_local
             best["T_target_world"] = T_target_world
             best["orientation_mode"] = orientation_mode
             best["tool_axis"] = tool_axis.copy()
             best["tool_cone_half_angle"] = float(tool_cone_half_angle)
-            best["tool_cone_half_angle_deg"] = float(np.rad2deg(tool_cone_half_angle))
+            best["tool_cone_half_angle_deg"] = float(
+                np.rad2deg(tool_cone_half_angle)
+            )
             best["approximate"] = False
             best["approximate_accepted"] = False
+
         if best is not None and is_valid_status(status):
             if update_prev:
                 self.q_prev = best["q"].copy()
-            return best["q"].copy(), status, make_result(
-
-                best, status, per_seed=per_seed or None
+            return (
+                best["q"].copy(),
+                status,
+                make_result(best, status, per_seed=per_seed or None),
             )
 
-        # Optional approximate solution: strict IK failed but a candidate
-        # pool exists — return the best by pose error (BioIK-like behavior).
         if (
             allow_approximate
             and best is not None
             and status == "NO_VALID_POSE"
             and "q" in best
-       ):
+        ):
             best["approximate"] = True
             best["approximate_accepted"] = True
             best["original_status"] = status
             best["status"] = "APPROXIMATE"
-       best["approximate_policy"] = (
+            best["approximate_policy"] = (
                 "allow_approximate=True: use best candidate by pose error "
                 "without additional tolerance threshold"
             )
 
             if update_prev:
                 self.q_prev = best["q"].copy()
-            return best["q"].copy(), "APPROXIMATE", make_result(
-                best, "APPROXIMATE", per_seed=per_seed or None
+            return (
+                best["q"].copy(),
+                "APPROXIMATE",
+                make_result(best, "APPROXIMATE", per_seed=per_seed or None),
             )
-        # Failure diagnosis (fields mirror PinkQPIKSolver.solve).
+
         failure_reason = None
         if best is None:
             failure_reason = FailureReason.SEEDS_EXHAUSTED
-           failure_detail = "no candidate survived any solve pass (seed chain empty or all engines raised)"
+            failure_detail = (
+                "no candidate survived any solve pass "
+                "(seed chain empty or all engines raised)"
+            )
         else:
             failure_reason = FailureReason.NOT_CONVERGED
             n_stalled = sum(1 for s in per_seed if s.get("stalled"))
             best_pe = min(
-                (s["final_pos_err"] for s in per_seed
-                 if np.isfinite(s.get("final_pos_err", np.nan))),
+                (
+                    s["final_pos_err"]
+                    for s in per_seed
+                    if np.isfinite(s.get("final_pos_err", np.nan))
+                ),
                 default=np.nan,
             )
             failure_detail = (
@@ -1931,14 +2049,19 @@ class HAArmIKSolver:
                 f"ori_err={best.get('ori_err', np.nan):.3e}; "
                 f"{n_stalled} seeds stalled; "
                 f"best seed pos_err="
-              f"{(f'{best_pe * 1000:.3f}mm' if np.isfinite(best_pe) else 'n/a')}"
+                f"{(f'{best_pe * 1000:.3f}mm' if np.isfinite(best_pe) else 'n/a')}"
             )
 
-        return None, status, make_result(
-            best or {}, status,
-            failure_reason=failure_reason,
-            failure_detail=failure_detail,
-            per_seed=per_seed or None,
+        return (
+            None,
+            status,
+            make_result(
+                best or {},
+                status,
+                failure_reason=failure_reason,
+                failure_detail=failure_detail,
+                per_seed=per_seed or None,
+            ),
         )
 
     def solve(
@@ -1948,16 +2071,17 @@ class HAArmIKSolver:
         q_prev=None,
         update_prev=True,
         verbose=False,
-
         allow_approximate=False,
         orientation_mode="full",
         tool_axis=None,
         tool_cone_half_angle=None,
     ):
-        T_target_local, T_target_world = self.target_to_local(T_target, frame=frame)
+        T_target_local, T_target_world = self.target_to_local(
+            T_target, frame=frame
+        )
         orientation_mode = validate_orientation_mode(orientation_mode)
         tool_cone_half_angle = normalize_cone_half_angle(tool_cone_half_angle)
-       if tool_axis is None:
+        if tool_axis is None:
             tool_axis = TOOL_AXIS_X
 
         tool_axis = normalize(tool_axis)
@@ -1973,7 +2097,8 @@ class HAArmIKSolver:
         rng = np.random.default_rng(RNG_SEED)
 
         candidates = []
-      # 1. local seeds (direct_psi only)
+
+        # 1. local seeds (direct_psi only)
         direct_seeds = []
         if self.use_direct_psi and self.use_local_seeds:
             direct_seeds.extend(
@@ -1987,1431 +2112,58 @@ class HAArmIKSolver:
             )
 
         # 2. SSIK + Pinocchio DLS portfolio
-        portfolio_candidates, portfolio_seeds, per_seed = self._collect_portfolio(
-            T_target_local, T_target_world, q_prev, q_ready, lower, upper,
-         rng, orientation_mode, tool_axis, tool_cone_half_angle,
+        portfolio_candidates, portfolio_seeds, per_seed = (
+            self._collect_portfolio(
+                T_target_local,
+                T_target_world,
+                q_prev,
+                q_ready,
+                lower,
+                upper,
+                rng,
+                orientation_mode,
+                tool_axis,
+                tool_cone_half_angle,
+            )
         )
         candidates.extend(portfolio_candidates)
         direct_seeds.extend(portfolio_seeds)
-      # 3. direct-psi stage
+
+        # 3. direct-psi stage
         if self.use_direct_psi:
             candidates.extend(
                 self._solve_direct_psi_stage(
-                  T_target_local, q_prev, q_ready, lower, upper,
-                    direct_seeds, orientation_mode, tool_axis,
-                    tool_cone_half_angle, verbose,
+                    T_target_local,
+                    q_prev,
+                    q_ready,
+                    lower,
+                    upper,
+                    direct_seeds,
+                    orientation_mode,
+                    tool_axis,
+                    tool_cone_half_angle,
+                    verbose,
                 )
             )
+
         # 4. torque cost + select + result
         return self._finalize_result(
-            candidates, per_seed, T_target_local, T_target_world,
-            frame, orientation_mode, tool_axis, tool_cone_half_angle,
-
-            q_prev, update_prev, allow_approximate,
+            candidates,
+            per_seed,
+            T_target_local,
+            T_target_world,
+            frame,
+            orientation_mode,
+            tool_axis,
+            tool_cone_half_angle,
+            q_prev,
+            update_prev,
+            allow_approximate,
         )
 
     def close(self):
-        """
-        Release resources.
-
-        Pinocchio has no persistent server connections, so this only
-        clears references.
-        """
+        """Release resources."""
         self.pin_model = None
         self.pin_data = None
         self.pin_maps = None
         self.pin_ee_frame_id = None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
