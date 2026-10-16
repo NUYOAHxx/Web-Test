@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""Common IK engine protocol and engine factory."""
+
+from typing import Any, Protocol, runtime_checkable
+@runtime_checkable
+class IKEngine(Protocol):
+    """Runtime interface shared by all IK solver engines."""
+
+    def solve(
+            self,
+        T_target,
+        frame: str = "local",
+        q_prev=None,
+        update_prev: bool = True,
+        allow_approximate: bool = False,
+                orientation_mode: str = "full",
+        tool_axis=None,
+        tool_cone_half_angle=None,
+    ) -> tuple[Any, str, Any]:
+        """Solve IK and return ``(q, status, IKResult)``."""
+        ...
+
+    def print_info(self) -> None:
+        """Print engine configuration."""
+       ...
+
+    def close(self) -> None:
+        """Release engine resources."""
+        ...
+SUPPORTED_ENGINES = ("dls", "qp")
+
+
+def create_ik_solver(engine: str = "dls", **kwargs) -> IKEngine:
+    """
+    Create an IK engine by name.
+
+    ``dls`` selects :class:`HAArmIKSolver` (the portfolio engine whose current
+    fallback/core is Pinocchio DLS). ``qp`` selects the differential-IK QP
+    engine backed by Pink. Constructor options are engine-specific and passed
+    through.
+    """
+    normalized_engine = str(engine).lower()
+    if normalized_engine in ("dls", "ha_arm", "portfolio"):
+        from ha_arm_ik.solver import HAArmIKSolver
+
+        return HAArmIKSolver(**kwargs)
+
+    if normalized_engine == "qp":
+        from ha_arm_ik.solver_pink import PinkQPIKSolver
+
+        return PinkQPIKSolver(**kwargs)
+    raise ValueError(
+        f"Unknown IK engine: {engine}. Expected one of {SUPPORTED_ENGINES}"
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
