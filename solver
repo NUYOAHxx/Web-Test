@@ -1,0 +1,3417 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+ha_arm_ik.solver
+
+Core HA arm IK solver.
+
+Features:
+  1. URDF SerialChain FK
+  2. direct-psi IK with analytical Jacobian
+  3. optional SSIK candidates
+  4. optional Pinocchio damped least-squares IK fallback
+  5. optional Pinocchio gravity torque cost
+  6. left / right arm configuration
+
+Target frames:
+  - local: target pose is expressed in the arm base frame.
+  - world: target pose is expressed in the robot/world frame.
+"""
+import xml.etree.ElementTree as ET
+from collections import defaultdict, deque
+from enum import Enum
+import math
+from pathlib import Path
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+
+try:
+    import ssik
+except Exception:
+    ssik = None
+
+
+
+try:
+    import pinocchio as pin
+except Exception:
+    pin = None
+
+from ha_arm_ik.ik_common import (
+    ORIENTATION_MODES,
+    TOOL_AXIS_X,
+    TOOL_CONE_HALF_ANGLE,
+    clip_to_bounds,
+    closest_direction_on_cone,
+    invert_T,
+    make_T,
+    make_T_from_xyz_rpy,
+    make_translation_T,
+    normalize,
+    normalize_cone_half_angle,
+    ORI_TOL,
+    POS_TOL,
+    pose_error,
+    pose_errors,
+    project_to_plane,
+    rpy_to_R,
+    SAFE_MARGIN,
+    rotx,
+    roty,
+    rotz,
+    skew,
+    target_frames,
+    transform_point,
+    tool_cone_angle_error,
+    tool_cone_residual,
+    tool_direction_angle_error,
+    tool_direction_from_T,
+    tool_direction_residual,
+    unique_seed_list,
+    validate_orientation_mode,
+    validate_q_vector,
+    validate_transform4x4,
+    wrap_to_pi,
+    rot_axis,
+    T_origin,
+    T_prismatic,
+    T_revolute,
+)
+from ha_arm_ik.ik_candidate import (
+    PHI_TIE_TOL,
+    W_LIMIT,
+    W_NOM,
+    W_SMOOTH,
+    W_TORQUE,
+    W_WAIST_RETURN,
+    FailureReason,
+    IKResult,
+    Status,
+    candidate_sort_key,
+    candidate_status,
+    failure_reason_for_status,
+    finalize_ik_result,
+    has_valid_torque,
+    is_valid_status,
+    make_result,
+    phi_sort_value,
+    score_candidate,
+    select_best_candidate,
+    status_from_str,
+    update_candidate_final_cost_with_torque,
+)
+
+from ha_arm_ik.ik_common import joint_limit_barrier_jac
+from ha_arm_ik.ik_common import (
+    joint_center_from_bounds,
+    joint_dist,
+    joint_limit_barrier,
+    joint_limit_penalty,
+    joint_margin,
+    joint_margin_from_bounds,
+    joint_range_scale,
+)
+from ha_arm_ik.robot_model import (
+    ARM_CONFIGS,
+    E_JOINT,
+    REF_DIR,
+    S_JOINT,
+    SerialChain,
+    W_JOINT,
+    WAIST_JOINT_NAMES,
+    estimate_chain_max_reach_from_joint,
+    get_fixed_joint_origin,
+    get_urdf_root_link,
+    joint_origin_position_at_zero,
+    parse_vec,
+)
+from ha_arm_ik.solver_dls import (
+    N_NOISE_PER_BASE,
+    NOISE_SCALES,
+    NULLSPACE_ERR_SCALE,
+    NULLSPACE_GAIN,
+    PIN_IK_DAMPING,
+    PIN_IK_MAX_ITER,
+
+    PIN_IK_MAX_STEP,
+    PIN_IK_MAX_VALID_CANDIDATES,
+    PIN_IK_ORI_TOL,
+    PIN_IK_POS_TOL,
+    PIN_IK_STALL_DELTA_M,
+    PIN_IK_STALL_ITERS,
+    WAIST_NULL_GAIN,
+    WAIST_RETURN_TOL,
+    WAIST_TASK_WEIGHT,
+    active_q_to_pinocchio_q,
+    build_pinocchio_joint_maps,
+    make_scatter_seeds,
+    pinocchio_ik_one_seed,
+    pinocchio_q_to_active_q,
+)
+# =============================================================================
+# CONFIG
+# =============================================================================
+
+G_WORLD = np.array([0.0, 0.0, -9.81], dtype=float)
+
+# ---------------- Workspace max-radius check ----------------
+# Workspace check uses shoulder joint position, usually J1/J2 shared origin.
+# We use s_joint, i.e. Left_J2 / Right_J2, as the anchor.
+#
+# Max J2 -> J7 radius is estimated once from URDF:
+#   sum of joint-origin translation lengths after J2.
+#
+
+# For TCP target check:
+#   max J2 -> TCP radius = max J2 -> J7 radius + ||tcp_offset_xyz||
+#
+# This is only a max-distance pre-check.
+# It does not guarantee IK success.
+
+# ---------------- direct-psi solve config ----------------
+PORTFOLIO_DIRECT_MAX_NFEV = 150
+PORTFOLIO_DIRECT_POS_TOL = 5e-4
+PORTFOLIO_DIRECT_ORI_TOL = 5e-4
+PORTFOLIO_DIRECT_PSI_TOL = 1.5
+
+PORTFOLIO_Q_REF_MODE = "ready"  # "ready" or "prev"
+DIRECT_LOCAL_NOISE_SCALES = (0.002, 0.005, 0.01, 0.02, 0.04)
+
+# ---------------- Optional modules ----------------
+
+USE_DIRECT_PSI = False
+USE_LOCAL_SEEDS = False
+USE_SSIK = False
+
+USE_PINOCCHIO_IK = True
+USE_TORQUE_COST = True
+
+# SSIK config
+SSIK_RESPECT_LIMITS = True
+SSIK_ALLOW_REFINEMENT = True
+SSIK_REFINEMENT_MAX_ITERS = 30
+SSIK_MAX_SOLUTIONS = True
+SSIK_USE_READY_AS_SEED = True
+SSIK_TOP_K_FOR_DIRECT = 10
+
+PIN_TOP_K_FOR_DIRECT = 15
+RNG_SEED = 120
+
+def unique_add(solutions, q, tol=1e-4):
+    q = np.asarray(q, dtype=float)
+
+    for old in solutions:
+        if np.linalg.norm(q - old) < tol:
+            return False
+
+    solutions.append(q.copy())
+    return True
+# =============================================================================
+# Analytical Jacobian direct-psi IK
+# =============================================================================
+def geometric_jacobian(chain, q, fk_result=None):
+    if fk_result is None:
+        fk_result = chain.fk_all(q)
+
+    link_T, joint_origin_T = fk_result
+
+    T_ee = link_T[chain.ee_link]
+    p_ee = T_ee[:3, 3]
+
+   n = len(chain.active_joints)
+    J = np.zeros((6, n))
+   for i, aj in enumerate(chain.active_joints):
+        T_j = joint_origin_T[aj["name"]]
+        z_i = T_j[:3, :3] @ np.asarray(aj["axis"], dtype=float)
+        p_i = T_j[:3, 3]
+        if aj["type"] in ("revolute", "continuous"):
+            J[:3, i] = np.cross(z_i, p_ee - p_i)
+            J[3:, i] = z_i
+
+        elif aj["type"] == "prismatic":
+            J[:3, i] = z_i
+    return J
+
+
+def joint_position_jacobian(chain, joint_name, joint_origin_T):
+    n = len(chain.active_joints)
+    J = np.zeros((3, n))
+
+    p_target = joint_origin_T[joint_name][:3, 3]
+
+    before = set()
+    for j in chain.joints:
+        if j["name"] == joint_name:
+            break
+        if j["type"] in ("revolute", "continuous", "prismatic"):
+            before.add(j["name"])
+
+    for i, aj in enumerate(chain.active_joints):
+        if aj["name"] not in before:
+            continue
+        T_j = joint_origin_T[aj["name"]]
+        z_i = T_j[:3, :3] @ np.asarray(aj["axis"], dtype=float)
+        p_i = T_j[:3, 3]
+
+        if aj["type"] in ("revolute", "continuous"):
+            J[:, i] = np.cross(z_i, p_target - p_i)
+
+        elif aj["type"] == "prismatic":
+            J[:, i] = z_i
+
+    return J
+
+def dpsi_dq(
+    chain,
+    q,
+    fk_result=None,
+    S_joint=S_JOINT,
+    E_joint=E_JOINT,
+    W_joint=W_JOINT,
+    ref_dir=REF_DIR,
+    eps=1e-7,
+):
+
+    if fk_result is None:
+        fk_result = chain.fk_all(q)
+
+    _, joint_origin_T = fk_result
+    n = len(chain.active_joints)
+    S = joint_origin_T[S_joint][:3, 3].copy()
+    E = joint_origin_T[E_joint][:3, 3].copy()
+    W = joint_origin_T[W_joint][:3, 3].copy()
+    J_S = joint_position_jacobian(chain, S_joint, joint_origin_T)
+    J_E = joint_position_jacobian(chain, E_joint, joint_origin_T)
+    J_W = joint_position_jacobian(chain, W_joint, joint_origin_T)
+
+    try:
+        psi0 = sew_angle_from_points(S, E, W, ref_dir)
+    except Exception:
+        return np.zeros((1, n))
+
+    dpsi_dS = np.zeros(3)
+    dpsi_dE = np.zeros(3)
+    dpsi_dW = np.zeros(3)
+   for k in range(3):
+        try:
+            Sp = S.copy()
+            Sp[k] += eps
+            dpsi_dS[k] = wrap_to_pi(sew_angle_from_points(Sp, E, W, ref_dir) - psi0) / eps
+        except Exception:
+            pass
+       try:
+            Ep = E.copy()
+            Ep[k] += eps
+            dpsi_dE[k] = wrap_to_pi(sew_angle_from_points(S, Ep, W, ref_dir) - psi0) / eps
+        except Exception:
+            pass
+        try:
+            Wp = W.copy()
+            Wp[k] += eps
+            dpsi_dW[k] = wrap_to_pi(sew_angle_from_points(S, E, Wp, ref_dir) - psi0) / eps
+        except Exception:
+            pass
+    return (dpsi_dS @ J_S + dpsi_dE @ J_E + dpsi_dW @ J_W).reshape(1, n)
+
+
+def evaluate_direct_psi_solution(
+    chain,
+    T_target,
+   psi_des,
+    q,
+    q_ref=None,
+    S_joint=S_JOINT,
+    E_joint=E_JOINT,
+    W_joint=W_JOINT,
+    ref_dir=REF_DIR,
+    orientation_mode="full",
+ tool_axis=None,
+    tool_cone_half_angle=None,
+):
+    lower, upper = chain.bounds()
+
+    q = np.asarray(q, dtype=float)
+    orientation_mode = validate_orientation_mode(orientation_mode)
+    tool_cone_half_angle = normalize_cone_half_angle(tool_cone_half_angle)
+
+    if tool_axis is None:
+        tool_axis = TOOL_AXIS_X
+
+    tool_axis = normalize(tool_axis)
+    Tq = chain.fk(q)
+
+    dp = Tq[:3, 3] - T_target[:3, 3]
+    pos_err = float(np.linalg.norm(dp))
+
+    tool_dir_angle_err = np.nan
+    tool_cone_violation = np.nan
+    if orientation_mode == "full":
+        _, drot = pose_error(Tq, T_target)
+        ori_err = float(np.linalg.norm(drot))
+
+    elif orientation_mode == "tool_dir":
+        tool_dir_angle_err = tool_direction_angle_error(
+            T_current=Tq,
+            T_target=T_target,
+            tool_axis=tool_axis,
+        )
+        ori_err = tool_dir_angle_err
+   elif orientation_mode == "tool_cone":
+        tool_cone_violation, tool_dir_angle_err = tool_cone_angle_error(
+            T_current=Tq,
+            T_target=T_target,
+            tool_axis=tool_axis,
+           cone_half_angle=tool_cone_half_angle,
+        )
+        ori_err = tool_cone_violation
+
+    psi_q = chain.psi(
+        q,
+        S_joint=S_joint,
+        E_joint=E_joint,
+        W_joint=W_joint,
+        ref_dir=ref_dir,
+    )
+    psi_err = float(abs(wrap_to_pi(psi_q - psi_des)))
+
+    margin, margin_idx = joint_margin_from_bounds(q, lower, upper)
+
+    if q_ref is None:
+        q_ref_dq = np.nan
+    else:
+        q_ref_dq = joint_dist(q, q_ref)
+
+    return {
+        "q": q,
+        "pos_err": pos_err,
+        "ori_err": ori_err,
+        "orientation_mode": orientation_mode,
+        "tool_axis": tool_axis.copy(),
+        "psi": float(psi_q),
+        "psi_err": psi_err,
+        "margin": margin,
+       "margin_idx": margin_idx,
+        "q_ref_dq": q_ref_dq,
+        "tool_dir_angle_err": float(tool_dir_angle_err),
+        "tool_dir_angle_err_deg": float(np.rad2deg(tool_dir_angle_err)) if np.isfinite(tool_dir_angle_err) else np.nan,
+        "tool_cone_half_angle": float(tool_cone_half_angle),
+        "tool_cone_half_angle_deg": float(np.rad2deg(tool_cone_half_angle)),
+        "tool_cone_violation": float(tool_cone_violation),
+        "tool_cone_violation_deg": float(np.rad2deg(tool_cone_violation)) if np.isfinite(tool_cone_violation) else np.nan,
+    }
+
+class DirectPsiProblem:
+    def __init__(
+        self,
+        chain,
+        T_target,
+        psi_des,
+        q_ref,
+        q_bias,
+        q_center,
+        q_scale,
+        lower,
+        upper,
+        w_pos,
+        w_ori,
+        w_psi,
+        w_seed,
+        w_bias,
+        w_center,
+        w_limit,
+        limit_margin,
+        S_joint,
+        E_joint,
+        W_joint,
+        ref_dir,
+        orientation_mode="full",
+        tool_axis=None,
+        tool_cone_half_angle=None,
+    ):
+        self.chain = chain
+        self.T_target = np.asarray(T_target, dtype=float)
+        self.R_target = self.T_target[:3, :3]
+        self.psi_des = float(psi_des)
+
+        self.q_ref = q_ref
+        self.q_bias = q_bias
+        self.q_center = q_center
+        self.q_scale = q_scale
+        self.lower = lower
+        self.upper = upper
+
+        self.w_pos = w_pos
+        self.w_ori = w_ori
+        self.w_psi = w_psi
+        self.w_seed = w_seed
+        self.w_bias = w_bias
+        self.w_center = w_center
+        self.w_limit = w_limit
+        self.limit_margin = limit_margin
+
+        self.S_joint = S_joint
+        self.E_joint = E_joint
+        self.W_joint = W_joint
+        self.ref_dir = ref_dir
+        self.orientation_mode = validate_orientation_mode(orientation_mode)
+        self.tool_cone_half_angle = normalize_cone_half_angle(
+            tool_cone_half_angle
+        )
+
+        if tool_axis is None:
+            tool_axis = TOOL_AXIS_X
+
+        self.tool_axis = normalize(tool_axis)
+        self.n = len(chain.active_joints)
+
+        self._cache_q = None
+        self._cache_fk = None
+
+    def _fk(self, q):
+        q = np.asarray(q, dtype=float)
+
+        if self._cache_q is not None and np.array_equal(q, self._cache_q):
+            return self._cache_fk
+
+        self._cache_q = q.copy()
+        self._cache_fk = self.chain.fk_all(q)
+        return self._cache_fk
+
+    def residual_task(self, q):
+        try:
+            fk_result = self._fk(q)
+            link_T, joint_origin_T = fk_result
+
+            T_ee = link_T[self.chain.ee_link]
+            dp = T_ee[:3, 3] - self.T_target[:3, 3]
+
+            if self.orientation_mode == "full":
+                _, e_ori = pose_error(T_ee, self.T_target)
+            elif self.orientation_mode == "tool_dir":
+                e_ori, _, _ = tool_direction_residual(
+                    T_current=T_ee,
+                    T_target=self.T_target,
+                    tool_axis=self.tool_axis,
+                )
+
+            elif self.orientation_mode == "tool_cone":
+                e_ori, _, _, _, _, _, _ = tool_cone_residual(
+                    T_current=T_ee,
+                    T_target=self.T_target,
+                    tool_axis=self.tool_axis,
+                    cone_half_angle=self.tool_cone_half_angle,
+                )
+
+            S = joint_origin_T[self.S_joint][:3, 3]
+            E = joint_origin_T[self.E_joint][:3, 3]
+            W = joint_origin_T[self.W_joint][:3, 3]
+
+            psi_q = sew_angle_from_points(S, E, W, self.ref_dir)
+            e_psi = wrap_to_pi(psi_q - self.psi_des)
+
+            return np.concatenate([
+                self.w_pos * dp,
+                self.w_ori * e_ori,
+                [self.w_psi * e_psi],
+            ])
+
+        except Exception:
+            return np.ones(7) * 1e3
+
+    def jacobian_task(self, q):
+        try:
+            fk_result = self._fk(q)
+            J_geom = geometric_jacobian(self.chain, q, fk_result)
+            Jv = J_geom[:3, :]
+            Jw = J_geom[3:, :]
+
+            if self.orientation_mode == "full":
+                # Original full-pose orientation Jacobian.
+                J_ori = self.R_target.T @ Jw
+
+            elif self.orientation_mode == "tool_dir":
+                link_T, _ = fk_result
+                T_ee = link_T[self.chain.ee_link]
+                d_current = tool_direction_from_T(
+                    T_ee,
+                    tool_axis=self.tool_axis,
+                )
+                # e_dir = d_current - d_target
+                # d_dot = omega x d = -skew(d) @ omega
+                J_ori = -skew(d_current) @ Jw
+            elif self.orientation_mode == "tool_cone":
+                link_T, _ = fk_result
+                T_ee = link_T[self.chain.ee_link]
+
+                d_current = tool_direction_from_T(
+                    T_ee,
+                    tool_axis=self.tool_axis,
+                )
+
+                d_target = tool_direction_from_T(
+                    self.T_target,
+                    tool_axis=self.tool_axis,
+                )
+
+                _, _, violation, inside = closest_direction_on_cone(
+                    d_current=d_current,
+                    d_target=d_target,
+                   cone_half_angle=self.tool_cone_half_angle,
+                )
+
+                if inside or violation <= 0.0:
+                    # Already inside cone: no orientation constraint.
+                    J_ori = np.zeros_like(Jw)
+                else:
+                    # Approximate Jacobian:
+                    # residual = d_current - d_boundary
+                    # ignore boundary derivative for robustness/simplicity.
+                    J_ori = -skew(d_current) @ Jw
+
+            J_psi = dpsi_dq(
+                self.chain,
+                q,
+                fk_result,
+                self.S_joint,
+                self.E_joint,
+                self.W_joint,
+                self.ref_dir,
+            )
+
+            return np.vstack([
+                self.w_pos * Jv,
+                self.w_ori * J_ori,
+                self.w_psi * J_psi,
+            ])
+
+        except Exception:
+            return np.eye(7, self.n) * 1e-6
+
+  def residual_reg(self, q):
+        try:
+            base = self.residual_task(q)
+            n = self.n
+
+            e_seed = (q - self.q_ref) / self.q_scale if self.q_ref is not None else np.zeros(n)
+            e_bias = (q - self.q_bias) / self.q_scale if self.q_bias is not None else np.zeros(n)
+            e_center = (q - self.q_center) / self.q_scale
+            return np.concatenate([
+                base,
+                self.w_seed * e_seed,
+                self.w_bias * e_bias,
+                self.w_center * e_center,
+            ])
+
+        except Exception:
+            return np.ones(7 + 3 * self.n) * 1e3
+
+    def jacobian_reg(self, q):
+        try:
+            J_task = self.jacobian_task(q)
+            n = self.n
+
+            inv_scale = np.diag(1.0 / self.q_scale)
+            J_seed = self.w_seed * inv_scale if self.q_ref is not None else np.zeros((n, n))
+            J_bias = self.w_bias * inv_scale if self.q_bias is not None else np.zeros((n, n))
+            J_center = self.w_center * inv_scale
+           return np.vstack([
+                J_task,
+                J_seed,
+                J_bias,
+                J_center,
+            ])
+
+        except Exception:
+            m = 7 + 3 * self.n
+            return np.eye(m, self.n) * 1e-6
+
+
+def solve_direct_psi(
+    chain,
+    T_target,
+    psi_des,
+    seeds,
+    S_joint=S_JOINT,
+    E_joint=E_JOINT,
+    W_joint=W_JOINT,
+    ref_dir=REF_DIR,
+    q_ref=None,
+    q_bias=None,
+    orientation_mode="full",
+    tool_axis=None,
+    tool_cone_half_angle=None,
+    verbose=False,
+    w_pos=100.0,
+    w_ori=20.0,
+    w_psi=20.0,
+    w_seed=0.03,
+    w_bias=0.00,
+    w_center=0.005,
+    w_limit=0.05,
+    limit_margin=0.10,
+    max_nfev=150,
+    refine_task=True,
+    pos_tol=1e-5,
+    ori_tol=1e-5,
+    psi_tol=1.5,
+    max_solutions=None,
+):
+    lower, upper = chain.bounds()
+    orientation_mode = validate_orientation_mode(orientation_mode)
+    tool_cone_half_angle = normalize_cone_half_angle(tool_cone_half_angle)
+    if tool_axis is None:
+        tool_axis = TOOL_AXIS_X
+
+    tool_axis = normalize(tool_axis)
+    T_target = np.asarray(T_target, dtype=float)
+    psi_des = float(wrap_to_pi(psi_des))
+
+    q_scale = joint_range_scale(lower, upper)
+    q_center_arr = joint_center_from_bounds(lower, upper)
+
+    q_ref_arr = clip_to_bounds(q_ref, lower, upper) if q_ref is not None else None
+    q_bias_arr = clip_to_bounds(q_bias, lower, upper) if q_bias is not None else None
+   prob = DirectPsiProblem(
+        chain=chain,
+        T_target=T_target,
+        psi_des=psi_des,
+        q_ref=q_ref_arr,
+        q_bias=q_bias_arr,
+        q_center=q_center_arr,
+        q_scale=q_scale,
+       lower=lower,
+        upper=upper,
+        w_pos=w_pos,
+        w_ori=w_ori,
+        w_psi=w_psi,
+        w_seed=w_seed,
+        w_bias=w_bias,
+        w_center=w_center,
+        w_limit=w_limit,
+        limit_margin=limit_margin,
+        S_joint=S_joint,
+        E_joint=E_joint,
+        W_joint=W_joint,
+        ref_dir=ref_dir,
+        orientation_mode=orientation_mode,
+        tool_axis=tool_axis,
+        tool_cone_half_angle=tool_cone_half_angle,
+    )
+
+    results = []
+    unique_solutions = []
+    clean_seeds = []
+    for seed in seeds:
+        seed = np.asarray(seed, dtype=float)
+        if seed.shape != lower.shape:
+            continue
+
+       seed = clip_to_bounds(seed, lower, upper)
+        dup = any(np.linalg.norm(seed - old) < 1e-8 for old in clean_seeds)
+
+        if not dup:
+            clean_seeds.append(seed)
+    for si, seed in enumerate(clean_seeds):
+        prob._cache_q = None
+
+        res1 = least_squares(
+            prob.residual_reg,
+            seed,
+            jac=prob.jacobian_reg,
+            bounds=(lower, upper),
+            method="trf",
+            xtol=1e-12,
+            ftol=1e-12,
+            gtol=1e-12,
+            max_nfev=max_nfev,
+            x_scale="jac",
+        )
+        q = res1.x
+        res_used = res1
+
+        if refine_task:
+            prob._cache_q = None
+
+             res2 = least_squares(
+                prob.residual_task,
+                q,
+                jac=prob.jacobian_task,
+                bounds=(lower, upper),
+                method="trf",
+                xtol=1e-12,
+                ftol=1e-12,
+                gtol=1e-12,
+                max_nfev=max(200, max_nfev // 2),
+                x_scale="jac",
+            )
+
+            q = res2.x
+            res_used = res2
+        try:
+            info = evaluate_direct_psi_solution(
+                chain,
+                T_target,
+                psi_des,
+                q,
+                q_ref=q_ref_arr,
+                S_joint=S_joint,
+              E_joint=E_joint,
+                W_joint=W_joint,
+                ref_dir=ref_dir,
+                orientation_mode=orientation_mode,
+                tool_axis=tool_axis,
+               tool_cone_half_angle=tool_cone_half_angle,
+            )
+        except Exception as e:
+            if verbose:
+                print(f"seed {si}: eval failed: {repr(e)}")
+            continue
+
+        pos_err = info["pos_err"]
+        ori_err = info["ori_err"]
+        psi_err = info["psi_err"]
+
+        ok = (
+            pos_err < pos_tol
+            and ori_err < ori_tol
+            and psi_err < psi_tol
+        )
+
+        if verbose:
+            print(
+                f"seed {si}: ok={ok} "
+                f"pos={pos_err:.3e} ori={ori_err:.3e} psi={psi_err:.3e} "
+                f"margin={info['margin']:.3e} nfev={res_used.nfev}"
+            )
+        if ok and unique_add(unique_solutions, q):
+            item = dict(info)
+            item.update({
+                "cost": float(res_used.cost),
+                "success": bool(res_used.success),
+                "message": res_used.message,
+
+                "nfev": int(res_used.nfev),
+            })
+            results.append(item)
+
+            # Early exit: enough distinct solutions collected, stop
+            # grinding through the remaining seeds.
+
+           if max_solutions is not None and len(results) >= max_solutions:
+                break
+
+    PSI_BUCKET = np.deg2rad(2.0)
+
+    def sort_key(s):
+
+        dq = s.get("q_ref_dq", np.nan)
+        if not np.isfinite(dq):
+            dq = 0.0
+
+        psi_bucket = int(s["psi_err"] / PSI_BUCKET)
+       return (
+            psi_bucket,
+            dq,
+            -s.get("margin", -1e9),
+            s["psi_err"],
+            s["pos_err"],
+            s["ori_err"],
+            s.get("cost", 0.0),
+        )
+
+    if q_ref_arr is not None:
+        results.sort(key=sort_key)
+    else:
+        results.sort(
+            key=lambda x: (
+                x["psi_err"],
+                x["pos_err"],
+                x["ori_err"],
+                -x.get("margin", -1e9),
+                x.get("cost", 0.0),
+            )
+        )
+
+    return results
+# =============================================================================
+# Candidate scoring / selection
+# =============================================================================
+# =============================================================================
+# Seeds / SSIK
+# =============================================================================
+def make_direct_local_seeds(q_prev, q_ready, lower, upper, rng):
+    seeds = []
+
+    q_prev = clip_to_bounds(q_prev, lower, upper)
+    q_ready = clip_to_bounds(q_ready, lower, upper)
+    seeds.append(q_prev.copy())
+
+    for scale in DIRECT_LOCAL_NOISE_SCALES:
+        q_noise = q_prev + rng.normal(scale=scale, size=len(q_prev))
+        seeds.append(clip_to_bounds(q_noise, lower, upper))
+    seeds.append(q_ready.copy())
+
+    for scale in DIRECT_LOCAL_NOISE_SCALES:
+        q_noise = q_ready + rng.normal(scale=scale, size=len(q_ready))
+        seeds.append(clip_to_bounds(q_noise, lower, upper))
+
+    q_mid = 0.5 * (lower + upper)
+    seeds.append(clip_to_bounds(q_mid, lower, upper))
+    return unique_seed_list(seeds)
+
+
+def extract_q(sol):
+    if hasattr(sol, "q"):
+        return np.asarray(sol.q, dtype=float)
+    if isinstance(sol, dict) and "q" in sol:
+        return np.asarray(sol["q"], dtype=float)
+
+    return np.asarray(sol, dtype=float)
+
+
+def call_ssik_solve(arm, T_target, q_seed=None):
+    kwargs = dict(
+        respect_limits=SSIK_RESPECT_LIMITS,
+        allow_refinement=SSIK_ALLOW_REFINEMENT,
+        refinement_max_iters=SSIK_REFINEMENT_MAX_ITERS,
+    )
+
+    if SSIK_MAX_SOLUTIONS is not None:
+        kwargs["max_solutions"] = SSIK_MAX_SOLUTIONS
+
+    if q_seed is not None:
+        kwargs["q_seed"] = np.asarray(q_seed, dtype=float)
+
+    try:
+        return arm.solve(T_target, **kwargs)
+
+    except TypeError:
+        kwargs.pop("max_solutions", None)
+
+        try:
+           return arm.solve(T_target, **kwargs)
+
+        except TypeError:
+            kwargs.pop("q_seed", None)
+
+            try:
+                return arm.solve(T_target, **kwargs)
+
+            except TypeError:
+                return arm.solve(T_target)
+def collect_ssik_candidates_and_seeds(
+    arm,
+    chain,
+    T_target,
+    psi_ready,
+    q_prev,
+    q_ready,
+    lower,
+    upper,
+    orientation_mode="full",
+    tool_axis=None,
+    tool_cone_half_angle=None,
+    include_waist=False,
+):
+    if arm is None:
+        return [], []
+    try:
+        q_seed = q_ready if SSIK_USE_READY_AS_SEED else None
+        sols = call_ssik_solve(arm, T_target, q_seed=q_seed)
+
+        if sols is None:
+            sols = []
+    except Exception:
+        return [], []
+
+    ssik_candidates = []
+
+    for sol in sols:
+        try:
+            q = extract_q(sol)
+        except Exception:
+            continue
+
+        if q.ndim != 1 or len(q) != len(lower):
+            continue
+        q = clip_to_bounds(q, lower, upper)
+
+        info = score_candidate(
+            chain,
+            q,
+            T_target,
+            psi_ready,
+            q_prev,
+           q_ready,
+            lower,
+            upper,
+            orientation_mode=orientation_mode,
+            tool_axis=tool_axis,
+            tool_cone_half_angle=tool_cone_half_angle,
+            apply_waist_return=include_waist,
+        )
+
+        info["source"] = "ssik"
+        info["solve_method"] = "ssik_pose"
+        info["fallback_used"] = True
+
+        ssik_candidates.append(info)
+    ssik_candidates.sort(key=candidate_sort_key)
+
+    ssik_seeds_for_direct = [c["q"] for c in ssik_candidates[:SSIK_TOP_K_FOR_DIRECT]]
+
+    return ssik_candidates, ssik_seeds_for_direct
+# =============================================================================
+# Pinocchio helpers
+# =============================================================================
+
+def require_pinocchio():
+    if pin is None:
+        raise RuntimeError(
+            "pinocchio is not installed but USE_PINOCCHIO_IK or "
+            "USE_TORQUE_COST is enabled.  Install with:  pip install pin"
+        )
+
+def load_pinocchio_model(urdf_path):
+    """
+    Load URDF into Pinocchio model + data.
+
+    Returns
+    -------
+    model : pin.Model
+    data  : pin.Data
+    """
+    model = pin.buildModelFromUrdf(str(urdf_path))
+    data = model.createData()
+    return model, data
+
+
+def get_pinocchio_frame_id(model, frame_name):
+    """
+    Get Pinocchio frame id by name.  Raises KeyError if not found.
+    """
+    if not model.existFrame(frame_name):
+        available = [model.frames[i].name for i in range(model.nframes)]
+        raise KeyError(
+            f"Frame '{frame_name}' not found in Pinocchio model. "
+            f"Available frames ({len(available)}): {available[:30]} ..."
+        )
+
+    return model.getFrameId(frame_name)
+# =============================================================================
+# Pinocchio DLS candidate orchestration
+# =============================================================================
+def collect_pinocchio_candidates_and_seeds(
+    pin_model,
+    pin_data,
+    pin_maps,
+    ee_frame_id,
+    chain,
+    T_target_pin,
+    T_target_local,
+    psi_ready,
+    q_prev,
+    q_ready,
+    lower,
+    upper,
+    rng,
+    orientation_mode="full",
+    tool_axis=None,
+    tool_cone_half_angle=None,
+    include_waist=False,
+    dls_params=None,
+):
+    """
+   Run Pinocchio damped-LS IK from many seeds.
+
+    Parameters
+    ----------
+    T_target_pin : np.ndarray
+        4x4 target pose in Pinocchio model root frame (for IK).
+    T_target_local : np.ndarray
+        4x4 target pose in arm base/local frame (for scoring via SerialChain).
+    include_waist : bool
+        9-DOF waist+arm mode: first try with the waist fixed at q_ready, then
+        fall back to waist+arm seeds and prefer a low-waist valid solution.
+    dls_params : dict, optional
+        {"max_iter", "damping", "max_step"} overrides for the per-seed DLS.
+
+    Returns
+    -------
+   (candidates, seeds_for_direct, per_seed)
+        per_seed entries mirror pink_ik_one_seed's seed_diag plus
+        {"seed_idx", "pose_ok", "margin"}.
+    """
+    scatter_seeds = make_scatter_seeds(
+        q_prev=q_prev,
+        q_ready=q_ready,
+        lower=lower,
+        upper=upper,
+        rng=rng,
+    )
+    fixed_joint_masks = [None] * len(scatter_seeds)
+    if include_waist:
+        fixed_waist_mask = np.array(
+          [name in WAIST_JOINT_NAMES for name in pin_maps["active_names"]],
+            dtype=bool,
+        )
+       scatter_seeds.insert(0, q_ready.copy())
+        fixed_joint_masks.insert(0, fixed_waist_mask)
+
+    pin_candidates = []
+   per_seed = []
+    unique_qs = []
+    arm_first_failed = False
+    valid_safe_count = 0
+  if include_waist:
+        joint_weights = np.array(
+            [
+                WAIST_TASK_WEIGHT if n in WAIST_JOINT_NAMES else 1.0
+                for n in pin_maps["active_names"]
+            ],
+            dtype=float,
+        )
+        null_ref = q_ready
+    else:
+        joint_weights = None
+        null_ref = None
+    for seed_idx, seed in enumerate(scatter_seeds):
+        try:
+            q, seed_diag = pinocchio_ik_one_seed(
+                pin_model=pin_model,
+                pin_data=pin_data,
+             pin_maps=pin_maps,
+                ee_frame_id=ee_frame_id,
+                T_target=T_target_pin,
+                seed=seed,
+                lower=lower,
+                upper=upper,
+                orientation_mode=orientation_mode,
+                tool_axis=tool_axis,
+                tool_cone_half_angle=tool_cone_half_angle,
+                joint_weights=joint_weights,
+                q_ref=null_ref,
+                include_waist=include_waist,
+                fixed_joint_mask=fixed_joint_masks[seed_idx],
+                waist_release=include_waist,
+                **(dls_params or {}),
+            )
+        except Exception as exc:
+            if include_waist and seed_idx == 0:
+                arm_first_failed = True
+            per_seed.append(
+                {
+                    "seed_idx": seed_idx,
+                    "converged": False,
+                    "iters": 0,
+                    "exception": repr(exc),
+                }
+            )
+            continue
+        duplicate = False
+        for old in unique_qs:
+            if np.linalg.norm(q - old) < 1e-5:
+                duplicate = True
+                break
+
+        if duplicate:
+            continue
+      unique_qs.append(q.copy())
+
+        # Score using SerialChain FK (always in local/base frame)
+        info = score_candidate(
+            chain,
+            q,
+            T_target_local,
+            psi_ready,
+            q_prev,
+            q_ready,
+            lower,
+            upper,
+            orientation_mode=orientation_mode,
+            tool_axis=tool_axis,
+           tool_cone_half_angle=tool_cone_half_angle,
+            apply_waist_return=include_waist,
+        )
+
+        if include_waist and seed_idx == 0 and not info["pose_ok"]:
+            arm_first_failed = True
+        info["source"] = "pinocchio_ik"
+        info["solve_method"] = "pinocchio_damped_ls_ik"
+        info["fallback_used"] = True
+        info["seed_used"] = seed_idx
+        info["converged"] = bool(seed_diag["converged"])
+
+        pin_candidates.append(info)
+        per_seed.append(
+            {
+                "seed_idx": seed_idx,
+                **seed_diag,
+                "pose_ok": bool(info["pose_ok"]),
+                "margin": float(info["margin"]),
+            }
+        )
+
+####################有解早停
+        if info["pose_ok"] and info["margin"] >= SAFE_MARGIN:
+            valid_safe_count += 1
+            need_fast_fallback = arm_first_failed and seed_idx > 0
+            waist_is_neutral = (
+               not include_waist
+                or info["waist_dev"] <= WAIST_RETURN_TOL
+            )
+
+            if waist_is_neutral or need_fast_fallback:
+                return pin_candidates, [info["q"]], per_seed
+
+            if valid_safe_count >= PIN_IK_MAX_VALID_CANDIDATES:
+                sorted_valid = sorted(
+                    pin_candidates,
+                    key=candidate_sort_key,
+                )
+                return (
+                    pin_candidates,
+                    [candidate["q"] for candidate in sorted_valid[:PIN_TOP_K_FOR_DIRECT]],
+                    per_seed,
+                )
+################
+    sorted_pin = sorted(pin_candidates, key=candidate_sort_key)
+
+    pin_seeds_for_direct = [c["q"] for c in sorted_pin[:PIN_TOP_K_FOR_DIRECT]]
+    return pin_candidates, pin_seeds_for_direct, per_seed
+
+
+# =============================================================================
+# Torque cost helpers  (Pinocchio)
+# =
+# =============================================================================
+
+def gravity_torque_for_active_q(
+    pin_model,
+    pin_data,
+    pin_maps,
+    active_joint_names,
+    q_active,
+):
+    """
+    Compute gravity compensation torques for active joints using Pinocchio.
+
+    Equivalent to:
+        PyBullet calculateInverseDynamics(q, qd=0, qdd=0)
+    """
+    q_active = np.asarray(q_active, dtype=float)
+    q_full = active_q_to_pinocchio_q(pin_model, pin_maps, q_active)
+
+    tau_gravity_full = pin.computeGeneralizedGravity(pin_model, pin_data, q_full)
+    tau_active = np.array(
+        [float(tau_gravity_full[idx]) for idx in pin_maps["active_v_indices"]],
+        dtype=float,
+    )
+
+    return tau_active
+
+def get_active_joint_efforts(pin_maps):
+    """
+    Return effort limits for active joints from Pinocchio maps.
+    """
+    return pin_maps["effort_limits"].copy()
+def add_torque_metrics_to_candidate(
+    candidate,
+    pin_model,
+    pin_data,
+    pin_maps,
+    active_joint_names,
+    joint_efforts_active,
+):    
+    if candidate is None:
+        return
+
+    if "q" not in candidate:
+        return
+    tau = gravity_torque_for_active_q(
+        pin_model=pin_model,
+        pin_data=pin_data,
+        pin_maps=pin_maps,
+        active_joint_names=active_joint_names,
+        q_active=candidate["q"],
+    )
+
+    ratio = np.abs(tau) / joint_efforts_active
+    max_idx = int(np.argmax(ratio))
+
+    candidate["tau_gravity"] = tau
+    candidate["torque_ratio"] = ratio
+    candidate["torque_cost"] = float(np.mean(ratio ** 2))
+      candidate["torque_l2"] = float(np.linalg.norm(tau))
+    candidate["max_abs_tau"] = float(np.max(np.abs(tau)))
+    candidate["max_usage"] = float(np.max(ratio))
+    candidate["max_usage_joint_idx"] = max_idx
+   candidate["max_usage_joint_name"] = active_joint_names[max_idx]
+
+    update_candidate_final_cost_with_torque(candidate)
+def add_torque_metrics_to_candidates(
+    candidates,
+    pin_model,
+    pin_data,
+    pin_maps,
+    active_joint_names,
+    joint_efforts_active,
+):
+    for c in candidates:
+        if c is None:
+            continue
+        try:
+            add_torque_metrics_to_candidate(
+                candidate=c,
+                pin_model=pin_model,
+                pin_data=pin_data,
+                pin_maps=pin_maps,
+
+                active_joint_names=active_joint_names,
+                joint_efforts_active=joint_efforts_active,
+            )
+
+        except Exception as e:
+           c["torque_error"] = repr(e)
+            update_candidate_final_cost_with_torque(c)
+
+# =============================================================================
+# Standalone solver class
+# =============================================================================
+
+class HAArmIKSolver:
+    def __init__(
+        self,
+        urdf,
+        side,
+        use_ssik=USE_SSIK,
+        use_pinocchio_ik=USE_PINOCCHIO_IK,
+        use_torque_cost=USE_TORQUE_COST,
+        use_direct_psi=USE_DIRECT_PSI,
+        include_waist=False,
+        verbose=True,
+        config=None,
+    ):
+        self.verbose = verbose
+        self.include_waist = bool(include_waist)
+
+        # Tuning parameters: instance attrs seeded from module constants so
+        # callers can override per-instance without editing solver.py.
+        cfg_tune = dict(config) if config else {}
+        self.max_direct_nfev = cfg_tune.get(
+            "max_direct_nfev", PORTFOLIO_DIRECT_MAX_NFEV
+        )
+        self.direct_pos_tol = cfg_tune.get(
+            "direct_pos_tol", PORTFOLIO_DIRECT_POS_TOL
+        )
+        self.direct_ori_tol = cfg_tune.get(
+            "direct_ori_tol", PORTFOLIO_DIRECT_ORI_TOL
+        )
+        self.direct_psi_tol = cfg_tune.get(
+           "direct_psi_tol", PORTFOLIO_DIRECT_PSI_TOL
+        )
+        self.portfolio_q_ref_mode = cfg_tune.get(
+            "portfolio_q_ref_mode", PORTFOLIO_Q_REF_MODE
+        )
+        self.use_local_seeds = cfg_tune.get("use_local_seeds", USE_LOCAL_SEEDS)
+        self.dls_max_iter = cfg_tune.get("dls_max_iter", PIN_IK_MAX_ITER)
+        self.dls_damping = cfg_tune.get("dls_damping", PIN_IK_DAMPING)
+        self.dls_max_step = cfg_tune.get("dls_max_step", PIN_IK_MAX_STEP)
+
+        self.urdf = str(Path(urdf).expanduser().resolve())
+        if not Path(self.urdf).is_file():
+            raise FileNotFoundError(f"URDF not found: {self.urdf}")
+        self.urdf_root_link = get_urdf_root_link(self.urdf)
+        self.side = side.lower()
+        if self.side not in ARM_CONFIGS:
+            raise ValueError("side must be 'left' or 'right'")
+
+        cfg = ARM_CONFIGS[self.side]
+
+        if self.include_waist:
+            # 9-DOF chain: base_Base -> Hip_Link1 -> Body_Link -> arm 7.
+            # Only the Pinocchio DLS path supports redundant chains;
+         # SEW/arm-angle geometry assumes a fixed arm base.
+            self.base_link = get_urdf_root_link(self.urdf)
+            use_ssik = False
+            use_direct_psi = False
+            if verbose:
+                print(
+                    "[waist-ik] include_waist=True: 9-DOF chain, "
+                    "SSIK and direct_psi disabled."
+                )
+        else:
+            self.base_link = cfg["base_link"]
+
+
+        self.ee_link = cfg["ee_link"]
+        self.s_joint = cfg["s_joint"]
+        self.e_joint = cfg["e_joint"]
+        self.w_joint = cfg["w_joint"]
+        self.ref_dir = REF_DIR.copy()
+      # If the URDF already contains world -> arm_base fixed joint,
+        # use that transform and do not mount it again.
+        mount_from_urdf = get_fixed_joint_origin(
+            self.urdf,
+            parent_link="world",
+            child_link=self.base_link,
+        )
+
+        if mount_from_urdf is not None:
+            self.urdf_has_world_mount = True
+
+            self.mount_xyz, self.mount_rpy = mount_from_urdf
+        else:
+            self.urdf_has_world_mount = False
+            self.mount_xyz = cfg["mount_xyz"]
+            self.mount_rpy = cfg["mount_rpy"]
+        self.use_ssik = bool(use_ssik and ssik is not None)
+        self.use_pinocchio_ik = bool(use_pinocchio_ik)
+        self.use_torque_cost = bool(use_torque_cost)
+        self.use_direct_psi = bool(use_direct_psi)
+
+    if use_ssik and ssik is None:
+            print("[WARN] ssik import failed. SSIK disabled.")
+
+        if (self.use_pinocchio_ik or self.use_torque_cost) and pin is None:
+            print("[WARN] pinocchio import failed. Pinocchio IK and torque cost disabled.")
+            self.use_pinocchio_ik = False
+            self.use_torque_cost = False
+
+        self.mount_quat = tuple(
+            float(v) for v in R.from_matrix(rpy_to_R(self.mount_rpy)).as_quat()
+        )
+       if self.urdf_has_world_mount or self.urdf_root_link != self.base_link:
+            # "world" differs from solver base: base sits on top of a mount.
+            self.T_world_from_base = make_T_from_xyz_rpy(
+                self.mount_xyz,
+                self.mount_rpy,
+            )
+        else:
+            # base_link IS the URDF root (9-DOF waist mode): local frame is
+            # already base_Base, no mount to apply.
+            self.T_world_from_base = np.eye(4)
+
+        self.T_base_from_world = invert_T(self.T_world_from_base)
+
+        R_world_from_base = rpy_to_R(self.mount_rpy)
+        self.g_mounted_base = R_world_from_base.T @ G_WORLD
+       self.chain = SerialChain(
+            self.urdf,
+            self.base_link,
+            self.ee_link,
+            s_joint=self.s_joint,
+            e_joint=self.e_joint,
+            w_joint=self.w_joint,
+        )
+
+        # Workspace max-radius check.
+       self.workspace_anchor_joint = self.s_joint
+        self.workspace_anchor_local_xyz = joint_origin_position_at_zero(
+            self.chain,
+            self.workspace_anchor_joint,
+        )
+        self.workspace_max_j7_radius_from_anchor = (
+            estimate_chain_max_reach_from_joint(
+                self.chain,
+                self.workspace_anchor_joint,
+            )
+        )
+        self.workspace_max_radius = self.workspace_max_j7_radius_from_anchor
+
+        self.lower, self.upper = self.chain.bounds()
+    if self.include_waist:
+            # Waist joints in front, at neutral (home) configuration.
+            q_ready_arm = clip_to_bounds(
+                cfg["q_ready"],
+                self.lower[2:],
+                self.upper[2:],
+            )
+            self.q_ready = np.concatenate(
+                [np.zeros(2, dtype=float), q_ready_arm]
+            )
+            self.q_ready = clip_to_bounds(
+                self.q_ready, self.lower, self.upper
+            )
+        else:
+            self.q_ready = clip_to_bounds(
+                cfg["q_ready"],
+                self.lower,
+                self.upper,
+            )
+      self.q_prev = self.q_ready.copy()
+
+        self.active_joint_names = [
+            j["name"] for j in self.chain.active_joints
+        ]
+        try:
+            self.psi_ready = float(self.chain.psi(self.q_ready))
+        except Exception:
+            self.psi_ready = float("nan")
+
+        # ---- SSIK ----
+        self.arm = None
+        if self.use_ssik:
+            self.arm = ssik.Manipulator.from_urdf(
+                self.urdf,
+                base=self.base_link,
+                ee=self.ee_link,
+            )
+        # ---- Pinocchio (shared for IK + torque) ----
+        self.pin_model = None
+        self.pin_data = None
+        self.pin_maps = None
+        self.pin_ee_frame_id = None
+        self.joint_efforts_active = None
+       if self.use_pinocchio_ik or self.use_torque_cost:
+            require_pinocchio()
+
+            self.pin_model, self.pin_data = load_pinocchio_model(self.urdf)
+            if self.urdf_has_world_mount:
+                # URDF root is world.
+                g = G_WORLD
+
+            elif self.urdf_root_link != self.base_link:
+              # Example:
+                #   URDF root       = base_Base
+                #   solver base     = Body_Link
+                #             # Pinocchio model is rooted at base_Base, so gravity should be expressed
+                # in base_Base/root frame. We assume base_Base Z is world Z.
+                g = G_WORLD
+
+            else:
+              # Old behavior:
+                # Pinocchio root == solver base_link.
+                # Gravity must be expressed in solver base frame.
+                g = self.g_mounted_base
+         self.pin_model.gravity.linear = np.array(g, dtype=float)
+
+            self.pin_maps = build_pinocchio_joint_maps(
+                self.pin_model,
+                self.active_joint_names,
+            )
+
+            self.joint_efforts_active = get_active_joint_efforts(self.pin_maps)
+
+        if self.use_pinocchio_ik:
+            self.pin_ee_frame_id = get_pinocchio_frame_id(
+                self.pin_model,
+              self.ee_link,
+            )
+
+        self._check_model()
+
+        if self.verbose:
+            self.print_info()
+   def _check_model(self):
+        if self.pin_maps is not None:
+            missing = [
+                name for name in self.active_joint_names
+                if name not in self.pin_maps["name_to_joint_id"]
+            ]
+
+        if missing:
+                raise RuntimeError(
+                    f"Missing active joints in Pinocchio model: {missing}"
+                )
+   def print_info(self):
+        T_ready_local = self.chain.fk(self.q_ready)
+        T_ready_world = self.T_world_from_base @ T_ready_local
+
+        print("")
+        print("=" * 80)
+
+    print("HAArmIKSolver")
+        print("=" * 80)
+        print("URDF:", self.urdf)
+        print("side:", self.side)
+        print("include_waist:", self.include_waist)
+        print("BASE_LINK:", self.base_link)
+       print("EE_LINK:", self.ee_link)
+        print("active joints:", self.active_joint_names)
+        print("Q_READY:", np.array2string(self.q_ready, precision=6, separator=", "))
+        print("psi_ready rad:", self.psi_ready)
+     print("psi_ready deg:", np.rad2deg(self.psi_ready))
+        print("EE ready local xyz:", T_ready_local[:3, 3])
+        print("EE ready world xyz:", T_ready_world[:3, 3])
+        print("workspace anchor joint:", self.workspace_anchor_joint)
+        print("workspace anchor local xyz:", self.workspace_anchor_local_xyz)
+        print(
+            "workspace max anchor->EE radius:",
+            self.workspace_max_j7_radius_from_anchor,
+        )
+        print("")
+        print("USE_DIRECT_PSI:", self.use_direct_psi)
+        print("USE_SSIK:", self.use_ssik)
+        print("USE_PINOCCHIO_IK:", self.use_pinocchio_ik)
+        print("USE_TORQUE_COST:", self.use_torque_cost)
+        
+        print("W_TORQUE:", W_TORQUE)
+       print("G_MOUNTED_BASE:", np.round(self.g_mounted_base, 6))
+        if self.pin_model is not None:
+            print("Pinocchio model nq:", self.pin_model.nq)
+            print("Pinocchio model nv:", self.pin_model.nv)
+     if self.joint_efforts_active is not None:
+            print("joint effort limits:", self.joint_efforts_active)
+        print("=" * 80)
+    print("URDF root link:", self.urdf_root_link)
+        print("solver base link:", self.base_link)
+        print("Pinocchio target frame mode:",
+         "world/root" if (self.urdf_has_world_mount or self.urdf_root_link != self.base_link)
+            else "local/solver_base")
+        print("")
+  def target_to_local(self, T_target, frame="local"):
+        return target_frames(
+            T_target,
+            frame=frame,
+            T_world_from_base=self.T_world_from_base,
+            T_base_from_world=self.T_base_from_world,
+        )
+
+    def workspace_diagnostic(
+
+        self,
+        T_target,
+        frame="local",
+        target_is_tcp=False,
+        tcp_offset_xyz=None,
+        margin=None,
+    ):
+        """
+        Simple max-radius workspace check from J1/J2 shoulder joint to target TCP.
+        """
+        T_target = np.asarray(T_target, dtype=float)
+
+        if T_target.shape != (4, 4):
+           raise ValueError("T_target must be 4x4 matrix.")
+
+        if tcp_offset_xyz is None:
+            tcp_offset_xyz = np.zeros(3)
+
+        tcp_offset_xyz = np.asarray(tcp_offset_xyz, dtype=float)
+     if tcp_offset_xyz.shape != (3,):
+            raise ValueError(
+                f"tcp_offset_xyz must be length 3, got shape {tcp_offset_xyz.shape}"
+            )
+       tcp_offset_norm = float(np.linalg.norm(tcp_offset_xyz))
+        T_j7_to_tcp = make_translation_T(tcp_offset_xyz)
+
+        if target_is_tcp:
+            T_tcp_input = T_target
+            T_j7_input = T_tcp_input @ invert_T(T_j7_to_tcp)
+        else:
+            T_j7_input = T_target
+            T_tcp_input = T_j7_input @ T_j7_to_tcp
+        T_j7_local, T_j7_world = self.target_to_local(T_j7_input, frame=frame)
+        T_tcp_local, T_tcp_world = self.target_to_local(T_tcp_input, frame=frame)
+
+        p_anchor_local = np.asarray(self.workspace_anchor_local_xyz, dtype=float)
+        p_anchor_world = transform_point(self.T_world_from_base, p_anchor_local)
+
+        p_j7_local = T_j7_local[:3, 3]
+        p_tcp_local = T_tcp_local[:3, 3]
+        p_j7_world = T_j7_world[:3, 3]
+        p_tcp_world = T_tcp_world[:3, 3]
+
+        dist_anchor_to_j7 = float(np.linalg.norm(p_j7_local - p_anchor_local))
+        dist_anchor_to_tcp = float(np.linalg.norm(p_tcp_local - p_anchor_local))
+       max_j7_radius = float(self.workspace_max_j7_radius_from_anchor)
+        max_tcp_radius = max_j7_radius + tcp_offset_norm
+
+        ok = dist_anchor_to_tcp <= max_tcp_radius
+
+    if ok:
+            reason = "OK_MAX_TCP_RADIUS"
+        else:
+            reason = "OUT_OF_MAX_TCP_RADIUS"
+
+        return {
+     "ok": bool(ok),
+            "reason": reason,
+            "frame": frame,
+            "target_is_tcp": bool(target_is_tcp),
+
+          "anchor_joint": self.workspace_anchor_joint,
+            "anchor_local_xyz": p_anchor_local.copy(),
+            "anchor_world_xyz": p_anchor_world.copy(),
+            "tcp_offset_xyz": tcp_offset_xyz.copy(),
+            "tcp_offset_norm": tcp_offset_norm,
+
+            "T_j7_local": T_j7_local,
+            "T_j7_world": T_j7_world,
+         "T_tcp_local": T_tcp_local,
+            "T_tcp_world": T_tcp_world,
+
+            "required_j7_local_xyz": p_j7_local.copy(),
+            "required_j7_world_xyz": p_j7_world.copy(),
+
+         "tcp_local_xyz": p_tcp_local.copy(),
+            "tcp_world_xyz": p_tcp_world.copy(),
+
+            "dist_anchor_to_required_j7": dist_anchor_to_j7,
+
+            "dist_anchor_to_tcp": dist_anchor_to_tcp,
+
+            "workspace_max_j7_radius_from_anchor": max_j7_radius,
+            "workspace_max_tcp_radius_from_anchor": max_tcp_radius,
+        }
+   def print_workspace_diagnostic(self, info, prefix="[WORKSPACE]"):
+        ok = bool(info["ok"])
+        reason = info["reason"]
+        level = "OK" if ok else "WARN"
+
+        anchor_joint = info.get("anchor_joint", "UNKNOWN")
+
+        print("")
+        print(f"{prefix} {level}: side={self.side}, reason={reason}")
+        print(f"{prefix} frame                       : {info['frame']}")
+        print(f"{prefix} target_is_tcp               : {info['target_is_tcp']}")
+        print(f"{prefix} anchor_joint                : {anchor_joint}")
+        print(f"{prefix} anchor local xyz            : {np.round(info['anchor_local_xyz'], 6)}")
+        print(f"{prefix} anchor world xyz            : {np.round(info['anchor_world_xyz'], 6)}")
+        print(f"{prefix} tcp_offset_xyz              : {np.round(info['tcp_offset_xyz'], 6)}")
+        print(f"{prefix} tcp_offset_norm             : {info['tcp_offset_norm']:.6f} m")
+        print(f"{prefix} TCP local xyz               : {np.round(info['tcp_local_xyz'], 6)}")
+        print(f"{prefix} required J7 local xyz       : {np.round(info['required_j7_local_xyz'], 6)}")
+       print(f"{prefix} TCP world xyz               : {np.round(info['tcp_world_xyz'], 6)}")
+        print(f"{prefix} required J7 world xyz       : {np.round(info['required_j7_world_xyz'], 6)}")
+        print(f"{prefix} dist {anchor_joint}->TCP     : {info['dist_anchor_to_tcp']:.6f} m")
+        print(f"{prefix} dist {anchor_joint}->J7      : {info['dist_anchor_to_required_j7']:.6f} m")
+
+        print(f"{prefix} max {anchor_joint}->J7       : {info['workspace_max_j7_radius_from_anchor']:.6f} m")
+        print(f"{prefix} max {anchor_joint}->TCP      : {info['workspace_max_tcp_radius_from_anchor']:.6f} m")
+
+
+        if not ok:
+            print(f"{prefix} WARNING: Target TCP is outside max shoulder-to-TCP radius.")
+            print(f"{prefix}          This is likely a TCP target / tcp_offset / frame issue.")
+
+        print("")
+
+    def check_workspace(
+        self,
+        T_target,
+        frame="local",
+        target_is_tcp=False,
+        tcp_offset_xyz=None,
+        margin=None,
+        verbose=True,
+    ):
+        info = self.workspace_diagnostic(
+            T_target=T_target,
+            frame=frame,
+            target_is_tcp=target_is_tcp,
+            tcp_offset_xyz=tcp_offset_xyz,
+            margin=margin,
+        )
+
+        if verbose:
+            self.print_workspace_diagnostic(info)
+
+        return info["ok"], info
+ def _collect_portfolio(self, T_target_local, T_target_world, q_prev, q_ready,
+                           lower, upper, rng, orientation_mode, tool_axis,
+                           tool_cone_half_angle):
+        """
+      Run the SSIK + Pinocchio-DLS stages.
+
+        Returns (candidates, direct_seeds, per_seed) where direct_seeds feed
+        the direct-psi stage and per_seed holds per-seed DLS diagnostics.
+        """
+     candidates = []
+        all_direct_seeds = []
+        per_seed = []
+
+        if self.use_ssik:
+            ssik_candidates, ssik_seeds = collect_ssik_candidates_and_seeds(
+                arm=self.arm,
+                chain=self.chain,
+                T_target=T_target_local,
+                psi_ready=self.psi_ready,
+
+               q_prev=q_prev,
+                q_ready=q_ready,
+                lower=lower,
+                upper=upper,
+                orientation_mode=orientation_mode,
+                tool_axis=tool_axis,
+                tool_cone_half_angle=tool_cone_half_angle,
+                include_waist=self.include_waist,
+            )
+            candidates.extend(ssik_candidates)
+
+            if self.use_direct_psi:
+                all_direct_seeds.extend(ssik_seeds)
+
+        if self.use_pinocchio_ik:
+            # Pinocchio root may differ from the solver base: world mount or
+            # 7-DOF (base=Body_Link, root=base_Base) -> target in root frame;
+            # 9-DOF (root == base) -> target already in the right frame.
+
+            if self.urdf_has_world_mount or self.urdf_root_link != self.base_link:
+                T_target_pin = T_target_world
+            else:
+                T_target_pin = T_target_local
+
+            pin_candidates, pin_seeds, pin_per_seed = (
+                collect_pinocchio_candidates_and_seeds(
+                    pin_model=self.pin_model,
+                    pin_data=self.pin_data,
+                    pin_maps=self.pin_maps,
+                    ee_frame_id=self.pin_ee_frame_id,
+                    chain=self.chain,
+                    T_target_pin=T_target_pin,
+                    T_target_local=T_target_local,
+                    psi_ready=self.psi_ready,
+                    q_prev=q_prev,
+                    q_ready=q_ready,
+                    lower=lower,
+                    upper=upper,
+                    rng=rng,
+                    orientation_mode=orientation_mode,
+                    tool_axis=tool_axis,
+                    tool_cone_half_angle=tool_cone_half_angle,
+                    include_waist=self.include_waist,
+                    dls_params={
+                        "max_iter": self.dls_max_iter,
+                        "damping": self.dls_damping,
+                        "max_step": self.dls_max_step,
+                    },
+                )
+            )
+            candidates.extend(pin_candidates)
+            per_seed.extend(pin_per_seed)
+
+            if self.use_direct_psi:
+                all_direct_seeds.extend(pin_seeds)
+        return candidates, unique_seed_list(all_direct_seeds), per_seed
+
+    def _solve_direct_psi_stage(self, T_target_local, q_prev, q_ready, lower,
+                                upper, direct_seeds, orientation_mode,
+                                tool_axis, tool_cone_half_angle, verbose):
+        """
+        direct-psi stage: solve from the collected seeds, score each solution,
+        and return the candidates.
+        """
+        direct_sols = solve_direct_psi(
+            self.chain,
+            T_target_local,
+            self.psi_ready,
+            direct_seeds,
+            S_joint=self.s_joint,
+            E_joint=self.e_joint,
+            W_joint=self.w_joint,
+            ref_dir=self.ref_dir,
+            q_ref=q_prev if self.portfolio_q_ref_mode == "prev" else q_ready,
+            q_bias=None,
+            orientation_mode=orientation_mode,
+            tool_axis=tool_axis,
+            tool_cone_half_angle=tool_cone_half_angle,
+            verbose=verbose,
+            w_pos=100.0,
+            w_ori=20.0,
+            w_psi=20.0,
+            w_seed=0.03,
+            w_bias=0.00,
+            w_center=0.005,
+            w_limit=0.05,
+            limit_margin=0.10,
+            max_nfev=self.max_direct_nfev,
+            refine_task=(orientation_mode == "full"),
+            pos_tol=self.direct_pos_tol,
+            ori_tol=self.direct_ori_tol,
+            psi_tol=self.direct_psi_tol,
+        )
+
+        candidates = []
+       for sol in direct_sols:
+            info = score_candidate(
+                self.chain,
+                sol["q"],
+                T_target_local,
+                self.psi_ready,
+                q_prev,
+                 q_ready,
+                lower,
+                upper,
+                orientation_mode=orientation_mode,
+                tool_axis=tool_axis,
+                tool_cone_half_angle=tool_cone_half_angle,
+            )
+            info["source"] = "direct_psi"
+            info["solve_method"] = "direct_psi_analytical_jacobian"
+            info["fallback_used"] = False
+            info["direct_seed_count"] = len(direct_seeds)
+            if "psi_err" in sol:
+                info["direct_psi_err"] = sol["psi_err"]
+            if "q_ref_dq" in sol:
+                info["q_ref_dq"] = sol["q_ref_dq"]
+            candidates.append(info)
+
+        return candidates
+
+    def _finalize_result(self, candidates, per_seed, T_target_local,
+                         T_target_world, frame, orientation_mode, tool_axis,
+                         tool_cone_half_angle, q_prev, update_prev,
+                         allow_approximate):
+        """Torque metrics -> select best -> approximate fallback -> result."""
+        if self.use_torque_cost and len(candidates) > 0:
+
+           add_torque_metrics_to_candidates(
+                candidates=candidates,
+                pin_model=self.pin_model,
+                pin_data=self.pin_data,
+                pin_maps=self.pin_maps,
+                active_joint_names=self.active_joint_names,
+                joint_efforts_active=self.joint_efforts_active,
+            )
+
+       best, status = select_best_candidate(
+            candidates,
+            use_torque=self.use_torque_cost,
+        )
+          best["solve_engine"] = "dls"
+            best["target_frame"] = frame
+            best["T_target_local"] = T_target_local
+            best["T_target_world"] = T_target_world
+            best["orientation_mode"] = orientation_mode
+            best["tool_axis"] = tool_axis.copy()
+            best["tool_cone_half_angle"] = float(tool_cone_half_angle)
+            best["tool_cone_half_angle_deg"] = float(np.rad2deg(tool_cone_half_angle))
+            best["approximate"] = False
+            best["approximate_accepted"] = False
+        if best is not None and is_valid_status(status):
+            if update_prev:
+                self.q_prev = best["q"].copy()
+            return best["q"].copy(), status, make_result(
+
+                best, status, per_seed=per_seed or None
+            )
+
+        # Optional approximate solution: strict IK failed but a candidate
+        # pool exists — return the best by pose error (BioIK-like behavior).
+        if (
+            allow_approximate
+            and best is not None
+            and status == "NO_VALID_POSE"
+            and "q" in best
+       ):
+            best["approximate"] = True
+            best["approximate_accepted"] = True
+            best["original_status"] = status
+            best["status"] = "APPROXIMATE"
+       best["approximate_policy"] = (
+                "allow_approximate=True: use best candidate by pose error "
+                "without additional tolerance threshold"
+            )
+
+            if update_prev:
+                self.q_prev = best["q"].copy()
+            return best["q"].copy(), "APPROXIMATE", make_result(
+                best, "APPROXIMATE", per_seed=per_seed or None
+            )
+        # Failure diagnosis (fields mirror PinkQPIKSolver.solve).
+        failure_reason = None
+        if best is None:
+            failure_reason = FailureReason.SEEDS_EXHAUSTED
+           failure_detail = "no candidate survived any solve pass (seed chain empty or all engines raised)"
+        else:
+            failure_reason = FailureReason.NOT_CONVERGED
+            n_stalled = sum(1 for s in per_seed if s.get("stalled"))
+            best_pe = min(
+                (s["final_pos_err"] for s in per_seed
+                 if np.isfinite(s.get("final_pos_err", np.nan))),
+                default=np.nan,
+            )
+            failure_detail = (
+                f"{len(candidates)} candidates, none within tolerance "
+                f"(POS_TOL={POS_TOL:.1e}); "
+                f"best pos_err={best.get('pos_err', np.nan):.3e} "
+                f"ori_err={best.get('ori_err', np.nan):.3e}; "
+                f"{n_stalled} seeds stalled; "
+                f"best seed pos_err="
+              f"{(f'{best_pe * 1000:.3f}mm' if np.isfinite(best_pe) else 'n/a')}"
+            )
+
+        return None, status, make_result(
+            best or {}, status,
+            failure_reason=failure_reason,
+            failure_detail=failure_detail,
+            per_seed=per_seed or None,
+        )
+
+    def solve(
+        self,
+        T_target,
+        frame="local",
+        q_prev=None,
+        update_prev=True,
+        verbose=False,
+
+        allow_approximate=False,
+        orientation_mode="full",
+        tool_axis=None,
+        tool_cone_half_angle=None,
+    ):
+        T_target_local, T_target_world = self.target_to_local(T_target, frame=frame)
+        orientation_mode = validate_orientation_mode(orientation_mode)
+        tool_cone_half_angle = normalize_cone_half_angle(tool_cone_half_angle)
+       if tool_axis is None:
+            tool_axis = TOOL_AXIS_X
+
+        tool_axis = normalize(tool_axis)
+        lower, upper = self.lower, self.upper
+
+        q_ready = self.q_ready.copy()
+
+        if q_prev is None:
+            q_prev = self.q_prev.copy()
+        else:
+            q_prev = clip_to_bounds(q_prev, lower, upper)
+
+        rng = np.random.default_rng(RNG_SEED)
+
+        candidates = []
+      # 1. local seeds (direct_psi only)
+        direct_seeds = []
+        if self.use_direct_psi and self.use_local_seeds:
+            direct_seeds.extend(
+                make_direct_local_seeds(
+                    q_prev=q_prev,
+                    q_ready=q_ready,
+                    lower=lower,
+                    upper=upper,
+                    rng=rng,
+                )
+            )
+
+        # 2. SSIK + Pinocchio DLS portfolio
+        portfolio_candidates, portfolio_seeds, per_seed = self._collect_portfolio(
+            T_target_local, T_target_world, q_prev, q_ready, lower, upper,
+         rng, orientation_mode, tool_axis, tool_cone_half_angle,
+        )
+        candidates.extend(portfolio_candidates)
+        direct_seeds.extend(portfolio_seeds)
+      # 3. direct-psi stage
+        if self.use_direct_psi:
+            candidates.extend(
+                self._solve_direct_psi_stage(
+                  T_target_local, q_prev, q_ready, lower, upper,
+                    direct_seeds, orientation_mode, tool_axis,
+                    tool_cone_half_angle, verbose,
+                )
+            )
+        # 4. torque cost + select + result
+        return self._finalize_result(
+            candidates, per_seed, T_target_local, T_target_world,
+            frame, orientation_mode, tool_axis, tool_cone_half_angle,
+
+            q_prev, update_prev, allow_approximate,
+        )
+
+    def close(self):
+        """
+        Release resources.
+
+        Pinocchio has no persistent server connections, so this only
+        clears references.
+        """
+        self.pin_model = None
+        self.pin_data = None
+        self.pin_maps = None
+        self.pin_ee_frame_id = None
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
