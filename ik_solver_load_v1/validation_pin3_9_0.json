@@ -1,0 +1,23 @@
+{
+  "python": "3.13.14",
+  "numpy": "2.3.5",
+  "pinocchio": "3.9.0",
+  "platform": "Linux-6.18.49-x86_64-with-glibc2.34",
+  "tests_run": 89,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "successful": true,
+  "syntax": {
+    "ha_arm_ik/load_policy.py": "Python 3.12 syntax accepted; not a Python 3.12 runtime test",
+    "ha_arm_ik/solver_load_aware.py": "Python 3.12 syntax accepted; not a Python 3.12 runtime test"
+  },
+  "actual_pinocchio_library_used": true,
+  "synthetic_urdf_only": true,
+  "user_urdf_tested": false,
+  "user_full_project_tested": false,
+  "ros2_jazzy_tested": false,
+  "moveit_integration_tested": false,
+  "hardware_tested": false,
+  "dynamic_load_validated": false
+}

@@ -1,0 +1,1 @@
+"""Synthetic fixtures, not the user's robot model."""

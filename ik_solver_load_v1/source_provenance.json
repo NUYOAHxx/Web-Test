@@ -1,0 +1,11 @@
+{
+  "source_page": "https://app.notion.com/p/3fbc0b8bbc68806f9067f71a8f678bd9",
+  "model_reference_page": "https://app.notion.com/p/3fcc0b8bbc68801eaa6ce313cb831834",
+  "original_sources_unchanged": true,
+  "source_sha256": {
+    "solver.py": "73d70dd8881d2d05eab57b745a12e3c171af4191a40a26291572d37b163ad277",
+    "solver_dls.py": "0a4206b79d37241a882b175c06ceb7064b4deae6104a70dfd0ec19e22f7daafa"
+  },
+  "delivery": "independent LoadAwareIKSolver branch; not a drop-in replacement for original IKResult",
+  "user_model_or_project_integration_tested": false
+}

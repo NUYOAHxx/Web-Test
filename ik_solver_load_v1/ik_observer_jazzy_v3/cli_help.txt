@@ -1,0 +1,63 @@
+usage: ik_state_observer_jazzy.py [-h] [--joint-topic JOINT_TOPIC]
+                                  [--description-topic DESCRIPTION_TOPIC]
+                                  [--description-node DESCRIPTION_NODE]
+                                  [--description-parameter DESCRIPTION_PARAMETER]
+                                  [--marker-topic MARKER_TOPIC]
+                                  [--frame-prefix FRAME_PREFIX]
+                                  [--gravity-frame GRAVITY_FRAME]
+                                  [--gravity GRAVITY GRAVITY GRAVITY]
+                                  [--tf-time {state,latest}]
+                                  [--support-frame SUPPORT_FRAME]
+                                  [--support-half-extents SUPPORT_HALF_EXTENTS SUPPORT_HALF_EXTENTS]
+                                  [--rate RATE] [--console-rate CONSOLE_RATE]
+                                  [--state-timeout STATE_TIMEOUT]
+                                  [--max-skew MAX_SKEW] [--joint-labels]
+                                  [--print-joints] [--show-link-com]
+                                  [--joint-names JOINT_NAMES]
+                                  [--allow-partial-mass]
+                                  [--limits-reference LIMITS_REFERENCE]
+                                  [--csv CSV]
+                                  [--save-description SAVE_DESCRIPTION]
+
+ROS 2 Jazzy: read-only MoveIt state observer for an EXISTING RViz. Reads
+JointState + robot_description (topic or GetParameters service). Publishes
+ONLY MarkerArray. No IK, actions, JointState publisher or TF publisher. Pure
+helpers require NumPy only. ROS imports are lazy for offline tests. Static
+gravity estimates are model quantities, NOT measured motor loads.
+
+options:
+  -h, --help            show this help message and exit
+  --joint-topic JOINT_TOPIC
+  --description-topic DESCRIPTION_TOPIC
+  --description-node DESCRIPTION_NODE
+                        GetParameters fallback node; try /move_group if needed
+  --description-parameter DESCRIPTION_PARAMETER
+  --marker-topic MARKER_TOPIC
+  --frame-prefix FRAME_PREFIX
+                        match existing TF frame_prefix, e.g. robot/
+  --gravity-frame GRAVITY_FRAME
+                        frame in which --gravity is expressed
+  --gravity GRAVITY GRAVITY GRAVITY
+  --tf-time {state,latest}
+  --support-frame SUPPORT_FRAME
+                        optional existing TF; its Z=0 is support plane
+  --support-half-extents SUPPORT_HALF_EXTENTS SUPPORT_HALF_EXTENTS
+                        optional calibrated rectangle half-widths in support
+                        frame, metres
+  --rate RATE
+  --console-rate CONSOLE_RATE
+  --state-timeout STATE_TIMEOUT
+  --max-skew MAX_SKEW
+  --joint-labels
+  --print-joints
+  --show-link-com
+  --joint-names JOINT_NAMES
+                        comma-separated display filter; full model still
+                        updated
+  --allow-partial-mass  explicitly allow known-mass-only estimates; always
+                        labeled partial
+  --limits-reference LIMITS_REFERENCE
+                        JSON comparison only; never overrides/clips states
+  --csv CSV             new CSV path; also creates .meta.json
+  --save-description SAVE_DESCRIPTION
+                        optional NEW .urdf path for runtime model audit

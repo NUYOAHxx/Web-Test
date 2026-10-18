@@ -1,0 +1,15 @@
+{
+  "status": "passed",
+  "total_offline_tests": 71,
+  "numerical_and_logic_tests": 59,
+  "mocked_ros_workflow_tests": 12,
+  "python": "3.13.14",
+  "numpy": "2.5.3",
+  "python_312_syntax_check": "passed",
+  "real_ros_jazzy_integration_tested": false,
+  "real_dds_tf_transport_tested": false,
+  "user_robot_model_tested": false,
+  "hardware_tested": false,
+  "script_sha256": "e2df3a74afd11949408fd4d0ed264e082f2d48bb4656f7bee250966937507a1d",
+  "notes": "Mock ROS tests are not real ROS integration. No ROS or robot was connected."
+}

@@ -1,0 +1,20 @@
+usage: solver_load_aware.py [-h] --urdf URDF --base-link BASE_LINK
+                            --ee-link EE_LINK [--inspect]
+
+Candidate static-load-aware IK, not a robot controller. Independent DLS
+implementation based on the supplied ha_arm_ik solver's workflow. Does not
+depend on the unavailable ik_candidate.py implementation. solve() returns
+(q_or_None, status_string, diagnostic_dict); the third value is NOT the
+original IKResult type. Acceptance is report["accepted"], not a legacy
+is_valid_status() helper. Requires NumPy and Pinocchio. No ROS import,
+/joint_states/TF publisher or action. Only fixed-base URDF trees with
+fixed/revolute/continuous/prismatic joints. Mimic, floating, planar and multi-
+DoF joints fail explicitly, not approximately.
+
+options:
+  -h, --help            show this help message and exit
+  --urdf URDF           URDF XML file; may be exported from running
+                        robot_description
+  --base-link BASE_LINK
+  --ee-link EE_LINK
+  --inspect             print UNFILLED config/state requirements; no solve

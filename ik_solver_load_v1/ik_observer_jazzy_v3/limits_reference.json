@@ -1,0 +1,16 @@
+{
+  "source": "Notion robot model 关节限制表",
+  "source_url": "https://app.notion.com/p/3fcc0b8bbc68801eaa6ce313cb831834",
+  "purpose": "仅比较文档与运行 URDF；不是已认证硬件规格，不修改输入或规划限位",
+  "joints": {
+    "Hip_Link1": {"lower_deg": -120.0, "upper_deg": 120.0},
+    "Body_Link": {"lower_deg": -360.0, "upper_deg": 360.0},
+    "LHand_Link1": {"lower_deg": -360.0, "upper_deg": 360.0},
+    "LHand_Link2": {"lower_deg": -90.0, "upper_deg": 45.0},
+    "LHand_Link3": {"lower_deg": -360.0, "upper_deg": 360.0},
+    "LHand_Link4": {"lower_deg": -120.0, "upper_deg": 40.0},
+    "LHand_Link5": {"lower_deg": -360.0, "upper_deg": 360.0},
+    "LHand_Link6": {"lower_deg": 60.0, "upper_deg": 120.0},
+    "LHand_Link7": {"lower_deg": -30.0, "upper_deg": 30.0}
+  }
+}
