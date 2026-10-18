@@ -1,0 +1,288 @@
+def collect_pinocchio_candidates_and_seeds(
+    pin_model,pin_data,pin_maps,ee_frame_id,chain,T_target_pin,T_target_local,
+    psi_ready,q_prev,q_ready,lower,upper,rng,orientation_mode="full",
+    tool_axis=None,tool_cone_half_angle=None,include_waist=False,dls_params=None,
+    *,load_search=None,
+):
+    """Original portfolio entry, now load-aware before early termination."""
+    params=dict(dls_params or {})
+    search=dict(load_search or {})
+    context=params.get("load_context")
+    strict=context is not None
+    max_seeds=int(search.get("max_seeds",10))
+    min_seeds=int(search.get("min_seeds",3))
+    min_unlocked=int(search.get("min_unlocked",2))
+    if min(max_seeds,min_seeds,min_unlocked)<1 or min_seeds>max_seeds:
+        raise ValueError("invalid load search seed counts")
+    if include_waist and max_seeds<min_unlocked+1:
+        raise ValueError("max_seeds must include locked and unlocked comparisons")
+    seeds=make_scatter_seeds(q_prev,q_ready,lower,upper,rng)
+    masks=[None]*len(seeds)
+    if include_waist:
+        mask=np.array([n in WAIST_JOINT_NAMES for n in pin_maps["active_names"]])
+        locked=q_prev.copy()
+        locked[mask]=q_ready[mask]
+        seeds.insert(0,locked)
+        masks.insert(0,mask)
+    near=WAIST_TASK_WEIGHT if params.get("waist_task_weight") is None else float(params["waist_task_weight"])
+    weights=np.array([near if n in WAIST_JOINT_NAMES else 1. for n in pin_maps["active_names"]])
+    candidates,per_seed,unique=[],[],[]
+    unlocked=0
+    released=False
+    stop="SEED_LIMIT"
+    for seed_idx,(seed,fixed) in enumerate(zip(seeds[:max_seeds],masks[:max_seeds])):
+        deadline=params.get("deadline")
+        if deadline is not None and time.monotonic()>=deadline:
+            stop="TIME_BUDGET"
+            break
+        if fixed is None:
+            unlocked+=1
+        started=time.monotonic()
+        try:
+            q,diag=pinocchio_ik_one_seed(
+                pin_model,pin_data,pin_maps,ee_frame_id,T_target_pin,seed,lower,upper,
+                orientation_mode=orientation_mode,tool_axis=tool_axis,
+                tool_cone_half_angle=tool_cone_half_angle,joint_weights=weights,
+                q_ref=q_ready,include_waist=include_waist,fixed_joint_mask=fixed,
+                waist_release=include_waist,waist_load_release=released,**params)
+            info=score_candidate(
+                chain,q,T_target_local,psi_ready,q_prev,q_ready,lower,upper,
+                orientation_mode=orientation_mode,tool_axis=tool_axis,
+                tool_cone_half_angle=tool_cone_half_angle,apply_waist_return=include_waist)
+            info.update(source="pinocchio_ik",solve_method="pinocchio_damped_ls_ik",
+                        fallback_used=True,seed_used=seed_idx,converged=bool(diag["converged"]))
+            if strict:
+                physical=load_physics(pin_model,pin_data,pin_maps,q,context,False)
+                info.update(load_ok=physical["load_ok"],load_peak_ratio=physical["peak_ratio"],
+                            load_peak_joint=physical["peak_joint"])
+                if fixed is not None and physical["peak_ratio"]>context["policy"].soft_ratio:
+                    released=True
+            duplicate=any(np.linalg.norm(joint_difference(q,old,pin_maps["active_periodic"]))<1e-5 for old in unique)
+            if not duplicate:
+                unique.append(q.copy())
+                candidates.append(info)
+            per_seed.append({"seed_idx":seed_idx,**diag,"fixed_waist":fixed is not None,
+                             "pose_ok":bool(info["pose_ok"]),"margin":float(info["margin"]),
+                             "duplicate":duplicate,"elapsed_ms":(time.monotonic()-started)*1000.})
+            if strict:
+                low=[c for c in candidates if c.get("pose_ok") and c.get("load_ok")
+                     and c.get("margin",-np.inf)>=SAFE_MARGIN]
+                if (seed_idx+1>=min_seeds and (not include_waist or unlocked>=min_unlocked)
+                        and low and min(c["load_peak_ratio"] for c in low)<=context["policy"].early_stop_ratio):
+                    stop="LOW_LOAD_AFTER_REQUIRED_COMPARISON"
+                    break
+            elif info.get("pose_ok") and info.get("margin",-np.inf)>=SAFE_MARGIN and seed_idx>=1:
+                stop="LEGACY_POSE_EARLY_STOP"
+                break
+        except Exception as exc:
+            per_seed.append({"seed_idx":seed_idx,"converged":False,"fixed_waist":fixed is not None,
+                             "exception":f"{type(exc).__name__}: {exc}","stop_reason":"VISIBLE_SEED_ERROR",
+                             "elapsed_ms":(time.monotonic()-started)*1000.})
+    if strict:
+        context["search_diagnostics"]={"stop_reason":stop,"unlocked_seeds_attempted":unlocked,
+                                       "waist_released_for_load":released,"seeds_attempted":len(per_seed)}
+    sorted_candidates=sorted(candidates,key=candidate_sort_key)
+    return candidates,[c["q"] for c in sorted_candidates[:PIN_TOP_K_FOR_DIRECT]],per_seed
+
+
+def _load_failure(self,code,detail,per_seed=None):
+    """Preserve legacy formatter/status vocabulary, even on a new load failure."""
+    self.last_load_diagnostics.update(accepted=False,code=code,detail=str(detail))
+    status="NO_VALID_POSE"  # Already present in the supplied original source.
+    return None,status,make_result({},status,failure_reason=FailureReason.NOT_CONVERGED,
+                                   failure_detail=f"[{code}] {detail}",per_seed=per_seed or None)
+
+
+def update_joint_state(self,snapshot_or_msg,*,now_ros_ns=None):
+    """Call in the existing subscriber; no ROS import/subscription is created."""
+    if isinstance(snapshot_or_msg,JointStateSnapshot):
+        snapshot=snapshot_or_msg
+    else:
+        snapshot=JointStateSnapshot.from_joint_state(snapshot_or_msg,now_ros_ns=now_ros_ns)
+    self._latest_joint_state=snapshot
+    return snapshot
+
+
+def _load_snapshot_error(self):
+    context=self._load_context
+    error=context["snapshot"].freshness_error(context["max_age_s"],
+                                             require_source_age=context["require_source_age"])
+    if error:
+        return error
+    latest=self._latest_joint_state
+    frozen=context["snapshot"]
+    if latest is not None and latest.received_monotonic>frozen.received_monotonic:
+        error=latest.freshness_error(context["max_age_s"],
+                                     require_source_age=context["require_source_age"])
+        if error:
+            return error
+        if set(self.pin_maps["all_names"])-set(latest.positions):
+            return "latest_full_state_incomplete"
+        # Static endpoint efforts depend on all non-IK joints. A moving other
+        # arm must not silently invalidate the frozen calculation.
+        for name in set(self.pin_maps["all_names"])-set(self.active_joint_names):
+            s=self.pin_maps["all_specs"][name]
+            value=latest.positions[name]
+            if value<s["lower"] or value>s["upper"]:
+                return f"latest_context_out_of_bounds:{name}"
+            delta=value-frozen.positions[name]
+            if s["continuous"]:
+                delta=(delta+np.pi)%(2*np.pi)-np.pi
+            key="load_context_tolerance_m" if s["kind"]=="prismatic" else "load_context_tolerance_rad"
+            tolerance=float(self._load_config.get(key,.001 if s["kind"]=="prismatic" else .01))
+            if not np.isfinite(tolerance) or tolerance<0:
+                return "invalid_context_change_tolerance"
+            if abs(delta)>tolerance:
+                return f"CONTEXT_CHANGED:{name}"
+    return None
+
+
+def _check_load_candidate(self,candidate,T_target_world,orientation_mode,tool_axis,cone):
+    q=finite_vector(candidate.get("q"),len(self.active_joint_names),"candidate q")
+    bounds_ok=bool(np.all(q>=self.lower) and np.all(q<=self.upper))
+    task=dls_task_terms(self.pin_model,self.pin_data,self.pin_maps,self.pin_ee_frame_id,
+                        q,T_target_world,orientation_mode,tool_axis,cone,
+                        float(self._load_config.get("dls_characteristic_length",.5)),False)
+    pose_ok=bool(candidate.get("pose_ok",False) and task["pos_err"]<=POS_TOL
+                 and task["ori_violation"]<=ORI_TOL)
+    physical=load_physics(self.pin_model,self.pin_data,self.pin_maps,q,self._load_context,False)
+    candidate.update(
+        load_ok=physical["load_ok"],load_bounds_ok=bounds_ok,load_pose_ok=pose_ok,
+        load_peak_ratio=physical["peak_ratio"],load_peak_joint=physical["peak_joint"],
+        load_guard_ratios=dict(zip(self._load_context["guard_names"],physical["ratios"])),
+        load_guard_efforts=dict(zip(self._load_context["guard_names"],physical["tau"])),
+        load_overloaded_joints=physical["overloaded_joints"],
+        load_final_pos_err=task["pos_err"],load_final_ori_violation=task["ori_violation"],
+    )
+    return bool(bounds_ok and pose_ok and physical["load_ok"])
+
+
+def _filter_load_candidates(self,candidates,T_target_world,orientation_mode,tool_axis,cone):
+    eligible=[]
+    rejected=[]
+    pose_count=0
+    errors=0
+    for index,c in enumerate(candidates):
+        try:
+            safe=self._check_load_candidate(c,T_target_world,orientation_mode,tool_axis,cone)
+            pose_count+=int(c["load_pose_ok"] and c["load_bounds_ok"])
+            if safe:
+                eligible.append(c)
+            else:
+                rejected.append({"index":index,"pose_ok":c["load_pose_ok"],
+                                 "bounds_ok":c["load_bounds_ok"],"peak_ratio":c["load_peak_ratio"],
+                                 "overloaded_joints":c["load_overloaded_joints"]})
+        except Exception as exc:
+            errors+=1
+            rejected.append({"index":index,"error":f"{type(exc).__name__}: {exc}"})
+    self.last_load_diagnostics.update(candidate_count=len(candidates),eligible_count=len(eligible),
+                                      rejected=rejected,pose_valid_count=pose_count,physics_errors=errors)
+    if not eligible:
+        return []
+    minimum=min(c["load_peak_ratio"] for c in eligible)
+    # Preserve the original scorer/SEW/waist/continuity preferences WITHIN this
+    # safe near-minimum-peak subset, rather than replacing IKResult or its enums.
+    shortlist=[c for c in eligible if c["load_peak_ratio"]<=minimum+self._load_context["policy"].peak_tie]
+    self.last_load_diagnostics["peak_shortlist_count"]=len(shortlist)
+    return shortlist
+
+
+def solve(
+    self,T_target,frame="local",q_prev=None,update_prev=True,verbose=False,
+    allow_approximate=False,orientation_mode="full",tool_axis=None,
+    tool_cone_half_angle=None,*,joint_state=None,
+):
+    """Original public tuple/formatter retained; only a keyword state input is new."""
+    start=time.monotonic()
+    if not self._solve_lock.acquire(blocking=False):
+        # Do not mutate the diagnostics of a solve already in flight.
+        return None,"NO_VALID_POSE",make_result(
+            {},"NO_VALID_POSE",failure_reason=FailureReason.NOT_CONVERGED,
+            failure_detail="[BUSY] one solve per instance; use a single worker")
+    old_prev=self.q_prev.copy()
+    try:
+        self.last_load_diagnostics={"version":"merged-v2","mode":self.load_mode,
+                                    "accepted":False,"protection_enabled":self.load_mode=="strict",
+                                    "code":"STARTED","collision_check":"NOT_PERFORMED",
+                                    "dynamic_load_check":"NOT_PERFORMED"}
+        snapshot=joint_state if joint_state is not None else self._latest_joint_state
+        self._load_context=None
+        self._solve_T_root_base=None
+        self._load_deadline=None
+        if self.load_mode=="strict":
+            if self.pin_model is None:
+                return self._load_failure("MODEL_UNAVAILABLE","Pinocchio model required for load checks")
+            try:
+                context=prepare_load_context(self.pin_model,self.pin_maps,self._load_config,snapshot)
+                self._load_context=context
+                self.pin_maps["q_template"]=context["q_template"].copy()
+                self.pin_maps["effort_limits"]=context["policy"].vectors(self.active_joint_names)[0]
+                self.pin_maps["effort_basis"]="confirmed_allowable_joint_side_efforts"
+                self.joint_efforts_active=self.pin_maps["effort_limits"].copy()
+                observed=np.array([snapshot.positions[n] for n in self.active_joint_names])
+                full=active_q_to_pinocchio_q(self.pin_model,self.pin_maps,observed)
+                pin.forwardKinematics(self.pin_model,self.pin_data,full)
+                pin.updateFramePlacements(self.pin_model,self.pin_data)
+                self._solve_T_root_base=np.array(
+                    self.pin_data.oMf[self.pin_model.getFrameId(self.base_link)].homogeneous,copy=True)
+                self.last_load_diagnostics.update(
+                    guard_joint_names=context["guard_names"],unchecked_joints=context["unchecked_joints"],
+                    model_mass_kg=context["model_mass_kg"],
+                    model_warnings=self.pin_maps["model_audit_warnings"],
+                    source_timestamp_verified=snapshot.source_age_at_receipt_s is not None,
+                    frozen_snapshot_received_monotonic=snapshot.received_monotonic)
+            except Exception as exc:
+                return self._load_failure("LOAD_CONFIG_OR_STATE_INVALID",f"{type(exc).__name__}: {exc}")
+        else:
+            self.last_load_diagnostics["code"]="LOAD_PROTECTION_EXPLICITLY_DISABLED"
+        budget=float(self._load_config.get("load_budget_s",.5))
+        if not np.isfinite(budget) or budget<=0:
+            return self._load_failure("INVALID_BUDGET","load_budget_s must be positive")
+        self._load_deadline=start+budget
+        result=self._solve_impl(T_target,frame,q_prev,update_prev,verbose,allow_approximate,
+                                 orientation_mode,tool_axis,tool_cone_half_angle)
+        if self.load_mode=="strict" and result[0] is not None:
+            error=self._load_snapshot_error()
+            if error:
+                self.q_prev=old_prev
+                return self._load_failure("STALE_OR_CHANGED_CONTEXT",error)
+        return result
+    except Exception as exc:
+        self.q_prev=old_prev
+        return self._load_failure("SOLVE_ERROR",f"{type(exc).__name__}: {exc}")
+    finally:
+        self.last_load_diagnostics["elapsed_ms"]=(time.monotonic()-start)*1000.
+        self.last_load_diagnostics["budget_exceeded"]=bool(
+            self._load_deadline is not None and time.monotonic()>self._load_deadline)
+        if self._load_context is not None:
+            self.last_load_diagnostics["search"]=self._load_context.get("search_diagnostics",{})
+        self._load_context=None
+        self._solve_T_root_base=None
+        if self.pin_maps is not None:
+            self.pin_maps.pop("q_template",None)
+            self.pin_maps["effort_limits"]=self.pin_maps["urdf_effort_limits"].copy()
+            self.pin_maps["effort_basis"]="URDF reference, not confirmed continuous rating"
+            self.joint_efforts_active=self.pin_maps["effort_limits"].copy()
+        self._solve_lock.release()
+
+
+def evaluate_physics(self,q_active,*,joint_state=None):
+    """Legacy method and keys; strict mode requires current whole-model context."""
+    if not self._solve_lock.acquire(blocking=False):
+        raise RuntimeError("solver busy; do not share Pinocchio Data concurrently")
+    try:
+        if self.pin_model is None:
+            raise ValueError("Pinocchio model unavailable")
+        if self.load_mode=="strict":
+            snapshot=joint_state if joint_state is not None else self._latest_joint_state
+            context=prepare_load_context(self.pin_model,self.pin_maps,self._load_config,snapshot)
+            self.pin_maps["q_template"]=context["q_template"].copy()
+            self.pin_maps["effort_limits"]=context["policy"].vectors(self.active_joint_names)[0]
+            self.pin_maps["effort_basis"]="confirmed_allowable_joint_side_efforts"
+        return evaluate_pose_physics(self.pin_model,self.pin_data,self.pin_maps,q_active,q_ref=self.q_ready)
+    finally:
+        if self.pin_maps is not None:
+            self.pin_maps.pop("q_template",None)
+            self.pin_maps["effort_limits"]=self.pin_maps["urdf_effort_limits"].copy()
+            self.pin_maps["effort_basis"]="URDF reference, not confirmed continuous rating"
+        self._solve_lock.release()

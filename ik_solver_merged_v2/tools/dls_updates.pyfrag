@@ -1,0 +1,646 @@
+def build_pinocchio_joint_maps(model, active_joint_names):
+    """Scalar joint maps, including Pinocchio continuous nq=2/nv=1 joints."""
+    all_specs = {}
+    for jid in range(1, model.njoints):
+        joint = model.joints[jid]
+        continuous = joint.nq == 2 and joint.nv == 1 and "RUB" in joint.shortname()
+        if joint.nv != 1 or (joint.nq != 1 and not continuous):
+            raise ValueError(f"{model.names[jid]}: unsupported nq/nv {joint.nq}/{joint.nv}")
+        raw = float(model.effortLimit[joint.idx_v])
+        all_specs[model.names[jid]] = {
+            "joint_id": jid, "idx_q": joint.idx_q, "idx_v": joint.idx_v,
+            "nq": joint.nq, "continuous": continuous,
+            "raw_effort": raw if np.isfinite(raw) and raw > 0 else np.nan,
+        }
+    names = list(active_joint_names)
+    if len(names) != len(set(names)) or set(names)-set(all_specs):
+        raise ValueError("invalid or missing active joint names")
+    efforts = np.array([all_specs[n]["raw_effort"] for n in names])
+    return {
+        "all_specs": all_specs, "all_names": list(all_specs), "active_names": names,
+        "name_to_joint_id": {n: s["joint_id"] for n,s in all_specs.items()},
+        "name_to_q_idx": {n: s["idx_q"] for n,s in all_specs.items()},
+        "name_to_v_idx": {n: s["idx_v"] for n,s in all_specs.items()},
+        "active_q_indices": [all_specs[n]["idx_q"] for n in names],
+        "active_v_indices": [all_specs[n]["idx_v"] for n in names],
+        "active_continuous": np.array([all_specs[n]["continuous"] for n in names]),
+        "effort_limits": efforts.copy(), "urdf_effort_limits": efforts.copy(),
+    }
+
+
+def active_q_to_pinocchio_q(model, pin_maps, q_active):
+    """Use frozen whole-model context when available; no nq=nv assumption."""
+    values = finite_vector(q_active, len(pin_maps["active_names"]), "active q")
+    template = pin_maps.get("q_template")
+    q = pin.neutral(model) if template is None else np.array(template, copy=True)
+    for name, value in zip(pin_maps["active_names"], values):
+        s = pin_maps["all_specs"][name]
+        if s["continuous"]:
+            q[s["idx_q"]:s["idx_q"]+2] = (math.cos(value), math.sin(value))
+        else:
+            q[s["idx_q"]] = value
+    return q
+
+
+def pinocchio_q_to_active_q(pin_maps, q_full, reference=None):
+    values = []
+    for name in pin_maps["active_names"]:
+        s = pin_maps["all_specs"][name]
+        values.append(math.atan2(q_full[s["idx_q"]+1], q_full[s["idx_q"]])
+                      if s["continuous"] else float(q_full[s["idx_q"]]))
+    q = np.array(values)
+    if reference is not None:
+        mask = pin_maps["active_continuous"]
+        ref = finite_vector(reference, len(q), "angle branch reference")
+        q[mask] = ref[mask] + joint_difference(q, ref, mask)[mask]
+    return q
+
+
+def configure_model_metadata(model, pin_maps, urdf_xml, *, massless_links=(), position_bounds=None):
+    """Audit runtime URDF once. Errors remain visible and block strict solving."""
+    root = ET.fromstring(urdf_xml)
+    errors, warnings = [], []
+    massless = set(massless_links)
+    links = {e.get("name"): e for e in root.findall("link")}
+    if massless-set(links):
+        errors.append(f"unknown massless links: {sorted(massless-set(links))}")
+    source_joints = {e.get("name"): e for e in root.findall("joint")}
+    overrides = dict(position_bounds or {})
+    if set(overrides)-set(pin_maps["all_names"]):
+        errors.append("position_bounds contains unknown/fixed joints")
+    points = []
+    for name, link in links.items():
+        inertial = link.find("inertial")
+        mass_el = None if inertial is None else inertial.find("mass")
+        mass = 0. if mass_el is None else float(mass_el.get("value", "nan"))
+        if not np.isfinite(mass) or mass < 0:
+            errors.append(f"{name}: invalid mass")
+            continue
+        if mass == 0:
+            if name not in massless:
+                errors.append(f"{name}: missing/zero mass; explicit massless frame confirmation required")
+            else:
+                warnings.append(f"confirmed_massless_frame:{name}")
+            continue
+        if name in massless:
+            errors.append(f"{name}: positive mass cannot be discarded")
+        origin = inertial.find("origin")
+        xyz = finite_vector([0.,0.,0.] if origin is None else
+                            [float(v) for v in origin.get("xyz","0 0 0").split()], 3, "local COM")
+        if origin is not None:
+            finite_vector([float(v) for v in origin.get("rpy","0 0 0").split()], 3, "inertial RPY")
+        tensor = inertial.find("inertia")
+        if tensor is None:
+            errors.append(f"{name}: missing inertia tensor")
+            continue
+        a = tensor.attrib
+        I = np.array([[float(a["ixx"]),float(a["ixy"]),float(a["ixz"])],
+                      [float(a["ixy"]),float(a["iyy"]),float(a["iyz"])],
+                      [float(a["ixz"]),float(a["iyz"]),float(a["izz"])]])
+        if not np.all(np.isfinite(I)):
+            errors.append(f"{name}: non-finite inertia")
+            continue
+        eig = np.linalg.eigvalsh(I)
+        if eig[0] < -1e-10 or eig[-1] > eig[:2].sum()+1e-8:
+            errors.append(f"{name}: nonphysical inertia")
+        if not model.existFrame(name):
+            errors.append(f"{name}: model frame missing")
+            continue
+        points.append((model.getFrameId(name),mass,xyz))
+    for name,s in pin_maps["all_specs"].items():
+        e = source_joints.get(name)
+        if e is None:
+            errors.append(f"{name}: not found in URDF joints")
+            continue
+        kind = e.get("type")
+        s["kind"] = kind
+        if e.find("mimic") is not None:
+            errors.append(f"{name}: mimic is not supported in this version")
+        if kind not in ("continuous","revolute","prismatic"):
+            errors.append(f"{name}: unsupported joint type {kind}")
+        if s["continuous"] != (kind == "continuous"):
+            errors.append(f"{name}: URDF/Pinocchio continuous type mismatch")
+        axis = e.find("axis")
+        v = finite_vector([1.,0.,0.] if axis is None else
+                          [float(x) for x in axis.get("xyz","1 0 0").split()],3,"joint axis")
+        if np.linalg.norm(v) < 1e-12:
+            errors.append(f"{name}: zero axis")
+        if kind == "continuous":
+            lo,hi = -np.inf,np.inf
+        else:
+            limit = e.find("limit")
+            if limit is None or "lower" not in limit.attrib or "upper" not in limit.attrib:
+                errors.append(f"{name}: missing position limits")
+                lo,hi = -np.inf,np.inf
+            else:
+                lo,hi = float(limit.get("lower")),float(limit.get("upper"))
+                if not np.isfinite(lo+hi) or lo >= hi:
+                    errors.append(f"{name}: invalid position limits")
+        if name in overrides:
+            bound = finite_vector(overrides[name],2,f"{name} override")
+            if bound[0] >= bound[1] or bound[0] < lo or bound[1] > hi:
+                errors.append(f"{name}: override must narrow actual URDF limits")
+            else:
+                lo,hi = bound
+        s["lower"],s["upper"] = float(lo),float(hi)
+    pin_maps["mass_points"] = points
+    pin_maps["model_mass_kg"] = float(sum(p[1] for p in points))
+    if pin_maps["model_mass_kg"] <= 0:
+        errors.append("no positive model mass")
+    pin_maps["model_audit_errors"] = errors
+    pin_maps["model_audit_warnings"] = warnings
+    pin_maps["active_lower"] = np.array([pin_maps["all_specs"][n]["lower"] for n in pin_maps["active_names"]])
+    pin_maps["active_upper"] = np.array([pin_maps["all_specs"][n]["upper"] for n in pin_maps["active_names"]])
+    pin_maps["active_periodic"] = np.array([
+        pin_maps["all_specs"][n]["continuous"]
+        and not np.isfinite(pin_maps["all_specs"][n]["lower"])
+        and not np.isfinite(pin_maps["all_specs"][n]["upper"])
+        for n in pin_maps["active_names"]])
+    return pin_maps
+
+
+def prepare_load_context(model, pin_maps, config, snapshot):
+    """Prepare a strict, immutable-in-use state context; never invent limits."""
+    if pin_maps.get("model_audit_errors"):
+        raise ValueError("model audit: " + "; ".join(pin_maps["model_audit_errors"]))
+    if not isinstance(snapshot, JointStateSnapshot):
+        raise ValueError("fresh complete JointStateSnapshot is required")
+    max_age = float(config.get("load_state_max_age_s",1.0))
+    if not np.isfinite(max_age) or max_age <= 0:
+        raise ValueError("invalid load_state_max_age_s")
+    require_source = bool(config.get("load_require_source_age",False))
+    error = snapshot.freshness_error(max_age,require_source_age=require_source)
+    if error:
+        raise ValueError(error)
+    missing = set(pin_maps["all_names"])-set(snapshot.positions)
+    if missing:
+        raise ValueError(f"missing whole-model joint state: {sorted(missing)}")
+    policy = LoadPolicy(
+        allowable_efforts=config.get("load_allowable_efforts",{}),
+        guard_joint_names=config.get("load_guard_joint_names"),
+        joint_weights=config.get("load_joint_weights",{}),
+        absolute_weight=float(config.get("load_absolute_gain",
+                                        config.get("dls_gravity_torque_gain") if config.get("dls_gravity_torque_gain") is not None
+                                        else GRAVITY_TORQUE_GAIN)),
+        excess_weight=float(config.get("load_excess_gain",.5)),
+        relative_weight=float(config.get("load_relative_gain",0.)),
+        soft_ratio=float(config.get("load_soft_ratio",.7)),
+        early_stop_ratio=float(config.get("load_early_stop_ratio",.6)),
+        peak_tie=float(config.get("load_peak_tie",.02)),
+    )
+    guards = list(policy.guard_joint_names or pin_maps["all_names"])
+    if set(guards)-set(pin_maps["all_names"]):
+        raise ValueError("unknown guarded joint")
+    if set(pin_maps["active_names"])-set(guards):
+        raise ValueError("all IK-active joints must be guarded")
+    policy.vectors(guards)
+    q = pin.neutral(model)
+    for name in pin_maps["all_names"]:
+        s = pin_maps["all_specs"][name]
+        value = snapshot.positions[name]
+        if value < s["lower"] or value > s["upper"]:
+            raise ValueError(f"observed {name} outside configured bounds; not clipped")
+        if s["continuous"]:
+            q[s["idx_q"]:s["idx_q"]+2] = (math.cos(value),math.sin(value))
+        else:
+            q[s["idx_q"]] = value
+    return {
+        "policy":policy,"snapshot":snapshot,"max_age_s":max_age,
+        "require_source_age":require_source,"q_template":q,
+        "guard_names":guards,
+        "guard_v":np.array([pin_maps["all_specs"][n]["idx_v"] for n in guards]),
+        "active_v":np.array(pin_maps["active_v_indices"]),
+        "periodic":pin_maps["active_periodic"].copy(),
+        "model_mass_kg":pin_maps["model_mass_kg"],
+        "mass_points":pin_maps["mass_points"],
+        "unchecked_joints":sorted(set(pin_maps["all_names"])-set(guards)),
+    }
+
+
+def model_com_with_jacobian(model,data,q_full,mass_points,active_v,derivatives=True):
+    pin.forwardKinematics(model,data,q_full)
+    pin.updateFramePlacements(model,data)
+    if derivatives:
+        pin.computeJointJacobians(model,data,q_full)
+    total = sum(p[1] for p in mass_points)
+    if total <= 0:
+        raise ValueError("whole-model mass unavailable")
+    moment = np.zeros(3)
+    jac = np.zeros((3,len(active_v)))
+    for fid,mass,offset in mass_points:
+        T = data.oMf[fid]
+        r = np.asarray(T.rotation) @ offset
+        moment += mass*(np.asarray(T.translation)+r)
+        if derivatives:
+            J = np.asarray(pin.getFrameJacobian(model,data,fid,pin.LOCAL_WORLD_ALIGNED)).reshape(6,model.nv)
+            jac += mass*(J[:3]-skew(r)@J[3:])[:,active_v]
+    return moment/total,jac/total
+
+
+def load_physics(model,data,pin_maps,q_active,context,derivatives=False):
+    q_full = active_q_to_pinocchio_q(model,pin_maps,q_active)
+    tau_full = np.array(pin.computeGeneralizedGravity(model,data,q_full),copy=True)
+    tau = tau_full[context["guard_v"]]
+    derivative = np.zeros((len(tau),len(context["active_v"])))
+    if derivatives:
+        full = np.asarray(pin.computeGeneralizedGravityDerivatives(model,data,q_full)).reshape(model.nv,model.nv)
+        derivative = full[np.ix_(context["guard_v"],context["active_v"])].copy()
+    com,Jcom = model_com_with_jacobian(model,data,q_full,context["mass_points"],
+                                      context["active_v"],derivatives)
+    if not np.all(np.isfinite(com)) or not np.all(np.isfinite(Jcom)):
+        raise ValueError("non-finite model COM")
+    result = context["policy"].evaluate(tau,context["guard_names"])
+    result.update(tau=tau,d_tau_d_active=derivative,com=com,Jcom=Jcom,q_full=q_full)
+    return result
+
+
+def dls_task_terms(model,data,pin_maps,fid,q_active,target,mode,axis,cone,
+                   characteristic_length=.5,jacobian=True):
+    q_full = active_q_to_pinocchio_q(model,pin_maps,q_active)
+    pin.forwardKinematics(model,data,q_full)
+    pin.updateFramePlacements(model,data)
+    current = data.oMf[fid].copy()
+    pos_error = target[:3,3]-np.asarray(current.translation)
+    pos = float(np.linalg.norm(pos_error))
+    v_idx = pin_maps["active_v_indices"]
+    if jacobian:
+        J = np.asarray(pin.computeFrameJacobian(model,data,q_full,fid,
+                       pin.LOCAL if mode=="full" else pin.LOCAL_WORLD_ALIGNED)).reshape(6,model.nv)[:,v_idx]
+    else:
+        J = np.zeros((6,len(v_idx)))
+    antipodal = False
+    if mode == "full":
+        delta = current.inverse()*pin.SE3(target[:3,:3],target[:3,3])
+        e = np.array(pin.log6(delta).vector,copy=True)
+        angle = float(np.linalg.norm(e[3:]))
+        A = np.array(pin.Jlog6(delta.inverse())@J,copy=True) if jacobian else J.copy()
+        e[:3] /= characteristic_length
+        A[:3] /= characteristic_length
+        violation = angle
+    else:
+        a,b = np.asarray(current.rotation)@axis,target[:3,:3]@axis
+        cross = np.cross(a,b)
+        sine = float(np.linalg.norm(cross))
+        cosine = float(np.clip(a@b,-1.,1.))
+        angle = math.atan2(sine,cosine)
+        if mode == "tool_dir":
+            edir = b-a
+            Jdir = -skew(a)@J[3:]
+            if cosine < -1+1e-8:
+                tangent = np.cross(a,np.eye(3)[int(np.argmin(np.abs(a)))])
+                tangent /= np.linalg.norm(tangent)
+                edir = angle*tangent
+                Jdir = (np.eye(3)-np.outer(a,a))@J[3:]
+                antipodal = True
+            e = np.r_[pos_error/characteristic_length,edir]
+            A = np.vstack([J[:3]/characteristic_length,Jdir])
+            violation = angle
+        elif mode == "tool_cone":
+            violation = max(0.,angle-cone)
+            row = np.zeros(len(v_idx))
+            if violation:
+                if sine > 1e-9:
+                    tangent = cross/sine
+                else:
+                    tangent = np.cross(a,np.eye(3)[int(np.argmin(np.abs(a)))])
+                    tangent /= np.linalg.norm(tangent)
+                    antipodal = True
+                row = tangent@J[3:]
+            e = np.r_[pos_error/characteristic_length,violation]
+            A = np.vstack([J[:3]/characteristic_length,row])
+        else:
+            raise ValueError("invalid orientation mode")
+    return {"error":e,"J":A,"pos_err":pos,"ori_err":angle,
+            "ori_violation":violation,"merit":.5*float(e@e),"antipodal":antipodal}
+
+
+def _build_effective_bounds(lower,upper,q_ref,waist_bool_mask,virtual_half_windows=None):
+    """No implicit +/-90/150 box. Optional explicit search windows are separate."""
+    lo,hi = np.asarray(lower,dtype=float).copy(),np.asarray(upper,dtype=float).copy()
+    if np.any(np.isnan(lo)) or np.any(np.isnan(hi)) or np.any(lo>=hi):
+        raise ValueError("invalid actual/planning bounds")
+    if virtual_half_windows is not None:
+        windows = finite_vector(virtual_half_windows,len(lo),"explicit search half-windows")
+        if np.any(windows<=0):
+            raise ValueError("search half-windows must be positive")
+        lo,hi = np.maximum(lo,q_ref-windows),np.minimum(hi,q_ref+windows)
+        if np.any(lo>=hi):
+            raise ValueError("search windows do not intersect actual bounds")
+    return lo,hi
+
+
+def _compute_nullspace_gradient_and_cost(
+    pin_model,pin_data,q_full,q_active_cur,q_ref,lower,upper,ns_gain,
+    active_v_indices,effort_limits,movable_mask,include_waist,tau_g_ref,
+    com_xy_ref,gravity_gain,com_gain,limit_gain,load_context=None,
+    pin_maps=None,derivatives=True,components=None,
+):
+    """Return negative gradient and cost; load objective uses confirmed caps."""
+    periodic = np.zeros(len(q_ref),dtype=bool) if load_context is None else load_context["periodic"]
+    diff = joint_difference(q_active_cur,q_ref,periodic)
+    z = -ns_gain*diff
+    posture = .5*float(np.dot(ns_gain*diff**2,movable_mask))
+    cost = posture
+    parts = {"posture":posture,"absolute_load":0.,"excess_load":0.,"relative_load":0.,"com":0.}
+    margin = max(float(SAFE_MARGIN),.02)
+    if limit_gain > 0:
+        b_low = np.minimum(q_ref,lower+margin)
+        b_high = np.maximum(q_ref,upper-margin)
+        under = np.maximum(0.,b_low-q_active_cur)/margin
+        over = np.maximum(0.,q_active_cur-b_high)/margin
+        z += limit_gain*(under-over)/margin
+        c = .5*limit_gain*float(np.dot(under**2+over**2,movable_mask))
+        cost += c
+        parts["joint_limit"] = c
+    if load_context is not None:
+        physics = load_physics(pin_model,pin_data,pin_maps,q_active_cur,load_context,derivatives)
+        c,g,load_parts = load_context["policy"].cost_gradient(
+            physics["tau"],physics["d_tau_d_active"],load_context["guard_names"],
+            tau_reference=tau_g_ref)
+        z -= g
+        cost += c
+        parts.update(absolute_load=load_parts["absolute"],excess_load=load_parts["excess"],
+                     relative_load=load_parts["relative"])
+        if include_waist and com_gain > 0 and com_xy_ref is not None:
+            ref = finite_vector(com_xy_ref,3,"reference COM")
+            ghat = np.asarray(pin_model.gravity.linear,dtype=float)
+            ghat = ghat/np.linalg.norm(ghat)
+            P = np.eye(3)-np.outer(ghat,ghat)
+            dcom = P@(physics["com"]-ref)
+            z -= com_gain*(physics["Jcom"].T@dcom)
+            parts["com"] = .5*com_gain*float(dcom@dcom)
+            cost += parts["com"]
+    if not np.isfinite(cost) or not np.all(np.isfinite(z)):
+        raise ValueError("non-finite secondary objective")
+    if components is not None:
+        components.update(parts)
+    return z*movable_mask,cost
+
+
+def _metric_svd_step(J,error,z,D,damping,rank_rtol=1e-9):
+    """Damped primary step plus exact numerical metric-nullspace descent."""
+    J = np.asarray(J,dtype=float)
+    D = np.asarray(D,dtype=float)
+    if not np.all(np.isfinite(J)) or not np.all(np.isfinite(D)):
+        raise ValueError("non-finite Jacobian/metric")
+    if not np.allclose(D,D.T,atol=1e-12,rtol=0):
+        raise ValueError("inverse metric must be symmetric")
+    eig,V = np.linalg.eigh(D)
+    if np.any(eig<=0):
+        raise ValueError("inverse metric must be positive definite")
+    S = (V*np.sqrt(eig))@V.T
+    U,s,Vt = np.linalg.svd(J@S,full_matrices=True)
+    rank = int(np.sum(s > rank_rtol*max(1.,float(s[0]) if s.size else 1.)))
+    B = Vt.T
+    primary = np.zeros(D.shape[0])
+    if rank:
+        primary = S@B[:,:rank]@((s[:rank]/(s[:rank]**2+damping))*(U[:,:rank].T@error))
+    Z = B[:,rank:]
+    secondary = np.zeros_like(primary) if z is None else S@Z@(Z.T@(S@z))
+    return primary,secondary
+
+
+def _solve_sns_clamped_step(J_active,err,z_grad,null_weight,W_inv,movable_mask,
+                           q_active_cur,eff_lower,eff_upper,damping,max_step):
+    """Compatible signature: active-face freezing + bounded/scaled SVD step.
+
+    It is not advertised as a complete SNS optimality algorithm. Actual FK and
+    endpoint limits are rechecked by the caller.
+    """
+    if damping < 0 or max_step <= 0:
+        raise ValueError("invalid damping/max_step")
+    free = np.asarray(movable_mask,dtype=bool).copy()
+    dq,ns = np.zeros(len(free)),np.zeros(len(free))
+    regularizer = damping+min(1e-3,1e-4*float(err@err))
+    for _ in range(len(free)+1):
+        if not np.any(free):
+            return np.zeros_like(dq),np.zeros_like(ns)
+        a,b = _metric_svd_step(J_active[:,free],err,
+                               None if z_grad is None else z_grad[free],
+                               W_inv[np.ix_(free,free)],regularizer)
+        dq.fill(0.)
+        ns.fill(0.)
+        ns[free] = null_weight*b
+        dq[free] = a+null_weight*b
+        blocked = free&(((q_active_cur<=eff_lower+1e-12)&(dq<0))|
+                        ((q_active_cur>=eff_upper-1e-12)&(dq>0)))
+        if not np.any(blocked):
+            break
+        free[blocked] = False
+    scale = min(1.,max_step/max(float(np.linalg.norm(dq)),1e-30))
+    for i,step in enumerate(dq):
+        if step>0 and np.isfinite(eff_upper[i]):
+            scale = min(scale,max(0.,(eff_upper[i]-q_active_cur[i])/step))
+        elif step<0 and np.isfinite(eff_lower[i]):
+            scale = min(scale,max(0.,(eff_lower[i]-q_active_cur[i])/step))
+    return scale*dq,scale*ns
+
+
+def pinocchio_ik_one_seed(
+    pin_model,pin_data,pin_maps,ee_frame_id,T_target,seed,lower,upper,
+    max_iter=PIN_IK_MAX_ITER,damping=PIN_IK_DAMPING,
+    pos_tol=PIN_IK_POS_TOL,ori_tol=PIN_IK_ORI_TOL,max_step=PIN_IK_MAX_STEP,
+    orientation_mode="full",tool_axis=None,tool_cone_half_angle=None,
+    joint_weights=None,q_ref=None,include_waist=False,fixed_joint_mask=None,
+    waist_release=False,waist_max_reach=None,nullspace_gain=None,waist_null_gain=None,
+    waist_task_weight=None,waist_task_weight_far=None,gravity_torque_gain=None,
+    com_xy_gain=None,joint_limit_gain=None,*,load_context=None,deadline=None,
+    waist_load_release=False,characteristic_length=.5,backtrack_steps=12,
+    virtual_half_windows=None,
+):
+    """Merged DLS v2. All original positional parameters remain in place."""
+    mode = validate_orientation_mode(orientation_mode)
+    target = validate_transform(T_target)
+    axis = finite_vector(TOOL_AXIS_X if tool_axis is None else tool_axis,3,"tool axis")
+    if np.linalg.norm(axis)<1e-12:
+        raise ValueError("zero tool axis")
+    axis /= np.linalg.norm(axis)
+    cone = normalize_cone_half_angle(tool_cone_half_angle)
+    q = finite_vector(seed,len(pin_maps["active_names"]),"seed")
+    ref = q.copy() if q_ref is None else finite_vector(q_ref,len(q),"q_ref")
+    if max_iter<1 or pos_tol<=0 or ori_tol<=0 or not np.isfinite(characteristic_length) or characteristic_length<=0:
+        raise ValueError("invalid DLS iteration/tolerances/scale")
+    waist = np.array([n in WAIST_JOINT_NAMES for n in pin_maps["active_names"]])
+    movable = np.ones(len(q),dtype=bool) if fixed_joint_mask is None else ~np.asarray(fixed_joint_mask,dtype=bool)
+    if movable.shape != q.shape:
+        raise ValueError("fixed mask shape mismatch")
+    lo,hi = _build_effective_bounds(lower,upper,ref,waist,virtual_half_windows)
+    q = np.minimum(np.maximum(q,lo),hi)  # search seed only, never observed state
+    gain = NULLSPACE_GAIN if nullspace_gain is None else float(nullspace_gain)
+    waist_gain = WAIST_NULL_GAIN if waist_null_gain is None else float(waist_null_gain)
+    ns_gain = np.where(waist,waist_gain,gain)
+    com_gain = COM_XY_GAIN if com_xy_gain is None else float(com_xy_gain)
+    lim_gain = JOINT_LIMIT_GAIN if joint_limit_gain is None else float(joint_limit_gain)
+    grav_gain = GRAVITY_TORQUE_GAIN if gravity_torque_gain is None else float(gravity_torque_gain)
+    near_weight = WAIST_TASK_WEIGHT if waist_task_weight is None else float(waist_task_weight)
+    far_weight = WAIST_TASK_WEIGHT_FAR if waist_task_weight_far is None else float(waist_task_weight_far)
+    weights = np.ones(len(q)) if joint_weights is None else finite_vector(joint_weights,len(q),"joint weights")
+    if np.any(weights<=0) or min(gain,waist_gain,com_gain,lim_gain,grav_gain)<0 or min(near_weight,far_weight)<=0:
+        raise ValueError("invalid DLS gain/weight")
+    context = None if load_context is None else dict(load_context)
+    if context is not None and gravity_torque_gain is not None:
+        context["policy"] = replace(context["policy"],absolute_weight=grav_gain)
+    ref_tau,ref_com = None,None
+    if context is not None:
+        ref_physics = load_physics(pin_model,pin_data,pin_maps,ref,context,False)
+        ref_tau,ref_com = ref_physics["tau"],ref_physics["com"]
+    ref_full = active_q_to_pinocchio_q(pin_model,pin_maps,ref)
+    pin.forwardKinematics(pin_model,pin_data,ref_full)
+    pin.updateFramePlacements(pin_model,pin_data)
+    shoulder_id = next((pin_maps["name_to_joint_id"][n] for n in pin_maps["active_names"]
+                        if n not in WAIST_JOINT_NAMES and n.endswith("_Link2")),None)
+    shoulder_ref = None if shoulder_id is None else np.array(pin_data.oMi[shoulder_id].translation,copy=True)
+    if waist_release and waist_max_reach is None:
+        waist_max_reach = estimate_arm_max_reach(pin_model,pin_maps,ee_frame_id)
+    release_enabled = bool(waist_release and include_waist and np.any(waist&movable)
+                           and waist_max_reach and shoulder_ref is not None)
+    def release_fraction(distance):
+        if not release_enabled:
+            return 0.
+        t = np.clip((distance-WAIST_RELEASE_START*waist_max_reach)/
+                    max((WAIST_RELEASE_END-WAIST_RELEASE_START)*waist_max_reach,1e-6),0.,1.)
+        return float(t*t*(3.-2*t))
+    ref_release = release_fraction(np.linalg.norm(target[:3,3]-shoulder_ref)) if release_enabled else 0.
+    diag = {"converged":False,"iters":0,"final_pos_err":np.nan,"final_ori_err":np.nan,
+            "stalled":False,"error_history":[],"stop_reason":"ITERATION_LIMIT",
+            "load_configured":context is not None,"waist_released_for_load":bool(waist_load_release),
+            "antipodal_escape_used":False}
+    best_q,best_merit = q.copy(),math.inf
+    best_pose,best_key = None,None
+    settle = 0
+    def objective(values,derivatives,parts=None):
+        return _compute_nullspace_gradient_and_cost(
+            pin_model,pin_data,active_q_to_pinocchio_q(pin_model,pin_maps,values),
+            values,ref,lower,upper,ns_gain,np.array(pin_maps["active_v_indices"]),
+            pin_maps["effort_limits"],movable,include_waist,ref_tau,ref_com,
+            grav_gain,com_gain,lim_gain,load_context=context,pin_maps=pin_maps,
+            derivatives=derivatives,components=parts)
+    def terms(values,jac=True):
+        return dls_task_terms(pin_model,pin_data,pin_maps,ee_frame_id,values,target,mode,axis,cone,
+                              characteristic_length,jac)
+    def is_pose(t):
+        return t["pos_err"]<=pos_tol and t["ori_violation"]<=ori_tol
+    def pose_key(values,cost):
+        if context is None:
+            return (False,0.,cost)
+        p = load_physics(pin_model,pin_data,pin_maps,values,context,False)
+        return (not p["load_ok"],p["peak_ratio"],cost)
+    for it in range(int(max_iter)):
+        if deadline is not None and time.monotonic()>=deadline:
+            diag["stop_reason"]="TIME_BUDGET"
+            break
+        t = terms(q)
+        parts = {}
+        z,cost = objective(q,True,parts)
+        pose_ok = is_pose(t)
+        diag["iters"]=it+1
+        diag["antipodal_escape_used"] |= t["antipodal"]
+        diag["error_history"].append({"iteration":it+1,"pos_err":t["pos_err"],"ori_err":t["ori_err"],
+                                      "ori_violation":t["ori_violation"]})
+        if t["merit"]<best_merit:
+            best_q,best_merit=q.copy(),t["merit"]
+        if pose_ok:
+            key=pose_key(q,cost)
+            if best_key is None or key<best_key:
+                best_pose,best_key=q.copy(),key
+            settle+=1
+            if settle>MAX_SETTLE_EXTRA_ITERS:
+                diag["stop_reason"]="SETTLE_LIMIT"
+                break
+        D=np.diag(1./weights)
+        if np.any(waist&movable):
+            alpha = 1. if waist_load_release else 0.
+            if release_enabled:
+                pin.forwardKinematics(pin_model,pin_data,active_q_to_pinocchio_q(pin_model,pin_maps,q))
+                current_distance=np.linalg.norm(target[:3,3]-pin_data.oMi[shoulder_id].translation)
+                ret=np.linalg.norm((q-ref)[waist&movable])/max(WAIST_RETURN_RELEASE_RAD,1e-6)
+                alpha=max(alpha,ref_release,release_fraction(current_distance),float(np.clip(ret,0.,1.)))
+            D[np.nonzero(waist)[0],np.nonzero(waist)[0]]=(1-alpha)/near_weight+alpha/far_weight
+        null_weight=(1.5 if pose_ok else 1.)/(1.+(np.linalg.norm(t["error"])/max(NULLSPACE_ERR_SCALE,1e-6))**2)
+        dq,dq_null=_solve_sns_clamped_step(t["J"],t["error"],z,null_weight,D,movable,q,lo,hi,damping,max_step)
+        if np.linalg.norm(dq)<1e-10:
+            diag["stop_reason"]="SMALL_STEP"
+            break
+        attempts=[dq]
+        if not pose_ok and np.linalg.norm(dq_null)>1e-12:
+            pure,_=_solve_sns_clamped_step(t["J"],t["error"],None,0.,D,movable,q,lo,hi,damping,max_step)
+            attempts.append(pure)
+        accepted=False
+        for direction in attempts:
+            for backtrack in range(int(backtrack_steps)):
+                if deadline is not None and time.monotonic()>=deadline:
+                    break
+                trial=q+(.5**backtrack)*direction
+                if np.any(trial<lo) or np.any(trial>hi):
+                    continue
+                tt=terms(trial,False)
+                if pose_ok:
+                    progress=is_pose(tt) and objective(trial,False)[1]<cost-1e-13
+                elif t["antipodal"]:
+                    progress=(tt["ori_violation"]<t["ori_violation"]-1e-8
+                              and tt["pos_err"]<=t["pos_err"]+pos_tol)
+                else:
+                    progress=is_pose(tt) or tt["merit"]<t["merit"]-max(1e-14,1e-6*t["merit"])
+                if progress:
+                    q=trial
+                    accepted=True
+                    break
+            if accepted:
+                break
+        if not accepted:
+            diag["stalled"]=True
+            diag["stop_reason"]="LINE_SEARCH_STALLED"
+            break
+    last=terms(q,False)
+    if is_pose(last):
+        key=pose_key(q,objective(q,False)[1])
+        if best_key is None or key<best_key:
+            best_pose,best_key=q.copy(),key
+    elif last["merit"]<best_merit:
+        best_q=q.copy()
+    result=best_pose if best_pose is not None else best_q
+    periodic=pin_maps.get("active_periodic",pin_maps["active_continuous"])
+    result=finite_vector(seed,len(result),"seed")+joint_difference(result,seed,periodic)
+    final=terms(result,False)
+    parts={}
+    objective(result,False,parts)
+    diag.update(converged=is_pose(final),final_pos_err=final["pos_err"],final_ori_err=final["ori_err"],
+                final_ori_violation=final["ori_violation"],secondary_components=parts)
+    if context is not None:
+        p=load_physics(pin_model,pin_data,pin_maps,result,context,False)
+        diag.update(final_peak_ratio=p["peak_ratio"],final_load_ok=p["load_ok"])
+    return result.copy(),diag
+
+
+def evaluate_pose_physics(pin_model,pin_data,pin_maps,q_active,q_ref=None):
+    """Legacy keys retained; raw URDF ratios are explicitly labelled, not ratings."""
+    q_active=finite_vector(q_active,len(pin_maps["active_names"]),"active q")
+    full=active_q_to_pinocchio_q(pin_model,pin_maps,q_active)
+    tau=np.array(pin.computeGeneralizedGravity(pin_model,pin_data,full),copy=True)[pin_maps["active_v_indices"]]
+    effort=pin_maps["effort_limits"]
+    ratio=np.full(tau.shape,np.nan)
+    valid=np.isfinite(effort)&(effort>0)
+    ratio[valid]=100.*np.abs(tau[valid])/effort[valid]
+    if pin_maps.get("mass_points"):
+        com,_=model_com_with_jacobian(pin_model,pin_data,full,pin_maps["mass_points"],
+                                      pin_maps["active_v_indices"],False)
+        mass=pin_maps["model_mass_kg"]
+    else:
+        com=np.array(pin.centerOfMass(pin_model,pin_data,full),copy=True)
+        mass=float(pin_data.mass[0])
+    g=np.asarray(pin_model.gravity.linear,dtype=float)
+    ghat=g/max(np.linalg.norm(g),1e-30)
+    horizontal=(np.eye(3)-np.outer(ghat,ghat))@com
+    diff=np.zeros(len(q_active)) if q_ref is None else joint_difference(
+        q_active,q_ref,pin_maps.get("active_periodic",pin_maps["active_continuous"]))
+    return {
+        "tau_g_nm":tau,"tau_norm_nm":float(np.linalg.norm(tau)),
+        "motor_load_pct":ratio,"max_motor_load_pct":float(np.max(ratio)) if np.all(valid) else np.nan,
+        "effort_basis":pin_maps.get("effort_basis","URDF reference, not confirmed continuous rating"),
+        "com_xyz_m":com,"model_mass_kg":mass,"com_xy_offset_mm":float(np.linalg.norm(horizontal)*1000.),
+        "overturning_moment_nm":float(np.linalg.norm(np.cross(com,mass*g))),
+        "moment_definition":"static gravity moment about model root, NOT support-edge safety margin",
+        "posture_drift_deg":float(np.rad2deg(np.linalg.norm(diff))),
+        "full_state_available":"q_template" in pin_maps,
+        "model_audit_errors":pin_maps.get("model_audit_errors",["not audited"]),
+    }

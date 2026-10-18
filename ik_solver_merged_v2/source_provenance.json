@@ -1,0 +1,30 @@
+{
+  "release": "merged-v2",
+  "original_source_page": "https://app.notion.com/p/3fbc0b8bbc68806f9067f71a8f678bd9",
+  "robot_model_reference_page": "https://app.notion.com/p/3fcc0b8bbc68801eaa6ce313cb831834",
+  "files": {
+    "solver.py": {
+      "original_sha256": "73d70dd8881d2d05eab57b745a12e3c171af4191a40a26291572d37b163ad277",
+      "merged_sha256": "aa2eb8db622386d28da209958712db77a40466082fdfd251d172c43a2f027698",
+      "original_lines": 2169,
+      "merged_lines": 2338
+    },
+    "solver_dls.py": {
+      "original_sha256": "0a4206b79d37241a882b175c06ceb7064b4deae6104a70dfd0ec19e22f7daafa",
+      "merged_sha256": "9a32c9719b3a11bf1b4a17410bfd48231c10db3a1548b5a69a59e80979b206b2",
+      "original_lines": 809,
+      "merged_lines": 966
+    }
+  },
+  "modified_original_notion_page": false,
+  "deployed_to_user_machine": false,
+  "production_replacements_only": [
+    "ha_arm_ik/solver.py",
+    "ha_arm_ik/solver_dls.py"
+  ],
+  "missing_actual_modules": [
+    "ha_arm_ik.ik_common",
+    "ha_arm_ik.ik_candidate"
+  ],
+  "test_stubs_not_for_installation": true
+}
