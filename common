@@ -1,0 +1,355 @@
+"""共享几何、校验、限位与周期分支工具。
+
+本模块刻意保持与具体求解solver无关，只依赖 NumPy/SciPy。求解器可以基于它实现，
+但这里不得反向导入求解器后端。
+"""
+import math
+
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+
+
+TOOL_AXIS_X = np.array([1.0, 0.0, 0.0], dtype=float)
+TOOL_CONE_HALF_ANGLE = np.deg2rad(30.0)
+ORIENTATION_MODES = ("full", "tool_dir", "tool_cone")
+POS_TOL = 5e-4
+ORI_TOL = 5e-4
+SAFE_MARGIN = 0.02
+
+def normalize(v, eps=1e-12):
+    """返回单位向量；拒绝模长小于 ``eps`` 的向量。"""
+    v = np.asarray(v, dtype=float)
+    n = np.linalg.norm(v)
+    if n < eps:
+        raise ValueError("zero norm vector")
+    return v / n
+
+def pose_error(T_current, T_target):
+    """
+    6 维位姿残差：
+      dp = 当前位置 - 目标位置
+      drot = log(R_target.T @ R_current)
+    """
+    dp = T_current[:3, 3] - T_target[:3, 3]
+    R_err = T_target[:3, :3].T @ T_current[:3, :3]
+    rotvec = R.from_matrix(R_err).as_rotvec()
+    return dp, rotvec
+
+
+def skew(v):
+    """返回 3x3 反对称矩阵，满足 ``skew(a) @ b = a x b``。"""
+    v = np.asarray(v, dtype=float)
+    return np.array([
+        [0.0, -v[2], v[1]],
+        [v[2], 0.0, -v[0]],
+        [-v[1], v[0], 0.0],
+   ], dtype=float)
+
+
+def validate_orientation_mode(orientation_mode):
+    """校验并归一化姿态代价模式。"""
+    orientation_mode = str(orientation_mode).lower()
+
+    if orientation_mode not in ORIENTATION_MODES:
+        raise ValueError(
+            f"Unknown orientation_mode: {orientation_mode}. "
+           f"Expected one of {ORIENTATION_MODES}"
+        )
+
+    return orientation_mode
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
