@@ -1,0 +1,38 @@
+{
+ "near_full": {
+  "success": "40/40",
+  "median_ms": 54.0,
+  "p90_ms": 96.2,
+  "mean_peak": 0.1239,
+  "jump_gt_pi": 0,
+  "max_jump": 1.11,
+  "fail_codes": []
+ },
+ "far_full": {
+  "success": "60/60",
+  "median_ms": 95.7,
+  "p90_ms": 189.0,
+  "mean_peak": 0.0784,
+  "jump_gt_pi": 0,
+  "max_jump": 2.86,
+  "fail_codes": []
+ },
+ "far_tool_dir": {
+  "success": "50/50",
+  "median_ms": 104.6,
+  "p90_ms": 271.7,
+  "mean_peak": 0.0685,
+  "jump_gt_pi": 0,
+  "max_jump": 2.93,
+  "fail_codes": []
+ },
+ "far_tool_cone": {
+  "success": "50/50",
+  "median_ms": 148.5,
+  "p90_ms": 204.6,
+  "mean_peak": 0.0728,
+  "jump_gt_pi": 0,
+  "max_jump": 2.98,
+  "fail_codes": []
+ }
+}

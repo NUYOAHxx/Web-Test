@@ -1,0 +1,368 @@
+--- baseline/solver_user_v5.py	2026-10-20 18:42:40.967574610 +0000
++++ ha_arm_ik/solver.py	2026-10-20 18:55:45.657573432 +0000
+@@ -1,16 +1,25 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""ha_arm_ik.solver -- merged-v5, original HAArmIKSolver entry.
++"""ha_arm_ik.solver -- merged-v6, original HAArmIKSolver entry.
++
++候选解的约束与择优（与 solver_dls.py 文件头的约束分层一致）：
++  1. 硬约束过滤：位姿达标、有效限位内、静态负荷 <= 容许值（strict）、单关节跳变 <= max_joint_jump_rad
++  2. 负荷峰值容差带：在最低峰值 + peak_tie 以内的候选视为同档
++  3. 同档内交给原 ik_candidate.select_best_candidate（连续性 / 标准姿态 / 限位裕度 / 腰部回中）
+ 
+ 核心特性：
+-  1. 严格模式下，若调用方未显式传入 q_prev，自动使用通过新鲜度校验的实测活动关节状态作为默认分支与连续性参考。
+-  2. 区分“候选解 2πk 等价分支对齐/去重”与“零空间物理坐标回中”，所有分支选择函数均显式传入基于 URDF 关节类型的 multi_turn_mask。
++  1. 严格模式下，若调用方未显式传入 q_prev，自动使用通过新鲜度校验的实测活动关节状态作为默认分支与连续性参考
++     （路点序列请显式传 q_prev = 上一个路点的解）。
++  2. 区分“候选解 2πk 等价分支对齐/去重”与“零空间物理坐标回中”，分支选择显式传入基于 URDF 关节类型的 multi_turn_mask。
+   3. 显式配置的虚拟搜索窗口 (dls_virtual_half_windows) 在迭代、分支选择与最终候选检查中保持统一的硬约束语义。
+   4. 拆分严格负荷预算 (load_budget_s) 与普通 IK 求解预算 (solve_budget_s)。
++  5. v6：不绕大圈硬约束 (max_joint_jump_rad / joint_jump_policy)；失败码区分“无候选/种子异常/位姿不可达/
++     跳变超限/负荷超限”；种子异常写入诊断而不再被误报为负荷问题。
+ """
+ 
+ from collections import defaultdict, deque
++from collections.abc import Mapping
+ from enum import Enum
+ import math
+ from pathlib import Path
+@@ -193,6 +202,20 @@
+ 
+ PIN_TOP_K_FOR_DIRECT = 15
+ RNG_SEED = 120
++MAX_JOINT_JUMP_RAD = np.pi  # 默认“绕大圈”阈值：单关节相对 q_prev 超过半圈即视为绕大圈
++JOINT_JUMP_POLICIES = ("reject", "prefer")
++
++
++def joint_jump_metrics(q, q_prev, periodic_mask, jump_limits):
++    """单关节相对 q_prev 的位移（物理坐标差，仅无界 continuous 关节折叠到 [-π, π)）。
++
++    候选在此之前已对齐到最接近 q_prev 的合法 2πk 分支，所以这里的差值就是执行时的真实转动量。
++    返回 (最大位移 rad, 最大位移所在关节下标, 是否全部 <= jump_limits)。jump_limits 为 None 表示不限。
++    """
++    d = np.abs(joint_difference(q, q_prev, periodic_mask))
++    i = int(np.argmax(d)) if d.size else 0
++    ok = True if jump_limits is None else bool(np.all(d <= jump_limits + 1e-9))
++    return (float(d[i]) if d.size else 0.0), i, ok
+ 
+ 
+ def unique_add(solutions, q, tol=1e-4):
+@@ -1065,15 +1088,24 @@
+     *,
+     load_search=None,
+ ):
+-    """执行多 seed DLS 搜索：统一虚拟窗口边界、显式 multi_turn_mask 分支对齐与严格负荷早停比较。"""
++    """执行多 seed DLS 搜索：统一虚拟窗口边界、显式 multi_turn_mask 分支对齐与严格负荷早停比较。
++
++    种子顺序（见 make_scatter_seeds）：[锁腰种子] -> q_prev -> q_ready -> 扰动种子。
++    每个候选对齐到最接近 q_prev 的 2πk 分支后记录单关节跳变；早停只认“跳变不超限”的候选。
++    """
+     params = dict(dls_params or {})
+     search = dict(load_search or {})
+     context = params.get("load_context")
+     strict = context is not None
++    jump_limits = search.get("max_joint_jump")
++    periodic = pin_maps.get("active_periodic", pin_maps["active_continuous"])
+ 
++    # 早停规则：至少试 min_seeds 个种子（其中 >= min_unlocked 个不锁腰）且已有“低负荷”候选
++    # （峰值 <= early_stop_ratio、跳变不超限、限位裕度足够）即停止；否则继续找更低负荷的解。
++    # v6 默认 2/1 = [锁腰种子, q_prev]：基准中与旧默认 3/2 选出的解相同，耗时少约 35~40%。
+     max_seeds = int(search.get("max_seeds", 10))
+-    min_seeds = int(search.get("min_seeds", 3))
+-    min_unlocked = int(search.get("min_unlocked", 2))
++    min_seeds = int(search.get("min_seeds", 2))
++    min_unlocked = int(search.get("min_unlocked", 1))
+     if min(max_seeds, min_seeds, min_unlocked) < 1 or min_seeds > max_seeds:
+         raise ValueError("invalid load search seed counts")
+     if include_waist and max_seeds < min_unlocked + 1:
+@@ -1114,6 +1146,7 @@
+     )
+ 
+     candidates, per_seed, unique = [], [], []
++    seed_errors, first_seed_error = 0, None
+     unlocked = 0
+     released = False
+     stop = "SEED_LIMIT"
+@@ -1180,6 +1213,14 @@
+                 seed_used=seed_idx,
+                 converged=bool(diag["converged"]),
+             )
++            jump_max, jump_idx, jump_ok = joint_jump_metrics(
++                q, q_prev, periodic, jump_limits
++            )
++            info.update(
++                joint_jump_max_rad=jump_max,
++                joint_jump_joint=pin_maps["active_names"][jump_idx],
++                joint_jump_ok=jump_ok,
++            )
+ 
+             if strict:
+                 physical = load_physics(
+@@ -1217,6 +1258,8 @@
+                     "fixed_waist": fixed is not None,
+                     "pose_ok": bool(info["pose_ok"]),
+                     "margin": float(info["margin"]),
++                    "joint_jump_max_rad": jump_max,
++                    "joint_jump_ok": jump_ok,
+                     "duplicate": duplicate,
+                     "elapsed_ms": (time.monotonic() - started) * 1000.0,
+                 }
+@@ -1228,6 +1271,7 @@
+                     for c in candidates
+                     if c.get("pose_ok")
+                     and c.get("load_ok")
++                    and c.get("joint_jump_ok", True)
+                     and c.get("margin", -np.inf) >= SAFE_MARGIN
+                 ]
+                 if (
+@@ -1241,12 +1285,17 @@
+                     break
+             elif (
+                 info.get("pose_ok")
++                and info.get("joint_jump_ok", True)
+                 and info.get("margin", -np.inf) >= SAFE_MARGIN
+                 and seed_idx >= 1
+             ):
+                 stop = "LEGACY_POSE_EARLY_STOP"
+                 break
+         except Exception as exc:
++            # 种子异常不中断搜索，但必须可见：计数并保留首个异常，失败时写入失败码详情
++            seed_errors += 1
++            if first_seed_error is None:
++                first_seed_error = f"{type(exc).__name__}: {exc}"
+             per_seed.append(
+                 {
+                     "seed_idx": seed_idx,
+@@ -1264,6 +1313,9 @@
+             "unlocked_seeds_attempted": unlocked,
+             "waist_released_for_load": released,
+             "seeds_attempted": len(per_seed),
++            "seed_errors": seed_errors,
++            "first_seed_error": first_seed_error,
++            "candidates": len(candidates),
+         }
+ 
+     sorted_candidates = sorted(candidates, key=candidate_sort_key)
+@@ -1400,7 +1452,7 @@
+         self._solve_T_root_base = None
+         self._load_deadline = None
+         self.last_load_diagnostics = {
+-            "version": "merged-v5",
++            "version": "merged-v6",
+             "accepted": False,
+             "mode": self.load_mode,
+             "code": "NOT_RUN",
+@@ -1600,6 +1652,14 @@
+             dtype=bool,
+         )
+ 
++        # H4 不绕大圈：单关节相对 q_prev 的最大允许转动量（详见 _resolve_joint_jump_limits）
++        self.joint_jump_policy = str(cfg_tune.get("joint_jump_policy", "reject"))
++        if self.joint_jump_policy not in JOINT_JUMP_POLICIES:
++            raise ValueError(f"joint_jump_policy must be one of {JOINT_JUMP_POLICIES}")
++        self.max_joint_jump = self._resolve_joint_jump_limits(
++            cfg_tune.get("max_joint_jump_rad", MAX_JOINT_JUMP_RAD)
++        )
++
+         try:
+             self.psi_ready = float(self.chain.psi(self.q_ready))
+         except Exception:
+@@ -1681,6 +1741,101 @@
+         if self.verbose:
+             self.print_info()
+ 
++    def _resolve_joint_jump_limits(self, value):
++        """解析 max_joint_jump_rad：None = 不限；正标量 = 所有关节同一上限；
++        {关节名: rad 或 None} = 逐关节设置，未列出的关节取默认 MAX_JOINT_JUMP_RAD（π）。"""
++        if value is None:
++            return None
++        names = self.active_joint_names
++        if isinstance(value, Mapping):
++            unknown = set(value) - set(names)
++            if unknown:
++                raise ValueError(f"max_joint_jump_rad has unknown joints: {sorted(unknown)}")
++            limits = np.array(
++                [
++                    np.inf if value.get(n, MAX_JOINT_JUMP_RAD) is None
++                    else float(value.get(n, MAX_JOINT_JUMP_RAD))
++                    for n in names
++                ],
++                dtype=float,
++            )
++        else:
++            limits = np.full(len(names), float(value), dtype=float)
++        if np.any(np.isnan(limits)) or np.any(limits <= 0.0):
++            raise ValueError("max_joint_jump_rad must be positive (or None)")
++        return limits
++
++    def _periodic_mask(self):
++        """无界 continuous 关节（仅这些关节的角度差折叠到 [-π, π)）。"""
++        return ~np.isfinite(self.lower) & ~np.isfinite(self.upper)
++
++    def _apply_joint_jump_policy(self, candidates, q_prev):
++        """H4 不绕大圈：为所有候选（含 SSIK / direct-psi）补算单关节跳变并按策略过滤。
++
++        reject（默认）：任一关节跳变超限的候选一律剔除；
++        prefer：存在不超限的位姿达标候选时只用它们，否则保留全部并在诊断中标记。
++        返回 (保留的候选, 因跳变被剔除的位姿达标候选数)。
++        """
++        periodic = self._periodic_mask()
++        for c in candidates:
++            if c is not None and "q" in c:
++                jmax, jidx, ok = joint_jump_metrics(
++                    c["q"], q_prev, periodic, self.max_joint_jump
++                )
++                c.update(
++                    joint_jump_max_rad=jmax,
++                    joint_jump_joint=self.active_joint_names[jidx],
++                    joint_jump_ok=ok,
++                )
++        self.last_load_diagnostics.update(
++            joint_jump_policy=self.joint_jump_policy,
++            joint_jump_limit_rad=None
++            if self.max_joint_jump is None
++            else dict(zip(self.active_joint_names, self.max_joint_jump.tolist())),
++        )
++        if self.max_joint_jump is None:
++            return candidates, 0
++        kept = [c for c in candidates if c.get("joint_jump_ok", True)]
++        rejected_pose = sum(
++            1
++            for c in candidates
++            if not c.get("joint_jump_ok", True) and c.get("pose_ok")
++        )
++        if self.joint_jump_policy == "prefer" and not any(
++            c.get("pose_ok") for c in kept
++        ):
++            kept = list(candidates)
++        self.last_load_diagnostics["joint_jump_rejected"] = len(candidates) - len(kept)
++        return kept, rejected_pose
++
++    def _classify_empty_pool(self, n_raw, jump_rejected_pose, per_seed):
++        """没有任何候选通过硬约束时给出准确失败码，避免把“没算出来”误报成“负荷超限”。"""
++        errors = [s["exception"] for s in (per_seed or []) if "exception" in s]
++        search = (self._load_context or {}).get("search_diagnostics", {})
++        if n_raw == 0:
++            if errors:
++                return "SEED_ERRORS", f"all {len(errors)} seeds raised; first: {errors[0]}"
++            if search.get("stop_reason") == "TIME_BUDGET":
++                return "SEARCH_TIME_BUDGET", "budget exhausted before any seed produced a candidate"
++            return "NO_CANDIDATE", "no seed produced a candidate"
++        if self.last_load_diagnostics.get("pose_valid_count", 0) == 0:
++            if jump_rejected_pose:
++                return (
++                    "JOINT_JUMP_LIMIT",
++                    f"{jump_rejected_pose} pose-valid candidates exceed max_joint_jump_rad "
++                    "relative to q_prev (would rotate a joint the long way round); "
++                    "use an intermediate waypoint or raise the limit",
++                )
++            note = f"; {len(errors)} seeds raised, first: {errors[0]}" if errors else ""
++            return (
++                "NO_VALID_POSE_OR_PHYSICS",
++                "no candidate reached the target pose within tolerance" + note,
++            )
++        return (
++            "NO_LOAD_SAFE_SOLUTION",
++            "No candidate passed bounds and confirmed static-load gates",
++        )
++
+     def _check_model(self):
+         if self.pin_maps is not None:
+             missing = [
+@@ -2082,11 +2237,12 @@
+                             "load_max_seeds", 10
+                         ),
+                         "min_seeds": self._load_config.get(
+-                            "load_min_seeds", 3
++                            "load_min_seeds", 2
+                         ),
+                         "min_unlocked": self._load_config.get(
+-                            "load_min_unlocked_seeds", 2
++                            "load_min_unlocked_seeds", 1
+                         ),
++                        "max_joint_jump": self.max_joint_jump,
+                     },
+                 )
+             )
+@@ -2191,7 +2347,15 @@
+         update_prev,
+         allow_approximate,
+     ):
+-        """执行严格负荷门控、力矩指标注入、最优候选选择及受负荷门控约束的近似回退。"""
++        """硬约束过滤 -> 负荷峰值容差带 -> 原 select_best_candidate 择优 -> 受门控约束的近似回退。
++
++        硬约束顺序：单关节跳变（不绕大圈）-> 有效限位 + 位姿复核 + 静态负荷（strict）。
++        跳变过滤放在负荷容差带之前，否则容差带可能只剩“负荷略低但要绕大圈”的候选。
++        """
++        n_raw = len(candidates)
++        candidates, jump_rejected_pose = self._apply_joint_jump_policy(
++            candidates, q_prev
++        )
+         strict_load_safe_pool = []
+         if self.load_mode == "strict":
+             error = self._load_snapshot_error()
+@@ -2211,17 +2375,16 @@
+                 if allow_approximate and strict_load_safe_pool:
+                     candidates = strict_load_safe_pool
+                 else:
+-                    code = (
+-                        "NO_LOAD_SAFE_SOLUTION"
+-                        if self.last_load_diagnostics.get("pose_valid_count", 0)
+-                        or len(strict_load_safe_pool) == 0
+-                        else "NO_VALID_POSE_OR_PHYSICS"
+-                    )
+-                    return self._load_failure(
+-                        code,
+-                        "No candidate passed bounds and confirmed static-load gates",
+-                        per_seed,
++                    code, detail = self._classify_empty_pool(
++                        n_raw, jump_rejected_pose, per_seed
+                     )
++                    return self._load_failure(code, detail, per_seed)
++        elif jump_rejected_pose and not any(c.get("pose_ok") for c in candidates):
++            # load_mode="off"：位姿达标的候选全部因跳变超限被剔除
++            code, detail = self._classify_empty_pool(
++                n_raw, jump_rejected_pose, per_seed
++            )
++            return self._load_failure(code, detail, per_seed)
+ 
+         if self.use_torque_cost and len(candidates) > 0:
+             add_torque_metrics_to_candidates(
+@@ -2238,6 +2401,13 @@
+             use_torque=self.use_torque_cost,
+         )
+ 
++        if best is not None and "joint_jump_max_rad" in best:
++            self.last_load_diagnostics.update(
++                joint_jump_max_rad=best["joint_jump_max_rad"],
++                joint_jump_joint=best["joint_jump_joint"],
++                joint_jump_ok=best["joint_jump_ok"],
++            )
++
+         if best is not None:
+             best["solve_engine"] = "dls"
+             best["target_frame"] = frame
+@@ -2373,9 +2543,11 @@
+         failure_reason = None
+         if best is None:
+             failure_reason = FailureReason.SEEDS_EXHAUSTED
++            errors = [s["exception"] for s in (per_seed or []) if "exception" in s]
+             failure_detail = (
+                 "no candidate survived any solve pass "
+                 "(seed chain empty or all engines raised)"
++                + (f"; {len(errors)} seeds raised, first: {errors[0]}" if errors else "")
+             )
+         else:
+             failure_reason = FailureReason.NOT_CONVERGED
+@@ -2753,7 +2925,7 @@
+         old_prev = self.q_prev.copy()
+         try:
+             self.last_load_diagnostics = {
+-                "version": "merged-v5",
++                "version": "merged-v6",
+                 "mode": self.load_mode,
+                 "accepted": False,
+                 "protection_enabled": self.load_mode == "strict",

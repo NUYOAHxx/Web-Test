@@ -1,0 +1,32 @@
+{
+  "python": "3.13.14",
+  "numpy": "2.5.4",
+  "scipy": "1.18.1",
+  "pinocchio": "4.1.0",
+  "tests_run": 90,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "successful": true,
+  "test_counts_by_module": {
+    "test_contract_flow": 31,
+    "test_pinocchio_numeric": 18,
+    "test_policy_state": 25,
+    "test_v6_constraints": 16
+  },
+  "real_pinocchio_used": true,
+  "synthetic_urdf_only": true,
+  "actual_robot_model_source_used": true,
+  "test_doubles": [
+    "ha_arm_ik.ik_common",
+    "ha_arm_ik.ik_candidate"
+  ],
+  "user_ik_candidate_implementation_tested": false,
+  "user_ik_common_implementation_tested": false,
+  "user_urdf_tested": false,
+  "user_full_project_tested": false,
+  "ros2_jazzy_tested": false,
+  "moveit_tested": false,
+  "hardware_tested": false,
+  "python_3_12_check": "syntax only; runtime used Python 3.13.14"
+}
