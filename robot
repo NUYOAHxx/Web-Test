@@ -32,17 +32,8 @@ ARM_CONFIGS = {
         "w_joint": "LHand_Link6",
         "mount_xyz": np.array([0.0, 0.0, 0.5087]),
         "mount_rpy": np.array([0.0, 0.0, 0.0]),
-        "q_ready": np.array(
-            [
-                0,
-                -1.558843,
-                -3.865597,
-                -1.266221,
-                -2.151839,
-                1.067015,
-                -0.261056,
-            ]
-        ),
+      "q_ready": np.array([-0.523599, -0.785398, 0.0,-0.698132, 0.0, 1.570796, 0.0,]),
+    },
     },
     "right": {
         "base_link": "Body_Link",
