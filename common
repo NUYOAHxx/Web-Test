@@ -57,51 +57,195 @@ def validate_orientation_mode(orientation_mode):
         )
 
     return orientation_mode
+def validate_transform4x4(T, name="T_target"):
+    """校验 4x4 齐次变换，并返回 float ndarray。"""
+    T = np.asarray(T, dtype=float)
+    if T.shape != (4, 4):
+       raise ValueError(f"{name} must be a 4x4 matrix, got shape {T.shape}")
+    if not np.all(np.isfinite(T)):
+        raise ValueError(f"{name} contains non-finite values")
+    return T
+
+def validate_q_vector(q, n, name="q_prev"):
+    """校验关节向量长度，并返回 float ndarray。"""
+    q = np.asarray(q, dtype=float)
+    if q.shape != (n,):
+        raise ValueError(
+           f"{name} must have {n} entries, got shape {q.shape}"
+        )
+    if not np.all(np.isfinite(q)):
+        raise ValueError(f"{name} contains non-finite values")
+    return q
+def normalize_cone_half_angle(cone_half_angle=None):
+    """解析默认锥角半角，并校验其位于 ``(0, pi)``。"""
+    if cone_half_angle is None:
+        cone_half_angle = TOOL_CONE_HALF_ANGLE
+
+    cone_half_angle = float(cone_half_angle)
+
+    if not np.isfinite(cone_half_angle):
+        raise ValueError("cone_half_angle must be finite")
+  if cone_half_angle <= 0.0 or cone_half_angle >= np.pi:
+        raise ValueError(
+            "cone_half_angle must be in radians and within (0, pi)"
+        )
+
+    return cone_half_angle
 
 
+def closest_direction_on_cone(
+    d_current,
+    d_target,
+
+    cone_half_angle=TOOL_CONE_HALF_ANGLE,
+):
+    """
+    返回锥内或锥边界上最接近当前方向的允许方向。
+
+    锥体定义：
+        中心轴 = d_target
+        半锥角 = cone_half_angle
+
+    若 d_current 已在锥内：
+        最近方向 = d_current；violation = 0
+   若在锥外：最近方向在从 d_target 指向 d_current 的大圆方向上，落在锥边界。
+    """
+    d_current = normalize(d_current)
+    d_target = normalize(d_target)
+   cone_half_angle = normalize_cone_half_angle(cone_half_angle)
+
+    c = float(np.clip(np.dot(d_current, d_target), -1.0, 1.0))
+    angle = float(np.arccos(c))
+    violation = max(0.0, angle - cone_half_angle)
+
+    if violation <= 0.0:
+        return d_current.copy(), angle, 0.0, True
+  # 计算垂直于目标轴、指向当前方向的分量。
+    v = d_current - c * d_target
+    n = np.linalg.norm(v)
+
+    if n < 1e-12:
+        # 反向接近时法向分量退化；选择一个稳定的正交方向。
+        tmp = np.array([1.0, 0.0, 0.0], dtype=float)
+        if abs(np.dot(tmp, d_target)) > 0.9:
+            tmp = np.array([0.0, 1.0, 0.0], dtype=float)
+
+        u = normalize(np.cross(d_target, tmp))
+
+    else:
+        u = v / n
+
+    d_boundary = (
+        np.cos(cone_half_angle) * d_target
+        + np.sin(cone_half_angle) * u
+    )
+
+    return normalize(d_boundary), angle, violation, False
 
 
+def clip_to_bounds(q, lower, upper, eps=1e-9):
+    """把 ``q`` 裁剪到 ``[lower + eps, upper - eps]``；不重复校验限位。"""
+    q = np.asarray(q, dtype=float)
+    return np.minimum(np.maximum(q, lower + eps), upper - eps)
 
 
+def wrap_to_pi(x):
+    """把角度归一到 ``[-pi, pi)``。"""
+    return (x + np.pi) % (2.0 * np.pi) - np.pi
 
 
+def joint_dist(q, q_ref):
+    """返回关节空间的普通欧氏距离。"""
+    return float(np.linalg.norm(np.asarray(q) - np.asarray(q_ref)))
 
 
+PERIODIC_MIN_SPAN_RAD = 2.0 * np.pi + 1e-6
+def periodic_capable_mask(lower, upper, min_span_rad=PERIODIC_MIN_SPAN_RAD):
+    """span >= min_span_rad 的关节可在限位内做一次 ±2π 等价平移。"""
+    return (np.asarray(upper, dtype=float)
+            - np.asarray(lower, dtype=float)) >= min_span_rad
 
 
+def joint_difference(q, ref, periodic_mask=None):
+    """逐关节差 q-ref；periodic_mask 关节取 wrap_to_pi 短弧差，其余普通差。"""
+    q = np.asarray(q, dtype=float)
+    ref = np.asarray(ref, dtype=float)
+    diff = q - ref
+    if periodic_mask is not None and np.any(periodic_mask):
+        diff = np.where(
+            np.asarray(periodic_mask, dtype=bool), wrap_to_pi(diff), diff)
+    return diff
 
+def joint_dist_periodic(q, ref, periodic_mask=None):
+    """在可选短弧归一后返回关节空间距离。"""
+    return float(np.linalg.norm(joint_difference(q, ref, periodic_mask)))
 
+def select_closest_bounded_branch(q, reference, lower, upper,
+                                  multi_turn_mask=None):
+    """在满足 lower <= q + 2πk <= upper (k ∈ Z) 的合法同伦分支中，
+    为 multi_turn_mask 中的关节选择最接近 reference 的等价关节角。
+   有限限位关节在合法 k 区间内精确搜索并把候选 clip 回 [lower, upper]；
+    双侧无界关节按 reference 对齐 wrap。multi_turn_mask 为 None 时绝不根据
+    限位跨度猜测周期性（直接返回原值拷贝），防止对无界或大跨度 prismatic
+    平移关节误执行模 2π 运算。
+    """
+    q_arr = np.asarray(q, dtype=float)
+    if q_arr.ndim != 1 or not np.all(np.isfinite(q_arr)):
+        raise ValueError("q: expected a finite 1-D vector")
+    ref_arr = np.asarray(reference, dtype=float)
+    if ref_arr.shape != q_arr.shape or not np.all(np.isfinite(ref_arr)):
+        raise ValueError("reference: expected a finite vector matching q")
+    if multi_turn_mask is None:
+        return q_arr.copy()   
+    mask = np.asarray(multi_turn_mask, dtype=bool)
+    if mask.shape != q_arr.shape:
+        raise ValueError("multi_turn_mask shape mismatch")
+    if not np.any(mask):
+       return q_arr.copy()
 
+    lo = np.asarray(lower, dtype=float)
+    hi = np.asarray(upper, dtype=float)
+    out = q_arr.copy()
+   two_pi = 2.0 * np.pi
+    eps = 1e-9
 
+    for i in np.nonzero(mask)[0]:
+        qi = float(q_arr[i])
+        ri = float(ref_arr[i])
+        li = float(lo[i])
+        ui = float(hi[i])
 
+        if not np.isfinite(li) and not np.isfinite(ui):
+            out[i] = ri + ((qi - ri + np.pi) % two_pi - np.pi)
+            continue
 
+        k_min = (
+            math.ceil((li - eps - qi) / two_pi)
+            if np.isfinite(li)
+            else round((ri - qi) / two_pi) - 2
+        )
+        k_max = (
+            math.floor((ui + eps - qi) / two_pi)
+            if np.isfinite(ui)
+           else round((ri - qi) / two_pi) + 2
+        )
 
+        best_val = qi
+        best_dist = abs(qi - ri) if (li - eps <= qi <= ui + eps) else math.inf
+        for k in range(int(k_min), int(k_max) + 1):
+            cand = qi + k * two_pi
+            if li - eps <= cand <= ui + eps:
+                cand_clipped = float(np.clip(cand, li, ui))
+                dist = abs(cand_clipped - ri)
+                if dist < best_dist - 1e-12:
+                 best_dist = dist
+                    best_val = cand_clipped
+        out[i] = best_val
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    return out
+def bounded_joint_difference(a, b, lower, upper, multi_turn_mask=None):
+    """在考虑有限限位内合法 2πk 等价分支的前提下，计算 a 相对于 b 的
+    最小等价差（用于候选解去重）。"""
 
 
 
