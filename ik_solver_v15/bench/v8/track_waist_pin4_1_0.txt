@@ -1,0 +1,12 @@
+ik_solver_v7 {"dls_max_iter": 500, "load_budget_s": 2.0, "load_max_seeds": 10}
+  ok 239/239  step max 2.468 p99 0.543 >0.3: 4  fallback 0  regime {None: 239}
+  pitch [-1.486, +0.189]  target pitch [-1.440, +0.360]  ms mean 13.2
+ik_solver_v8 {"dls_max_iter": 500, "load_budget_s": 2.0, "load_max_seeds": 10}
+  ok 239/239  step max 2.470 p99 0.543 >0.3: 4  fallback 0  regime {'continuation': 239}
+  pitch [-1.486, +0.189]  target pitch [-1.440, +0.360]  ms mean 13.0
+ik_solver_v7 {"dls_max_iter": 500, "load_budget_s": 2.0, "load_max_seeds": 10, "max_joint_jump_rad": 0.25}
+  ok 239/239  step max 0.061 p99 0.060 >0.3: 0  fallback 0  regime {None: 239}
+  pitch [-1.486, +0.188]  target pitch [-1.440, +0.360]  ms mean 12.8
+ik_solver_v8 {"dls_max_iter": 500, "load_budget_s": 2.0, "load_max_seeds": 10, "max_joint_jump_rad": 0.25}
+  ok 239/239  step max 0.061 p99 0.060 >0.3: 0  fallback 0  regime {'continuation': 239}
+  pitch [-1.486, +0.188]  target pitch [-1.440, +0.360]  ms mean 12.5

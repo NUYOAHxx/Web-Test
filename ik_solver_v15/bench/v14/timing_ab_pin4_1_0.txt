@@ -1,0 +1,8 @@
+[two_arm] q identical v13 vs v14 (both rounds): True
+  v13 solved 400/400  mean 38.8  median 29.8  p90 70.7  max 406  rounds mean 43.9 / 33.6
+  v14 solved 400/400  mean 37.2  median 27.9  p90 66.8  max 345  rounds mean 39.7 / 34.7
+  paired ratio v14/v13: median 1.000  mean-of-means 0.959
+[wide] q identical v13 vs v14 (both rounds): True
+  v13 solved 400/400  mean 36.3  median 26.4  p90 69.2  max 185  rounds mean 37.6 / 35.1
+  v14 solved 400/400  mean 36.8  median 27.0  p90 71.6  max 174  rounds mean 38.5 / 35.0
+  paired ratio v14/v13: median 0.997  mean-of-means 1.012

@@ -1,0 +1,262 @@
+--- dual-p2/tests/test_dual_arm_ik.py
++++ v15/tests/test_dual_arm_ik.py
+@@ -360,17 +360,36 @@
+         self.assertEqual(status, D.SUCCESS, str(res))
+         np.testing.assert_array_equal(q[D.LEFT], q0[D.LEFT])
+         self.assertPoseOk(q, TR, "right")
+-        # None：不约束左手，只回中
++        # None = "hold"（dual-p2.1 默认）：结果与显式 "hold" 逐位相同
++        q_hold = self.s.solve("hold", TR, q_prev=q0)[0]
+         q, status, res = self.s.solve(None, TR, q_prev=q0)
+         self.assertEqual(status, D.SUCCESS, str(res))
++        np.testing.assert_array_equal(q, q_hold)
++        self.assertEqual(res["targets"], {"left": "hold", "right": "pose"})
++        # "free"：不约束左手，只回中
++        q, status, res = self.s.solve("free", TR, q_prev=q0)
++        self.assertEqual(status, D.SUCCESS, str(res))
+         self.assertPoseOk(q, TR, "right")
+         self.assertIsNone(res["left"]["pos_err"])
+         self.assertEqual(res["targets"]["left"], "free")
+-        # 至少一只手要有位姿 / hold 目标
+-        for args in ((None, None), ("keep", "keep"), ("keep", None)):
+-            with self.assertRaises(ValueError):
+-                self.s.solve(*args)
+-        with self.assertRaises(ValueError):
++        # ("keep", None)：左臂关节不动、右手保持位姿（None = "hold"）
++        _, TR_prev = self.s.fk(q0)
++        q, status, res = self.s.solve("keep", None, q_prev=q0)
++        self.assertEqual(status, D.SUCCESS, str(res))
++        np.testing.assert_array_equal(q[D.LEFT], q0[D.LEFT])
++        self.assertPoseOk(q, TR_prev, "right")
++        self.assertEqual(res["targets"], {"left": "keep", "right": "hold"})
++        # ("hold", "hold") 允许：两手都不动，q_prev 已是解 -> 原样返回
++        q, status, res = self.s.solve("hold", "hold", q_prev=q0)
++        self.assertEqual(status, D.SUCCESS, str(res))
++        np.testing.assert_array_equal(q, q0)
++        # 两只都是 None 报错；至少一只手要有位姿 / hold 目标
++        with self.assertRaisesRegex(ValueError, "both None"):
++            self.s.solve(None, None, q_prev=q0)
++        for args in (("keep", "keep"), ("keep", "free"), ("free", "free"), ("FREE", "keep")):
++            with self.assertRaisesRegex(ValueError, "at least one hand"):
++                self.s.solve(*args, q_prev=q0)
++        with self.assertRaisesRegex(ValueError, "'free' or None"):
+             self.s.solve("grab", TR)
+ 
+     def test_orientation_modes(self):
+@@ -552,8 +571,8 @@
+         self.assertIsNone(q)
+         self.assertEqual(status, D.OUTSIDE_WORKSPACE)
+         self.assertEqual(res.failure_reason, D.NOT_JOINTLY_REACHABLE)
+-        # 每只手单独都能解
+-        for args in ((TL, None), (None, TR)):
++        # 每只手单独都能解（另一只手 "free"；None 现在是 "hold"）
++        for args in ((TL, "free"), ("free", TR)):
+             self.s.reset_prev()
+             self.assertEqual(self.s.solve(*args)[1], D.SUCCESS)
+ 
+@@ -577,8 +596,11 @@
+         self.assertTrue(lib.jointly_outside(c + half * u, rl, c - half * u, rr))
+ 
+     def test_not_jointly_reachable_by_diagnosis(self):
+-        # 预检判不出来时（模拟），由搜索 + 失败诊断给出 NOT_JOINTLY_REACHABLE，且在预算内结束
+-        s = _solver({"time_budget_s": 0.1})
++        # 预检判不出来时（模拟），由搜索 + 失败诊断给出 NOT_JOINTLY_REACHABLE，且在预算内结束。
++        # 预算 0.3 s（诊断窗口 = 预算的 17%）：0.1 s 时诊断窗口只有 17 ms，机器慢或有 CPU 争用时会来不及做完
++        # （结果是 TIME_BUDGET_EXCEEDED，也是正确行为，但不是本测试要核对的结论）
++        budget = 0.3
++        s = _solver({"time_budget_s": budget})
+         TL, TR = self._not_jointly_pair()
+         with mock.patch.object(s._lib, "jointly_outside", return_value=False):
+             t = time.perf_counter()
+@@ -589,7 +611,7 @@
+         self.assertEqual(res.failure_reason, D.NOT_JOINTLY_REACHABLE)
+         self.assertTrue(res["diagnosis"]["left_alone_ok"])
+         self.assertTrue(res["diagnosis"]["right_alone_ok"])
+-        self.assertLess(elapsed, 0.1 + 0.03)
++        self.assertLess(elapsed, budget + 0.03)
+ 
+     def test_allow_approximate(self):
+         TL, TR = self._not_jointly_pair()
+--- dual-p2/tests/test_v13_changes.py
++++ v15/tests/test_v13_changes.py
+@@ -287,6 +287,8 @@
+                                                       s.multi_turn_mask))))
+         return np.asarray(q, dtype=float), str(status), result, dict(s.last_load_diagnostics), step
+ 
++    # TRACK_38 的续算解离限位 0.016 < SAFE_MARGIN，续算无局部解 -> 常规搜索（v14 整理姿态后如此；v15 续算不整理，
++    # 但第一个达标点同样贴限位，照常整理后结果相同）
+     def test_continuation_skips_library(self):
+         q, status, result, diag, step = self.run_case({})
+         self.assertEqual(diag["continuation"]["regime"], "continuation")
+@@ -462,6 +464,7 @@
+             out.append((q, status, r, dict(s.last_load_diagnostics)))
+         return out
+ 
++    @mock.patch.object(S, "CONTINUATION_POSTURE_SETTLE", True)   # v15 续算不整理姿态是另一项改动
+     def test_off_matches_v12(self):
+         s13, st13 = make_solver(config=dict(BENCH, **OFF))
+         s12, st12 = make_v12(config=dict(BENCH, **OFF))
+--- dual-p2/tests/test_v14_cleanup.py
++++ v15/tests/test_v14_cleanup.py
+@@ -47,9 +47,10 @@
+             self.assertTrue(hasattr(S, name), name)
+ 
+     def test_version(self):
+-        self.assertEqual(S.SOLVER_VERSION, "merged-v14")
++        # v15 起版本号为 merged-v15（tests/test_v15_changes.VersionTests）；这里只核对写入诊断的就是 SOLVER_VERSION
++        self.assertTrue(S.SOLVER_VERSION.startswith("merged-v1"))
+         s, _ = make_solver(config={"dls_seed_library_size": 0})
+-        self.assertEqual(s.last_load_diagnostics["version"], "merged-v14")
++        self.assertEqual(s.last_load_diagnostics["version"], S.SOLVER_VERSION)
+ 
+ 
+ class RemovedNamesTests(unittest.TestCase):
+--- dual-p2/tests/test_v6_constraints.py
++++ v15/tests/test_v6_constraints.py
+@@ -167,8 +167,15 @@
+         self.assertTrue(diag["converged"])
+         # 物理坐标回中：朝 q_ready(0.3) 方向移动，绝不朝 +2π 上限漂移；且择优保留了这次姿态改善
+         self.assertLess(q[i5], seed[i5] - 0.05)
++        # v15：目标就是当前位姿、q_prev（= 关节状态）已是可接受解 -> 续算原样返回，不再整理姿态
+         q2, status, _ = s.solve(T, frame="world", joint_state=JointStateSnapshot(state))
+         self.assertEqual(status, "SUCCESS")
++        np.testing.assert_array_equal(q2, seed)
++        self.assertTrue(s.last_load_diagnostics["continuation"]["hold"])
++        # v14 行为（续算整理姿态）：择优保留了这次姿态改善
++        with patch.object(S, "CONTINUATION_POSTURE_SETTLE", True):
++            q2, status, _ = s.solve(T, frame="world", joint_state=JointStateSnapshot(state))
++        self.assertEqual(status, "SUCCESS")
+         self.assertLess(q2[i5], seed[i5])
+         self.assertLessEqual(abs(q2[i5] - seed[i5]), np.pi)   # 不绕大圈
+ 
+--- dual-p2/tests/test_v8_changes.py
++++ v15/tests/test_v8_changes.py
+@@ -253,26 +253,38 @@
+         self.assertIsNone(s_off.last_load_diagnostics["waist_comfort"]["regime"])
+ 
+     def test_large_waist_tracking_with_jump_limit_is_continuous(self):
+-        """腰部大幅跟踪（超出舒适窗）+ max_joint_jump_rad：每个路点都按续算求解，无卡腰 / 放开瞬变。"""
++        """腰部大幅跟踪（超出舒适窗）+ max_joint_jump_rad：每个路点都按续算求解，无卡腰 / 放开瞬变。
++
++        舒适窗不影响续算：每个路点都与关闭舒适窗逐值相同。v14 行为（续算整理姿态）下俯仰跟踪到窗外；
++        v15 续算不整理姿态，腰部在 q_ready 停留更久（锁腰分支，手臂补偿），终点仍在窗内。
++        """
+         cfg = {"max_joint_jump_rad": 0.25}
+-        s, state = make_solver(config=cfg)
+-        s_off, state_off = make_solver(config=dict(cfg, dls_waist_comfort=None))
+-        q_prev = q_prev_off = QREF.copy()
+-        steps = []
+-        for t in np.linspace(0.0, 1.0, 41)[1:]:
+-            qt = QREF + t * np.r_[-1.2, 1.1, 0.2, -0.2, 0.2, 0.2, -0.2, 0.2, 0.1]
+-            T = root_target(s, state, qt)
+-            q, _, _ = solve(s, state, T=T, q_prev=q_prev)
+-            q_off, _, _ = solve(s_off, state_off, T=T, q_prev=q_prev_off)
+-            self.assertIsNotNone(q, (t, s.last_load_diagnostics))
+-            np.testing.assert_array_equal(q, q_off)
+-            steps.append(float(np.max(np.abs(q - q_prev))))
+-            self.assertEqual(s.last_load_diagnostics["waist_comfort"]["regime"], "continuation")
+-            q_prev, q_prev_off = q, q_off
++
++        def run():
++            s, state = make_solver(config=cfg)
++            s_off, state_off = make_solver(config=dict(cfg, dls_waist_comfort=None))
++            q_prev = q_prev_off = QREF.copy()
++            steps = []
++            for t in np.linspace(0.0, 1.0, 41)[1:]:
++                qt = QREF + t * np.r_[-1.2, 1.1, 0.2, -0.2, 0.2, 0.2, -0.2, 0.2, 0.1]
++                T = root_target(s, state, qt)
++                q, _, _ = solve(s, state, T=T, q_prev=q_prev)
++                q_off, _, _ = solve(s_off, state_off, T=T, q_prev=q_prev_off)
++                self.assertIsNotNone(q, (t, s.last_load_diagnostics))
++                np.testing.assert_array_equal(q, q_off)
++                steps.append(float(np.max(np.abs(q - q_prev))))
++                self.assertEqual(s.last_load_diagnostics["waist_comfort"]["regime"], "continuation")
++                q_prev, q_prev_off = q, q_off
++            return s, q_prev, steps
++
+         # v9（真实 ik_candidate）：锁腰 -> 随动只过渡一次，该步 0.137 rad（v8 同为 0.137），其余 < 0.1
+-        self.assertLess(max(steps), 0.15)
+-        self.assertLessEqual(sum(st >= 0.1 for st in steps), 1)
+-        self.assertLess(q_prev[0], s.waist_comfort_lower[0] - 0.1)  # 俯仰跟踪到窗外，没有被窗口挡住
++        for settle in (False, True):
++            with patch.object(S, "CONTINUATION_POSTURE_SETTLE", settle):
++                s, q_end, steps = run()
++            self.assertLess(max(steps), 0.15)
++            self.assertLessEqual(sum(st >= 0.1 for st in steps), 1)
++            if settle:
++                self.assertLess(q_end[0], s.waist_comfort_lower[0] - 0.1)  # 俯仰跟踪到窗外，没有被窗口挡住
+ 
+     def test_continuation_tol_config(self):
+         s, state = make_solver(config={"dls_waist_comfort_continuation_tol": (0.0, 0.0)})
+--- dual-p2/tests/test_v9_changes.py
++++ v15/tests/test_v9_changes.py
+@@ -64,7 +64,11 @@
+ 
+ class ContinuationLocalTests(unittest.TestCase):
+     def test_waist_ramp_has_no_branch_switch(self):
+-        """腰部大幅跟踪（无跳变限制）：v9 全程局部续算、单步 < 0.15；关闭续算局部即 v8，出现 > 0.5 rad 的分支切换。"""
++        """腰部大幅跟踪（无跳变限制）：v9 全程局部续算、单步 < 0.15；关闭续算局部即 v8，出现 > 0.5 rad 的分支切换。
++
++        v15 续算不整理姿态：锁腰分支保持更久（手臂补偿，约前 3/4 路点腰部留在 q_ready），之后逐帧过渡；
++        v14 行为（CONTINUATION_POSTURE_SETTLE = True）在第 5 个路点就转到随动。两者都只有一步 >= 0.1。
++        """
+         s, state = make_solver(config=BENCH)
+         s_off, state_off = make_solver(config=dict(BENCH, dls_continuation_local=False))
+         targets = [root_target(s, state, QREF + t * WAIST_RAMP) for t in np.linspace(0.0, 1.0, 41)[1:]]
+@@ -72,7 +76,13 @@
+         self.assertIsNone(fail)
+         self.assertTrue(all(local))
+         self.assertLess(max(steps), 0.15)
+-        self.assertLessEqual(sum(st >= 0.1 for st in steps), 1)   # 锁腰 -> 随动只过渡一次
++        self.assertLessEqual(sum(st >= 0.1 for st in steps), 1)
++        with patch.object(S, "CONTINUATION_POSTURE_SETTLE", True):
++            _, steps14, local14, fail14 = track(s, state, targets, QREF)
++        self.assertIsNone(fail14)
++        self.assertTrue(all(local14))
++        self.assertLess(max(steps14), 0.15)
++        self.assertLessEqual(sum(st >= 0.1 for st in steps14), 1)   # v14：锁腰 -> 随动只过渡一次
+         _, steps_off, local_off, fail_off = track(s_off, state_off, targets, QREF)
+         self.assertIsNone(fail_off)
+         self.assertFalse(any(local_off))
+@@ -121,7 +131,8 @@
+         q, status, result = solve(s, state, QREF + 0.01, q_prev=QREF)
+         self.assertEqual(status, "SUCCESS")
+         d = s.last_load_diagnostics
+-        self.assertEqual(d["continuation"], {"local_enabled": True, "regime": "continuation", "local_used": True})
++        self.assertEqual(d["continuation"], {"local_enabled": True, "regime": "continuation", "local_used": True,
++                                             "hold": False})
+         self.assertTrue(d["search"]["continuation_local_used"])
+         self.assertEqual(d["search"]["stop_reason"], "CONTINUATION_LOCAL")
+         stages = {p.get("search_stage") for p in result.per_seed}
+--- dual-p2/run_validation.py
++++ v15/run_validation.py
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env python3
+-"""Offline validation only. v14 (= v13 behaviour, cleanup only: redundant aliases / imports / duplicated code removed, docs rewritten): the user-provided ik_common / ik_candidate / robot_model are tested (no test doubles).
+-Dual-arm P1+P2: ha_arm_ik/dual_arm_ik.py (independent 16-DoF joint IK, numpy + Pinocchio only) is tested by tests/test_dual_arm_ik.py."""
++"""Offline validation only. v15 = v14 + continuation drift fix (no posture settling in the q_prev continuation stage; static targets return q_prev unchanged) + bit-identical speed-ups; the user-provided ik_common / ik_candidate / robot_model are tested (no test doubles).
++Dual-arm P1+P2 (dual-p2.1: a hand given None holds its pose; "free" = unconstrained): ha_arm_ik/dual_arm_ik.py (independent 16-DoF joint IK, numpy + Pinocchio only) is tested by tests/test_dual_arm_ik.py."""
+ import ast
+ import json
+ from pathlib import Path
+@@ -14,7 +14,7 @@
+ def main():
+     suffix="pin"+pin.__version__.replace(".","_")
+     counts={}
+-    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes","test_v13_changes","test_v14_cleanup","test_dual_arm_ik"):
++    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes","test_v13_changes","test_v14_cleanup","test_v15_changes","test_dual_arm_ik"):
+         counts[name]=unittest.defaultTestLoader.loadTestsFromName("tests."+name).countTestCases()
+     suite=unittest.defaultTestLoader.discover("tests",top_level_dir=".")
+     with open("validation_"+suffix+".txt","w",encoding="utf-8") as out:
+--- dual-p2/bench/dual/bench_dual.py
++++ v15/bench/dual/bench_dual.py
+@@ -8,7 +8,8 @@
+ B1 一次性可达      目标 = 随机关节角（限位内缩 0.05 rad）的 FK，q_prev = q_ready
+ B2 大范围换姿      q_prev = 一个随机构型，目标 = 另一个随机构型的 FK
+ B3 连续跟踪        20 条关节空间直线轨迹 × 30 步（每关节每步 <= 0.02 rad），q_prev = 上一步的解
+-B4 单手保持        左手 "hold"（保持 q_prev 处位姿）/ 左臂 "keep"，右手换到新目标（腰不变时可达）
++B4 单手保持        左手 "hold"（保持 q_prev 处位姿；dual-p2.1 起 None 即 "hold"）/ 左臂 "keep"，
++                   右手换到新目标（腰不变时可达）
+ B5 失败与混合用例  (a) 左手目标在任何腰角下都超出臂展（可证明不可达） (b) 两手间距超过可能的最大间距
+                    (c) 左右手目标来自两个独立随机构型 (d) 左手位置可达、姿态随机（部分不可达）
+ """

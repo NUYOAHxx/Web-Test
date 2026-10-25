@@ -1,0 +1,284 @@
+--- solver_v6.py
++++ solver.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""ha_arm_ik.solver -- merged-v6, original HAArmIKSolver entry.
++"""ha_arm_ik.solver -- merged-v7, original HAArmIKSolver entry.
+ 
+ 候选解的约束与择优（与 solver_dls.py 文件头的约束分层一致）：
+   1. 硬约束过滤：位姿达标、有效限位内、静态负荷 <= 容许值（strict）、单关节跳变 <= max_joint_jump_rad
+@@ -16,6 +16,10 @@
+   4. 拆分严格负荷预算 (load_budget_s) 与普通 IK 求解预算 (solve_budget_s)。
+   5. v6：不绕大圈硬约束 (max_joint_jump_rad / joint_jump_policy)；失败码区分“无候选/种子异常/位姿不可达/
+      跳变超限/负荷超限”；种子异常写入诊断而不再被误报为负荷问题。
++  6. v7（提速）：种子顺序改为 q_prev 先行、锁腰种子第二；q_prev 的解已合格（位姿/跳变/裕度/低负荷）
++     且腰部与 q_ready 相差 <= locked_seed_skip_tol（默认 0.02 rad）时跳过等价的锁腰种子；
++     锁腰种子触发腰部释放时紧接着用释放状态重跑一次 q_prev（与 v6 的第二个种子相同）。
++     locked_seed_skip_tol=None 恢复 v6 顺序（锁腰种子在前、不跳过）。
+ """
+ 
+ from collections import defaultdict, deque
+@@ -203,6 +207,8 @@
+ PIN_TOP_K_FOR_DIRECT = 15
+ RNG_SEED = 120
+ MAX_JOINT_JUMP_RAD = np.pi  # 默认“绕大圈”阈值：单关节相对 q_prev 超过半圈即视为绕大圈
++# v7：q_prev 的解已合格且腰部偏离 q_ready 不超过该值（rad，逐关节最大值）时跳过锁腰种子；None = v6 顺序
++LOCKED_SEED_SKIP_TOL = 0.02
+ JOINT_JUMP_POLICIES = ("reject", "prefer")
+ 
+ 
+@@ -1090,8 +1096,15 @@
+ ):
+     """执行多 seed DLS 搜索：统一虚拟窗口边界、显式 multi_turn_mask 分支对齐与严格负荷早停比较。
+ 
+-    种子顺序（见 make_scatter_seeds）：[锁腰种子] -> q_prev -> q_ready -> 扰动种子。
+-    每个候选对齐到最接近 q_prev 的 2πk 分支后记录单关节跳变；早停只认“跳变不超限”的候选。
++    种子顺序（v7 默认，include_waist）：q_prev -> [锁腰种子] -> q_ready -> 扰动种子（见 make_scatter_seeds）。
++      - 锁腰种子 = q_prev 且腰部锁在 q_ready；若 q_prev 的解已合格（位姿达标、跳变不超限、限位裕度足够，
++        strict 下还要负荷合格且峰值 <= early_stop_ratio）且腰部 |q - q_ready| <= locked_seed_skip_tol，
++        两者等价，锁腰种子不再运行，但占一个 max_seeds 名额并视为已完成“锁腰比较”；
++      - 锁腰种子峰值 > soft_ratio 时释放腰部（v6 规则）；此时紧接着用释放状态重跑一次 q_prev，
++        与 v6 的第二个种子相同；
++      - locked_seed_skip_tol=None：v6 顺序 [锁腰种子] -> q_prev -> q_ready -> 扰动种子，不跳过、不重跑。
++    max_seeds 是种子名额上限（运行的种子 + 被跳过的锁腰种子）。每个候选对齐到最接近 q_prev 的
++    2πk 分支后记录单关节跳变；早停只认“跳变不超限”的候选。
+     """
+     params = dict(dls_params or {})
+     search = dict(load_search or {})
+@@ -1100,9 +1113,8 @@
+     jump_limits = search.get("max_joint_jump")
+     periodic = pin_maps.get("active_periodic", pin_maps["active_continuous"])
+ 
+-    # 早停规则：至少试 min_seeds 个种子（其中 >= min_unlocked 个不锁腰）且已有“低负荷”候选
+-    # （峰值 <= early_stop_ratio、跳变不超限、限位裕度足够）即停止；否则继续找更低负荷的解。
+-    # v6 默认 2/1 = [锁腰种子, q_prev]：基准中与旧默认 3/2 选出的解相同，耗时少约 35~40%。
++    # 早停规则：至少用掉 min_seeds 个名额（其中 >= min_unlocked 个不锁腰、且已完成锁腰比较）且已有
++    # “低负荷”候选（峰值 <= early_stop_ratio、跳变不超限、限位裕度足够）即停止；否则继续找更低负荷的解。
+     max_seeds = int(search.get("max_seeds", 10))
+     min_seeds = int(search.get("min_seeds", 2))
+     min_unlocked = int(search.get("min_unlocked", 1))
+@@ -1112,6 +1124,14 @@
+         raise ValueError(
+             "max_seeds must include locked and unlocked comparisons"
+         )
++    skip_tol = search.get("locked_seed_skip_tol", LOCKED_SEED_SKIP_TOL)
++    if skip_tol is not None:
++        skip_tol = float(skip_tol)
++        if not math.isfinite(skip_tol) or skip_tol < 0.0:
++            raise ValueError(
++                "locked_seed_skip_tol must be None or a finite nonnegative angle"
++            )
++    q_prev_first = bool(include_waist and skip_tol is not None)
+ 
+     waist_mask = np.array(
+         [n in WAIST_JOINT_NAMES for n in pin_maps["active_names"]],
+@@ -1127,13 +1147,20 @@
+         active_names=pin_maps["active_names"],
+     )
+ 
+-    seeds = make_scatter_seeds(q_prev, q_ready, eff_lower, eff_upper, rng)
+-    masks = [None] * len(seeds)
++    seeds = make_scatter_seeds(
++        q_prev, q_ready, eff_lower, eff_upper, rng, max_count=max_seeds
++    )
++    # 队列元素：(种子, 固定关节掩码, 种子类别)；make_scatter_seeds 保证第一个是 q_prev
++    entries = [
++        (seed, None, "q_prev" if i == 0 else "scatter")
++        for i, seed in enumerate(seeds)
++    ]
+     if include_waist:
+         locked = clip_to_bounds(q_prev.copy(), eff_lower, eff_upper)
+         locked[waist_mask] = q_ready[waist_mask]
+-        seeds.insert(0, locked)
+-        masks.insert(0, waist_mask)
++        entries.insert(1 if q_prev_first else 0, (locked, waist_mask, "locked"))
++    queue = deque(entries)
++    q_prev_seed = seeds[0]
+ 
+     near = (
+         WAIST_TASK_WEIGHT
+@@ -1154,16 +1181,40 @@
+         "active_multi_turn",
+         pin_maps.get("active_periodic", pin_maps["active_continuous"]),
+     )
++    early_stop_ratio = context["policy"].early_stop_ratio if strict else None
++    slots = 0                       # 已用名额：运行过的种子 + 被跳过的锁腰种子
++    locked_done = not include_waist  # 锁腰比较已完成（运行过或因等价而跳过）
++    locked_skipped = False
++    prev_rerun_queued = False
++    prev_info = None                # q_prev 种子的候选信息（v7 顺序下用于跳过锁腰种子 / 旧版早停）
++
++    def qualified(cand):
++        """早停认可的候选：位姿达标、跳变不超限、限位裕度足够；strict 下还需负荷合格且峰值 <= 早停阈值。"""
++        if cand is None:
++            return False
++        ok = bool(
++            cand.get("pose_ok")
++            and cand.get("joint_jump_ok", True)
++            and cand.get("margin", -np.inf) >= SAFE_MARGIN
++        )
++        if strict:
++            ok = ok and bool(cand.get("load_ok")) and (
++                cand["load_peak_ratio"] <= early_stop_ratio
++            )
++        return ok
+ 
+-    for seed_idx, (seed, fixed) in enumerate(
+-        zip(seeds[:max_seeds], masks[:max_seeds])
+-    ):
++    while queue and slots < max_seeds:
+         deadline = params.get("deadline")
+         if deadline is not None and time.monotonic() >= deadline:
+             stop = "TIME_BUDGET"
+             break
++        seed, fixed, kind = queue.popleft()
++        seed_idx = len(per_seed)
++        slots += 1
+         if fixed is None:
+             unlocked += 1
++        else:
++            locked_done = True
+ 
+         started = time.monotonic()
+         try:
+@@ -1254,6 +1305,7 @@
+             per_seed.append(
+                 {
+                     "seed_idx": seed_idx,
++                    "seed_kind": kind,
+                     **diag,
+                     "fixed_waist": fixed is not None,
+                     "pose_ok": bool(info["pose_ok"]),
+@@ -1265,30 +1317,48 @@
+                 }
+             )
+ 
++            if kind == "q_prev":
++                prev_info = info
++                # v7：q_prev 的解已合格且腰部基本在 q_ready -> 锁腰种子与之等价，跳过
++                if q_prev_first and not locked_done and qualified(info):
++                    waist_dev = float(
++                        np.max(np.abs(q[waist_mask] - q_ready[waist_mask]))
++                    )
++                    if waist_dev <= skip_tol:
++                        queue = deque(e for e in queue if e[2] != "locked")
++                        slots += 1
++                        locked_done = True
++                        locked_skipped = True
++            elif (
++                kind == "locked"
++                and q_prev_first
++                and released
++                and not prev_rerun_queued
++            ):
++                # v7：锁腰种子触发腰部释放 -> 下一个种子用释放状态重跑 q_prev（即 v6 的第二个种子）
++                queue.appendleft((q_prev_seed, None, "q_prev_release"))
++                prev_rerun_queued = True
++
+             if strict:
+-                low = [
+-                    c
+-                    for c in candidates
+-                    if c.get("pose_ok")
+-                    and c.get("load_ok")
+-                    and c.get("joint_jump_ok", True)
+-                    and c.get("margin", -np.inf) >= SAFE_MARGIN
+-                ]
++                low = [c for c in candidates if qualified(c)]
+                 if (
+-                    seed_idx + 1 >= min_seeds
+-                    and (not include_waist or unlocked >= min_unlocked)
++                    slots >= min_seeds
++                    and (
++                        not include_waist
++                        or (unlocked >= min_unlocked and locked_done)
++                    )
+                     and low
+                     and min(c["load_peak_ratio"] for c in low)
+-                    <= context["policy"].early_stop_ratio
++                    <= early_stop_ratio
+                 ):
+                     stop = "LOW_LOAD_AFTER_REQUIRED_COMPARISON"
+                     break
+             elif (
+-                info.get("pose_ok")
+-                and info.get("joint_jump_ok", True)
+-                and info.get("margin", -np.inf) >= SAFE_MARGIN
+-                and seed_idx >= 1
++                slots >= 2
++                and locked_done
++                and qualified(prev_info if kind == "locked" else info)
+             ):
++                # 旧版规则：至少比较 2 个种子后，以 q_prev 及之后种子的合格解早停（锁腰解本身不触发）
+                 stop = "LEGACY_POSE_EARLY_STOP"
+                 break
+         except Exception as exc:
+@@ -1299,6 +1369,7 @@
+             per_seed.append(
+                 {
+                     "seed_idx": seed_idx,
++                    "seed_kind": kind,
+                     "converged": False,
+                     "fixed_waist": fixed is not None,
+                     "exception": f"{type(exc).__name__}: {exc}",
+@@ -1313,6 +1384,16 @@
+             "unlocked_seeds_attempted": unlocked,
+             "waist_released_for_load": released,
+             "seeds_attempted": len(per_seed),
++            "seed_slots_used": slots,
++            "seed_order": (
++                "q_prev_first"
++                if q_prev_first
++                else ("locked_first" if include_waist else "no_waist")
++            ),
++            "locked_seed_skipped": locked_skipped,
++            "q_prev_release_rerun": any(
++                p.get("seed_kind") == "q_prev_release" for p in per_seed
++            ),
+             "seed_errors": seed_errors,
+             "first_seed_error": first_seed_error,
+             "candidates": len(candidates),
+@@ -1452,7 +1533,7 @@
+         self._solve_T_root_base = None
+         self._load_deadline = None
+         self.last_load_diagnostics = {
+-            "version": "merged-v6",
++            "version": "merged-v7",
+             "accepted": False,
+             "mode": self.load_mode,
+             "code": "NOT_RUN",
+@@ -1659,6 +1740,15 @@
+         self.max_joint_jump = self._resolve_joint_jump_limits(
+             cfg_tune.get("max_joint_jump_rad", MAX_JOINT_JUMP_RAD)
+         )
++        # v7：q_prev 先行 + 等价锁腰种子跳过的腰部容差（rad）；None = v6 种子顺序
++        skip_tol = cfg_tune.get("locked_seed_skip_tol", LOCKED_SEED_SKIP_TOL)
++        if skip_tol is not None:
++            skip_tol = float(skip_tol)
++            if not math.isfinite(skip_tol) or skip_tol < 0.0:
++                raise ValueError(
++                    "locked_seed_skip_tol must be None or a finite nonnegative angle"
++                )
++        self.locked_seed_skip_tol = skip_tol
+ 
+         try:
+             self.psi_ready = float(self.chain.psi(self.q_ready))
+@@ -2243,6 +2333,7 @@
+                             "load_min_unlocked_seeds", 1
+                         ),
+                         "max_joint_jump": self.max_joint_jump,
++                        "locked_seed_skip_tol": self.locked_seed_skip_tol,
+                     },
+                 )
+             )
+@@ -2925,7 +3016,7 @@
+         old_prev = self.q_prev.copy()
+         try:
+             self.last_load_diagnostics = {
+-                "version": "merged-v6",
++                "version": "merged-v7",
+                 "mode": self.load_mode,
+                 "accepted": False,
+                 "protection_enabled": self.load_mode == "strict",

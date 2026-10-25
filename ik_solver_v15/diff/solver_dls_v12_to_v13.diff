@@ -1,0 +1,187 @@
+--- a/ha_arm_ik/solver_dls.py
++++ b/ha_arm_ik/solver_dls.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""Pinocchio 阻尼最小二乘 IK 核心（merged-v8）。
++"""Pinocchio 阻尼最小二乘 IK 核心（merged-v13；单种子迭代与 v8 相同）。
+ 
+ 约束分层（硬约束不满足 = 不是解；软目标只在硬约束内部比较）：
+   硬约束  H1 末端位姿误差 <= pos_tol / ori_tol（full / tool_dir / tool_cone 三种模式）
+@@ -12,6 +12,12 @@
+   软目标  S1 负荷峰值最小（带 peak_tie 容差带），S2 次任务代价最小：
+           q_ready 物理坐标回中 + 限位裕度 + 重力矩 + 整机质心水平偏移
+ 
++v13 相对 v8（只增不改：单种子迭代 pinocchio_ik_one_seed、SNS、次任务与 v8 逐位相同）：
++  1. 任务空间种子库：build_seed_library 在有效限位内均匀采样关节角、记录末端相对运动链基座的位姿；
++     select_library_seeds 按与目标的任务空间距离（位置 / 特征长度、姿态差口径同主任务）选种子，
++     入选种子彼此关节差 ∞-范数 >= SEED_LIBRARY_MIN_SEPARATION；seed_library_target 把目标换到库的坐标系
++  2. chain_base_joint：运动链基座关节（最靠近根的活动关节的父关节）
++
+ v8 相对 v7（修正 + 腰部舒适窗；公共函数签名只增加可选关键字参数）：
+   1. 帧查询按 pin.FrameType.BODY：关节与连杆同名的 URDF（Pinocchio 3.x 起同名查询抛 ValueError）可用
+   2. 姿态整理恢复 v6 的上限 50 步 / 耐心 3（v7 的 15 / 2 在收敛前截断，tool 模式次任务代价平均高 0.7-1.9%）
+@@ -145,6 +151,15 @@
+ WAIST_COMFORT_CONTINUATION_STEP = 0.10   # 续算判据：目标相对 FK(q_prev) 位置差 <= 0.1 × 臂展且姿态差 <= 0.1 rad
+                                          # （约 0.1 rad 关节运动，雅可比线性化仍有效）时不加舒适窗
+ 
++# =============================================================================
++# v13：任务空间种子库（最近邻种子）
++# =============================================================================
++SEED_LIBRARY_SIZE = 16384         # 初始化时在有效限位内均匀采样的关节角个数（建库约 150 ms、2.8 MB）；0 = 关闭
++SEED_LIBRARY_SEEDS = 3            # 每个常规搜索阶段插入的种子库种子个数（排在 q_prev / 锁腰 / q_ready 之后）
++SEED_LIBRARY_MIN_SEPARATION = 0.5 # 入选种子之间、与本阶段已排队种子之间的关节差 ∞-范数下限（rad）
++SEED_LIBRARY_POOL = 64            # 按任务空间距离预选的候选个数（再按关节差去重）
++SEED_LIBRARY_RNG_SEED = 13        # 采样随机数种子（与求解用的 RNG_SEED 无关，库内容可复现）
++
+ 
+ # =============================================================================
+ # 基础数值校验、周期/多圈分支处理与数据结构
+@@ -1839,7 +1854,7 @@
+     posture_use_equivalent_branch=False,
+     shoulder_joint=None,
+ ):
+-    """单种子 DLS IK（merged-v8）：主任务为末端位姿，零空间次任务为回中/限位裕度/负荷/质心。
++    """单种子 DLS IK（merged-v8，v13 未改）：主任务为末端位姿，零空间次任务为回中/限位裕度/负荷/质心。
+ 
+     返回 (q, diag)。q 优先取“位姿达标点”中按负荷峰值容差带 + 次任务代价择优的那个；
+     没有达标点时返回主任务误差最小的迭代点（diag["converged"] = False）。
+@@ -2403,6 +2418,137 @@
+         n = min(len(seeds), n + (want - len(result)))
+ 
+ 
++def chain_base_joint(pin_model, pin_maps):
++    """运动链基座：最靠近根的活动关节的父关节（Pinocchio 关节编号按拓扑序，父编号小于子编号）。"""
++    ids = [int(pin_maps["name_to_joint_id"][n]) for n in pin_maps["active_names"]]
++    return int(pin_model.parents[min(ids)])
++
++
++def build_seed_library(
++    pin_model,
++    pin_data,
++    pin_maps,
++    ee_frame_id,
++    lower,
++    upper,
++    q_ready,
++    size=SEED_LIBRARY_SIZE,
++    *,
++    comfort_bounds=None,
++    rng_seed=SEED_LIBRARY_RNG_SEED,
++):
++    """v13 种子库：在有效限位内均匀采样关节角，记录末端相对运动链基座的位姿（None = 关闭）。
++
++    位姿取相对 chain_base_joint 坐标系的值：基座之前的非活动关节（strict 模式由实测快照决定）
++    不影响库内容，求解时把目标换到同一坐标系即可比较。无界 continuous 关节在 q_ready ± π 内采样。
++    comfort_bounds=(lower, upper) 时一半样本落在舒适窗内（舒适阶段只能用窗内样本）。
++    种子库只决定“从哪里开始迭代”，不影响任何约束与择优；库位姿不准只会让种子变差。
++    """
++    size = int(size or 0)
++    if size <= 0:
++        return None
++    q_ready = np.asarray(q_ready, dtype=float)
++    lo = np.where(np.isfinite(lower), lower, q_ready - np.pi)
++    hi = np.where(np.isfinite(upper), upper, q_ready + np.pi)
++    if not np.all(lo <= hi):
++        raise ValueError("seed library: empty bounds")
++    rng = np.random.default_rng(rng_seed)
++    parts = []
++    if comfort_bounds is not None:
++        c_lo = np.maximum(lo, np.asarray(comfort_bounds[0], dtype=float))
++        c_hi = np.minimum(hi, np.asarray(comfort_bounds[1], dtype=float))
++        if np.all(c_lo < c_hi):
++            parts.append(rng.uniform(c_lo, c_hi, size=(size // 2, len(lo))))
++    parts.append(rng.uniform(lo, hi, size=(size - sum(len(x) for x in parts), len(lo))))
++    Q = np.vstack(parts)
++    build = _make_q_builder(pin_model, pin_maps)
++    base = chain_base_joint(pin_model, pin_maps)
++    P = np.empty((size, 3), dtype=float)
++    Rm = np.empty((size, 3, 3), dtype=float)
++    for i in range(size):
++        pin.forwardKinematics(pin_model, pin_data, build(Q[i]))
++        M = pin_data.oMi[base].actInv(
++            pin.updateFramePlacement(pin_model, pin_data, ee_frame_id)
++        )
++        P[i] = M.translation
++        Rm[i] = M.rotation
++    for arr in (Q, P, Rm):
++        arr.setflags(write=False)   # 同一模型的多个求解器实例共享同一份库（见 solver._shared_seed_library）
++    return {"q": Q, "p": P, "R": Rm, "base_joint": base, "size": size}
++
++
++def seed_library_target(pin_model, pin_data, pin_maps, library, q_active, T_target):
++    """把目标位姿换到种子库的基座坐标系（基座位姿按当前 q 模板计算，与活动关节取值无关）。"""
++    pin.forwardKinematics(
++        pin_model, pin_data, active_q_to_pinocchio_q(pin_model, pin_maps, q_active)
++    )
++    base = pin_data.oMi[library["base_joint"]]
++    target = np.asarray(T_target, dtype=float)
++    return np.array(
++        base.actInv(pin.SE3(target[:3, :3], target[:3, 3])).homogeneous, copy=True
++    )
++
++
++def select_library_seeds(
++    library,
++    T_target_base,
++    orientation_mode,
++    tool_axis,
++    cone,
++    characteristic_length,
++    lower,
++    upper,
++    count,
++    *,
++    exclude=(),
++    min_separation=SEED_LIBRARY_MIN_SEPARATION,
++    pool=SEED_LIBRARY_POOL,
++    orientation_weight=1.0,
++):
++    """按任务空间距离选种子：sqrt((位置差 / 特征长度)^2 + 姿态差^2)，姿态差口径与 DLS 主任务相同
++    （full：转角；tool_dir：工具轴夹角；tool_cone：夹角超出锥角的部分）。
++
++    只用完全落在 [lower, upper] 内的样本（舒适窗 / 跳变框同样适用，不做截断）；入选种子之间、
++    与 exclude（本阶段已排队的种子）之间的关节差 ∞-范数 >= min_separation，避免几个种子收敛到同一处。
++    """
++    count = int(count)
++    if library is None or count <= 0:
++        return []
++    Q = library["q"]
++    inside = np.all((Q >= lower) & (Q <= upper), axis=1)
++    idx = np.flatnonzero(inside)
++    if idx.size == 0:
++        return []
++    T = np.asarray(T_target_base, dtype=float)
++    dist = np.linalg.norm(library["p"][idx] - T[:3, 3], axis=1) / float(
++        characteristic_length
++    )
++    Rm = library["R"][idx]
++    if orientation_mode == "full":
++        cosine = 0.5 * (np.einsum("nij,ij->n", Rm, T[:3, :3]) - 1.0)
++        angle = np.arccos(np.clip(cosine, -1.0, 1.0))
++    else:
++        axis = np.asarray(TOOL_AXIS_X if tool_axis is None else tool_axis, dtype=float)
++        axis = axis / np.linalg.norm(axis)
++        angle = np.arccos(np.clip((Rm @ axis) @ (T[:3, :3] @ axis), -1.0, 1.0))
++        if orientation_mode == "tool_cone":
++            angle = np.maximum(0.0, angle - float(cone))
++    score = np.hypot(dist, float(orientation_weight) * angle)
++    k = min(int(pool), idx.size)
++    near = np.argpartition(score, k - 1)[:k] if k < idx.size else np.arange(idx.size)
++    near = near[np.argsort(score[near], kind="stable")]
++    chosen = []
++    taken = [np.asarray(e, dtype=float) for e in exclude]
++    for j in near:
++        q = Q[idx[j]]
++        if all(float(np.max(np.abs(q - e))) >= min_separation for e in taken):
++            chosen.append(q.copy())
++            taken.append(q)
++            if len(chosen) >= count:
++                break
++    return chosen
++
++
+ def configure_model_metadata(
+     model, pin_maps, urdf_xml, *, massless_links=(), position_bounds=None
+ ):

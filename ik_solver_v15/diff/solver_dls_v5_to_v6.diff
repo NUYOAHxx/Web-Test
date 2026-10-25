@@ -1,0 +1,686 @@
+--- baseline/solver_dls_user_v5.py	2026-10-20 18:42:40.968538851 +0000
++++ ha_arm_ik/solver_dls.py	2026-10-20 19:05:27.047938969 +0000
+@@ -1,13 +1,23 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""Pinocchio 阻尼最小二乘 IK 核心（merged-v5）。
++"""Pinocchio 阻尼最小二乘 IK 核心（merged-v6）。
+ 
+-核心特性：
+-  1. 严格全身状态快照 (JointStateSnapshot)、静态负荷策略 (LoadPolicy) 与 URDF 物理审计
+-  2. 解耦“候选解 2πk 等价分支对齐”与“零空间物理编码器坐标回中”，防止宽范围关节向 ±360° 反向漂移
+-  3. 正交信赖域主动集限位钳制 (SNS)：仅缩放自由子空间步长，保持已钳制边界位移与剩余误差 100% 一致
+-  4. 统一虚拟搜索窗口 (virtual_half_windows) 在迭代、分支选择与后处理中的硬约束语义
++约束分层（硬约束不满足 = 不是解；软目标只在硬约束内部比较）：
++  硬约束  H1 末端位姿误差 <= pos_tol / ori_tol（full / tool_dir / tool_cone 三种模式）
++          H2 关节限位：URDF 限位 ∩ 可选虚拟搜索窗；迭代中由 SNS 钳制保证从不越界
++          H3 静态负荷：每个守护关节 |tau_g| / allowable <= 1（strict 模式，solver.py 复核）
++          H4 不绕大圈：相对 q_prev 的单关节位移 <= max_joint_jump（solver.py 候选过滤）
++  软目标  S1 负荷峰值最小（带 peak_tie 容差带），S2 次任务代价最小：
++          q_ready 物理坐标回中 + 限位裕度 + 重力矩 + 整机质心水平偏移
++
++v6 相对 v5 的修正：
++  1. 整机质心计入 universe 惯量（URDF 根 link 及固定在根上的 link），nv=1 时雅可比形状正确
++  2. SNS Cholesky 主路径的零空间步与 SVD 回退一致：D z - D J^T A^-1 J D z（保证下降方向）
++  3. 位姿达标迭代点的择优改为“峰值容差带 + 代价”，不再因峰值差 0.001 丢弃姿态改善
++  4. 180° 对径死点按雅可比实际可达方向选切向，单轴/少轴情况也能逃逸
++  5. 主任务停滞检测：窗口内误差下降不足即换种子，避免不可达种子空转到迭代上限
++  6. 线搜索边界舍入吸附、回溯内超时记为 TIME_BUDGET、负荷向量缓存与关节映射向量化
+ """
+ 
+ from dataclasses import dataclass, field, replace
+@@ -46,12 +56,17 @@
+ PIN_IK_POS_TOL = 5e-4
+ PIN_IK_ORI_TOL = 5e-4
+ PIN_IK_MAX_STEP = 0.5             # 单次迭代关节步长 2-范数上限（弧度）
+-PIN_IK_STALL_ITERS = 25           # 连续微进展迭代次数上限 -> 放弃
+-PIN_IK_STALL_DELTA_M = 5e-5       # 单次迭代进展阈值（米，= 0.05 mm）
++PIN_IK_STALL_ITERS = 25           # 停滞检测窗口：位姿未达标时每 25 次迭代检查一次进展
++PIN_IK_STALL_RTOL = 0.05          # 窗口内主任务误差范数相对下降 < 5% -> 判定停滞，换下一个种子
++PIN_IK_STALL_DELTA_M = 5e-5       # 兼容旧版导出的常量（v6 改用上面的相对窗口判据）
++BOUND_SNAP_TOL = 1e-9             # 试探点越界不超过此值（浮点舍入）时吸附回边界，不整步拒绝
+ PIN_IK_MAX_VALID_CANDIDATES = 2
+ WAIST_RETURN_TOL = 0.10           # 外层早停的腰部回中阈值（弧度）
+ N_NOISE_PER_BASE = 16
+-NOISE_SCALES = [0.02, 0.05, 0.10, 0.20]
++# 扰动种子标准差（rad），从大到小：前几个扰动种子先探索不同解族（提高成功率、找低负荷解），
++# 后面的小扰动做局部细化。v5 为 [0.02, 0.05, 0.10, 0.20] 且先排完 q_prev 的 16 个小扰动，
++# max_seeds=10 时扰动种子几乎与 q_prev 重合，远目标成功率 97% -> v6 100%（合成基准 100 例）。
++NOISE_SCALES = [0.60, 0.30, 0.15, 0.05]
+ 
+ # =============================================================================
+ # 2. 零空间防漂移与流形稳态收敛参数
+@@ -61,6 +76,9 @@
+ NULLSPACE_ERR_SCALE = 0.06        # 主任务误差小于此值时零空间整理全功率激活
+ POSTURE_SETTLE_TOL = 1e-4         # 末端收敛后，零空间步长小于此阈值(rad)才算稳态收敛
+ MAX_SETTLE_EXTRA_ITERS = 50       # 末端达标后允许继续在零空间整理姿态的最大步数
++SETTLE_COST_RTOL = 1e-3           # 姿态整理阶段：单步次任务代价相对下降 < 0.1% 记为“慢步”
++SETTLE_PATIENCE = 3               # 连续 3 个慢步即视为已收敛（边际收益太小，不再耗时）
++POSE_PEAK_BAND_FRACTION = 0.25    # 单种子内择优的峰值容差带 = 0.25 * LoadPolicy.peak_tie（默认 0.005）
+ 
+ # 兼容旧版外部导入的别名常量
+ WAIST_POST_GAIN = 0.30
+@@ -270,10 +288,7 @@
+     relative_weight: float = 0.0
+     soft_ratio: float = 0.70
+     early_stop_ratio: float = 0.60
+-    peak_tie: float = 0.02
+-    continuity_weight: float = 1.0
+-    mean_load_weight: float = 0.1
+-    reference_weight: float = 0.02
++    peak_tie: float = 0.02  # 峰值负荷率容差带：差距在此以内视为同档，再比较姿态/连续性代价
+ 
+     def __post_init__(self):
+         capacities = {str(k): float(v) for k, v in self.allowable_efforts.items()}
+@@ -291,9 +306,6 @@
+             "excess_weight",
+             "relative_weight",
+             "peak_tie",
+-            "continuity_weight",
+-            "mean_load_weight",
+-            "reference_weight",
+         ):
+             value = getattr(self, name)
+             if not math.isfinite(value) or value < 0.0:
+@@ -316,15 +328,25 @@
+         )
+         object.__setattr__(self, "joint_weights", MappingProxyType(weights))
+         object.__setattr__(self, "guard_joint_names", guards)
++        # 非字段缓存：按关节名元组缓存 (容许力矩, 权重) 向量，避免迭代内重复查字典
++        object.__setattr__(self, "_vector_cache", {})
+ 
+     def vectors(self, names):
+-        missing = [n for n in names if n not in self.allowable_efforts]
++        key = tuple(names)
++        cached = self._vector_cache.get(key)
++        if cached is not None:
++            return cached
++        missing = [n for n in key if n not in self.allowable_efforts]
+         if missing:
+             raise ValueError(f"missing confirmed allowable effort for: {missing}")
+-        return (
+-            np.array([self.allowable_efforts[n] for n in names], dtype=float),
+-            np.array([self.joint_weights.get(n, 1.0) for n in names], dtype=float),
+-        )
++        caps = np.array([self.allowable_efforts[n] for n in key], dtype=float)
++        weights = np.array(
++            [self.joint_weights.get(n, 1.0) for n in key], dtype=float
++        )
++        caps.setflags(write=False)
++        weights.setflags(write=False)
++        self._vector_cache[key] = (caps, weights)
++        return caps, weights
+ 
+     def cost_gradient(self, tau, d_tau_d_active, names, *, tau_reference=None):
+         tau = finite_vector(tau, len(names), "gravity efforts")
+@@ -455,24 +477,53 @@
+     }
+ 
+ 
++def _active_q_layout(pin_maps):
++    """活跃关节在 Pinocchio q 向量中的索引布局（首次调用时构建并缓存在 pin_maps 中）。
++
++    返回 (标量关节在活跃向量中的位置, 其 idx_q, continuous 关节位置, 其 idx_q)；
++    continuous 关节在 q 中占 (cos, sin) 两个分量。
++    """
++    layout = pin_maps.get("_active_q_layout")
++    if layout is None or layout[0] != tuple(pin_maps["active_names"]):
++        specs = [pin_maps["all_specs"][n] for n in pin_maps["active_names"]]
++        cont = np.array([s["continuous"] for s in specs], dtype=bool)
++        idx_q = np.array([s["idx_q"] for s in specs], dtype=np.intp)
++        pos = np.arange(len(specs), dtype=np.intp)
++        layout = (
++            tuple(pin_maps["active_names"]),
++            pos[~cont],
++            idx_q[~cont],
++            pos[cont],
++            idx_q[cont],
++        )
++        pin_maps["_active_q_layout"] = layout
++    return layout[1:]
++
++
+ def active_q_to_pinocchio_q(model, pin_maps, q_active):
+-    """当存在冻结全身上下文模板 q_template 时优先使用；正确映射 continuous 关节。"""
+-    values = finite_vector(q_active, len(pin_maps["active_names"]), "active q")
++    """活跃关节角 -> Pinocchio 全身 q。
++
++    非活跃关节取冻结的全身状态模板 q_template（strict 模式由实测快照构建），没有模板时取 neutral；
++    continuous 关节写入 (cos, sin)。迭代热路径，索引布局预先缓存、整体向量化赋值。
++    """
++    values = np.asarray(q_active, dtype=float)
++    if values.shape != (len(pin_maps["active_names"]),) or not np.all(
++        np.isfinite(values)
++    ):
++        raise ValueError(
++            f"active q: expected a finite 1-D vector of size {len(pin_maps['active_names'])}"
++        )
+     template = pin_maps.get("q_template")
+     q = (
+         pin.neutral(model)
+         if template is None
+         else np.array(template, dtype=float, copy=True)
+     )
+-    for name, value in zip(pin_maps["active_names"], values):
+-        s = pin_maps["all_specs"][name]
+-        if s["continuous"]:
+-            q[s["idx_q"] : s["idx_q"] + 2] = (
+-                math.cos(value),
+-                math.sin(value),
+-            )
+-        else:
+-            q[s["idx_q"]] = float(value)
++    scalar_pos, scalar_idx, cont_pos, cont_idx = _active_q_layout(pin_maps)
++    q[scalar_idx] = values[scalar_pos]
++    if cont_pos.size:
++        q[cont_idx] = np.cos(values[cont_pos])
++        q[cont_idx + 1] = np.sin(values[cont_pos])
+     return q
+ 
+ 
+@@ -535,20 +586,40 @@
+ def model_com_with_jacobian(
+     model, data, q_full, mass_points=None, active_v=None, derivatives=True
+ ):
+-    """调用 Pinocchio 原生 C++ jacobianCenterOfMass / centerOfMass 计算整机质心与雅可比。"""
++    """整机质心（URDF 根坐标系）及其对活跃关节的雅可比，含固定在根上的质量。
++
++    Pinocchio 的 centerOfMass / jacobianCenterOfMass 只累加 joint 1..n 的子树质量，
++    不含 model.inertias[0]（URDF 根 link 以及经 fixed joint 挂在根上的 link）。
++    这部分质量 m0 不随 q 运动，质心为 c0（根坐标系），因此：
++        com   = (M_mov * c_mov + m0 * c0) / (M_mov + m0)
++        J_com = M_mov / (M_mov + m0) * J_mov
++    与 configure_model_metadata 统计的 model_mass_kg（全部 link 质量）保持一致。
++    mass_points 参数仅为兼容旧调用保留，计算不再使用。
++    """
++    nv = model.nv
+     if derivatives:
+-        J_com_full = pin.jacobianCenterOfMass(model, data, q_full, False)
+-        com = np.array(data.com[0], dtype=float, copy=True)
+-        if active_v is not None:
+-            J_com = np.array(J_com_full[:, active_v], dtype=float, copy=True)
+-        else:
+-            J_com = np.array(J_com_full, dtype=float, copy=True)
+-        return com, J_com
++        # nv = 1 时 Pinocchio 返回形状 (3,) 的数组，统一 reshape 为 (3, nv)
++        J_mov = np.asarray(
++            pin.jacobianCenterOfMass(model, data, q_full, False), dtype=float
++        ).reshape(3, nv)
++    else:
++        pin.centerOfMass(model, data, q_full, False)
++        J_mov = None
+ 
+-    pin.centerOfMass(model, data, q_full, False)
+-    com = np.array(data.com[0], dtype=float, copy=True)
+-    n_cols = len(active_v) if active_v is not None else model.nv
+-    return com, np.zeros((3, n_cols), dtype=float)
++    m_mov = float(data.mass[0])
++    c_mov = np.asarray(data.com[0], dtype=float)
++    root_inertia = model.inertias[0]
++    m_root = float(root_inertia.mass)
++    m_total = m_mov + m_root
++    if not math.isfinite(m_total) or m_total <= 0.0:
++        raise ValueError("model has no positive mass for COM")
++    com = (m_mov * c_mov + m_root * np.asarray(root_inertia.lever, dtype=float)) / m_total
++
++    n_cols = len(active_v) if active_v is not None else nv
++    if J_mov is None:
++        return com, np.zeros((3, n_cols), dtype=float)
++    J_cols = J_mov if active_v is None else J_mov[:, active_v]
++    return com, (m_mov / m_total) * J_cols
+ 
+ 
+ def evaluate_pose_physics(pin_model, pin_data, pin_maps, q_active, q_ref=None):
+@@ -579,7 +650,7 @@
+     mass = float(
+         pin_maps.get(
+             "model_mass_kg",
+-            pin_data.mass[0] if len(pin_data.mass) > 0 else 0.0,
++            float(pin_data.mass[0]) + float(pin_model.inertias[0].mass),
+         )
+     )
+ 
+@@ -656,11 +727,15 @@
+     lower,
+     upper,
+     q_ref,
+-    waist_bool_mask,
++    _legacy_waist_mask=None,
+     virtual_half_windows=None,
+     active_names=None,
+ ):
+-    """构建有效关节限位：当显式配置 virtual_half_windows 时，作为硬搜索窗口与真实限位求交。"""
++    """构建有效关节限位：当显式配置 virtual_half_windows 时，作为硬搜索窗口与真实限位求交。
++
++    第 4 个位置参数是旧版的腰部掩码，仅为兼容既有位置参数调用而保留，不参与计算：
++    窗口只由 virtual_half_windows 显式决定，绝不按关节类型或参考角隐式生成。
++    """
+     lo = np.asarray(lower, dtype=float).copy()
+     hi = np.asarray(upper, dtype=float).copy()
+     if np.any(np.isnan(lo)) or np.any(np.isnan(hi)) or np.any(lo >= hi):
+@@ -787,10 +862,13 @@
+         if derivatives:
+             z -= g_load
+         cost += c_load
++        # peak_ratio / load_ok 随代价一并返回，调用方择优时无需再算一次重力矩
+         parts.update(
+             absolute_load=load_parts["absolute"],
+             excess_load=load_parts["excess"],
+             relative_load=load_parts["relative"],
++            peak_ratio=physics["peak_ratio"],
++            load_ok=physics["load_ok"],
+         )
+         if include_waist and com_gain > 0.0 and com_xy_ref is not None:
+             ref_com = finite_vector(com_xy_ref, 3, "reference COM")
+@@ -927,15 +1005,19 @@
+     *,
+     return_info=False,
+ ):
+-    """正交信赖域主动集限位钳制重投影（SNS）：
++    """主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
+ 
+-    1. 预先冻结已处于物理边界且梯度向外推的自由度（边界位移为 0）。
+-    2. 在每轮迭代中，已钳制子空间 (~free_mask) 的位移 dq_clamped 保持精确在边界值，绝不被二次缩放；
+-       自由子空间 (free_mask) 的步长 dq_free 按剩余正交信赖域半径
+-       sqrt(max(0, max_step^2 - ||dq_clamped||^2)) 缩放。
+-    3. 因为任何触发越界的自由关节 i 其到边界的距离必严格小于 |dq_free[i]|，
+-       将其钳制入 dq_clamped 后 ||dq_clamped|| 恒严格小于 max_step，
+-       从而保证剩余误差 err_rem = err - J_active @ dq_clamped 与实际采用的试探步 100% 精确一致。
++    记 D = W_inv（逆度量，关节权重越大 D 越小、该关节越“贵”），A = J_f D_f J_f^T + λI：
++      任务步   dq_task = D_f J_f^T A^-1 e_rem
++      零空间步 dq_null = w · (D_f z - D_f J_f^T A^-1 J_f D_f z)
++    其中 e_rem = e - J dq_clamped 是扣除已钳制关节位移后的剩余误差，z = -∇H 为次任务负梯度。
++    零空间投影 D - D J^T A^-1 J D 对称半正定，所以 z^T dq_null >= 0，次任务一定是下降方向
++    （与 SVD 回退 _metric_svd_step 的 S Z Z^T S z 一致）。
++
++    循环：每轮把越界最严重的一个自由关节钳制到边界（位移 = 边界 - 当前值，此后不再缩放），
++    其余自由关节按剩余信赖域半径 sqrt(max_step^2 - ||dq_clamped||^2) 缩放；
++    被钳制关节的越界距离严格小于其本轮位移，故 ||dq_clamped|| < max_step 恒成立。
++    至多 n_free + 1 轮；返回的 clamped_converged=False 表示轮数用尽仍有越界（调用方记诊断）。
+     """
+     if damping < 0.0 or max_step <= 0.0:
+         raise ValueError("invalid damping/max_step")
+@@ -981,11 +1063,11 @@
+             dq_task_free = W_inv_free @ (J_free.T @ rhs)
+             dq_null_free = np.zeros_like(dq_task_free)
+             if z_grad is not None and null_weight > 0.0:
+-                z_free = z_grad[free_mask]
+-                Jz = J_free @ z_free
+-                J_free_invA_Jz = cho_solve(chol_fac, Jz, check_finite=False)
++                # 度量一致的零空间下降步：w (D z - D J^T A^-1 J D z)
++                Dz = W_inv_free @ z_grad[free_mask]
++                invA_JDz = cho_solve(chol_fac, J_free @ Dz, check_finite=False)
+                 dq_null_free = null_weight * (
+-                    z_free - W_inv_free @ (J_free.T @ J_free_invA_Jz)
++                    Dz - W_inv_free @ (J_free.T @ invA_JDz)
+                 )
+         except (np.linalg.LinAlgError, ValueError):
+             dq_task_free, sec_free = _metric_svd_step(
+@@ -1044,6 +1126,27 @@
+     return dq_total, dq_null_out
+ 
+ 
++def _antipodal_tangent(a, motion=None):
++    """180° 对径死点（a 与目标方向相反、叉积为零）时选取切向，返回垂直于 a 的单位向量。
++
++    motion 为 3 x n 矩阵，列是各关节能产生的“方向变化 / 转轴”；取其在 a 切平面内投影的
++    主左奇异向量，即当前构型下实际最容易转动的方向。旧版用“与 a 最不平行的坐标轴叉乘”，
++    少轴或特定构型下该方向可能恰好不可达（雅可比行为零）而卡死在对径点。
++    motion 为 None（无雅可比的试探点评估）或不可达时退回坐标轴叉乘；
++    此时误差范数只依赖转角而与切向无关，不影响线搜索判据。
++    """
++    if motion is not None and motion.size:
++        M = motion - np.outer(a, a @ motion)
++        U, sv, _ = np.linalg.svd(M, full_matrices=False)
++        if sv.size and sv[0] > 1e-9:
++            t = U[:, 0] - a * float(a @ U[:, 0])
++            n_t = float(np.linalg.norm(t))
++            if n_t > 1e-12:
++                return t / n_t
++    t = np.cross(a, np.eye(3)[int(np.argmin(np.abs(a)))])
++    return t / np.linalg.norm(t)
++
++
+ def dls_task_terms(
+     model,
+     data,
+@@ -1102,10 +1205,9 @@
+ 
+         if mode == "tool_dir":
+             edir = b - a
+-            Jdir = -skew(a) @ J[3:]
++            Jdir = -skew(a) @ J[3:]          # 行：工具轴方向 a 的变化率 da/dq
+             if cosine < -1.0 + 1e-8:
+-                tangent = np.cross(a, np.eye(3)[int(np.argmin(np.abs(a)))])
+-                tangent /= np.linalg.norm(tangent)
++                tangent = _antipodal_tangent(a, Jdir if jacobian else None)
+                 edir = angle * tangent
+                 antipodal = True
+             e = np.r_[pos_error / characteristic_length, edir]
+@@ -1116,10 +1218,10 @@
+             row = np.zeros(len(v_idx), dtype=float)
+             if violation > 0.0:
+                 if sine > 1e-9:
+-                    tangent = cross / sine
++                    tangent = cross / sine       # 把 a 转向 b 的转轴
+                 else:
+-                    tangent = np.cross(a, np.eye(3)[int(np.argmin(np.abs(a)))])
+-                    tangent /= np.linalg.norm(tangent)
++                    # 对径：任意垂直于 a 的转轴都能减小夹角，取雅可比上最容易转动的那一个
++                    tangent = _antipodal_tangent(a, J[3:] if jacobian else None)
+                     antipodal = True
+                 row = tangent @ J[3:]
+             e = np.r_[pos_error / characteristic_length, violation]
+@@ -1179,7 +1281,14 @@
+     relative_gravity_gain=None,
+     posture_use_equivalent_branch=False,
+ ):
+-    """Merged DLS v5：统一虚拟窗口边界、正交信赖域 SNS 钳制与物理坐标回中。"""
++    """单种子 DLS IK（merged-v6）：主任务为末端位姿，零空间次任务为回中/限位裕度/负荷/质心。
++
++    返回 (q, diag)。q 优先取“位姿达标点”中按负荷峰值容差带 + 次任务代价择优的那个；
++    没有达标点时返回主任务误差最小的迭代点（diag["converged"] = False）。
++    迭代全程满足有效限位（URDF 限位 ∩ virtual_half_windows），由 SNS 钳制 + 边界吸附保证。
++    diag["stop_reason"]：SETTLED / SETTLE_LIMIT / SMALL_STEP / STALLED_NO_PROGRESS /
++    LINE_SEARCH_STALLED / TIME_BUDGET / ITERATION_LIMIT。
++    """
+     mode = validate_orientation_mode(orientation_mode)
+     target = validate_transform(T_target)
+     axis = finite_vector(
+@@ -1352,14 +1461,17 @@
+         "antipodal_escape_used": False,
+         "antipodal_escape_steps": 0,
+         "sns_clamp_incomplete": False,
++        "bound_snaps": 0,
+     }
+ 
+     best_q, best_merit = q.copy(), math.inf
+-    best_pose, best_key = None, None
+     settle = 0
+     periodic_unbounded = pin_maps.get(
+         "active_periodic", pin_maps["active_continuous"]
+     )
++    D_base = np.diag(1.0 / weights)
++    waist_idx = np.nonzero(waist)[0]
++    has_waist_dof = bool(np.any(waist & movable))
+ 
+     def objective(values, q_full_val, derivatives, parts=None):
+         return _compute_nullspace_gradient_and_cost(
+@@ -1406,11 +1518,58 @@
+     def is_pose(t_dict):
+         return t_dict["pos_err"] <= pos_tol and t_dict["ori_violation"] <= ori_tol
+ 
+-    def pose_key(values, cost_val):
+-        if context is None:
+-            return (False, 0.0, cost_val)
+-        p = load_physics(pin_model, pin_data, pin_maps, values, context, False)
+-        return (not p["load_ok"], p["peak_ratio"], cost_val)
++    def snap(trial):
++        """试探点只允许浮点舍入级越界（<= BOUND_SNAP_TOL），吸附回边界；真实越界返回 None。"""
++        viol = max(float(np.max(lo - trial)), float(np.max(trial - hi)))
++        if viol <= 0.0:
++            return trial
++        if viol > BOUND_SNAP_TOL:
++            return None
++        diag["bound_snaps"] += 1
++        return np.minimum(np.maximum(trial, lo), hi)
++
++    # ---- 位姿达标迭代点择优 ----------------------------------------------------
++    # 负荷合格（load_ok）优先；同为合格时，峰值落在 [floor, floor + band] 容差带内的点里取
++    # 次任务代价最小者（floor = 已见合格点的最低峰值，单调不增，所以峰值不会被逐步“蚕食”）；
++    # 同为超载时峰值越低越好。旧版严格字典序 (超载, 峰值, 代价) 会因峰值差 0.001 丢掉姿态改善。
++    # band 取 peak_tie 的一部分：种子内容差 + 候选间容差 (peak_tie) 合计仍接近 peak_tie。
++    peak_band = (
++        0.0
++        if context is None
++        else POSE_PEAK_BAND_FRACTION * float(context["policy"].peak_tie)
++    )
++    pose_best = {"q": None, "overloaded": False, "peak": math.inf, "cost": math.inf}
++    peak_floor = math.inf
++
++    def offer_pose(values, cost_val, parts_val):
++        nonlocal peak_floor
++        overloaded = context is not None and not parts_val.get("load_ok", True)
++        peak = 0.0 if context is None else float(parts_val.get("peak_ratio", 0.0))
++        cur = pose_best
++        if cur["q"] is None or (cur["overloaded"] and not overloaded):
++            take = True
++        elif overloaded != cur["overloaded"]:
++            take = False
++        elif overloaded:
++            take = peak < cur["peak"] - 1e-12 or (
++                peak <= cur["peak"] + 1e-12 and cost_val < cur["cost"]
++            )
++        else:
++            floor = min(peak_floor, peak)
++            take = peak <= floor + peak_band and (
++                cur["peak"] > floor + peak_band or cost_val < cur["cost"]
++            )
++        if not overloaded:
++            peak_floor = min(peak_floor, peak)
++        if take:
++            cur.update(
++                q=values.copy(), overloaded=overloaded, peak=peak, cost=cost_val
++            )
++        return take
++
++    stall_ref, stall_it = None, 0
++    settle_prev_cost, settle_slow = None, 0
++    timed_out = False
+ 
+     for it in range(int(max_iter)):
+         if deadline is not None and time.monotonic() >= deadline:
+@@ -1443,16 +1602,36 @@
+             best_q, best_merit = q.copy(), t["merit"]
+ 
+         if pose_ok:
+-            key = pose_key(q, cost)
+-            if best_key is None or key < best_key:
+-                best_pose, best_key = q.copy(), key
++            offer_pose(q, cost, parts)
+             settle += 1
+             if settle > MAX_SETTLE_EXTRA_ITERS:
+                 diag["stop_reason"] = "SETTLE_LIMIT"
+                 break
++            # 姿态整理的边际收益判据：连续 SETTLE_PATIENCE 步代价相对下降都 < SETTLE_COST_RTOL 即停
++            if settle_prev_cost is not None:
++                gain = settle_prev_cost - cost
++                slow = gain < SETTLE_COST_RTOL * max(abs(settle_prev_cost), 1e-12)
++                settle_slow = settle_slow + 1 if slow else 0
++                if settle_slow >= SETTLE_PATIENCE:
++                    diag["stop_reason"] = "SETTLED"
++                    break
++            settle_prev_cost = cost
++        else:
++            # 停滞检测：每 PIN_IK_STALL_ITERS 次迭代，主任务误差范数下降不足 PIN_IK_STALL_RTOL
++            # 即放弃本种子（典型场景：锁腰种子目标超出手臂可达范围，误差停在几十毫米处缓慢爬行）
++            err_norm = math.sqrt(2.0 * best_merit)
++            if stall_ref is None:
++                stall_ref, stall_it = err_norm, it
++            elif it - stall_it >= PIN_IK_STALL_ITERS:
++                if err_norm > (1.0 - PIN_IK_STALL_RTOL) * stall_ref:
++                    diag["stalled"] = True
++                    diag["stop_reason"] = "STALLED_NO_PROGRESS"
++                    break
++                stall_ref, stall_it = err_norm, it
+ 
+-        D = np.diag(1.0 / weights)
+-        if np.any(waist & movable):
++        # 逆度量 D：手臂 = 1；腰部在近距离目标时“贵”(1/near_weight)，远目标或回程时逐步释放
++        D = D_base.copy()
++        if has_waist_dof:
+             alpha = 1.0 if waist_load_release else 0.0
+             if release_enabled and shoulder_cur is not None:
+                 current_distance = float(
+@@ -1471,11 +1650,11 @@
+                     release_fraction(current_distance),
+                     float(np.clip(ret, 0.0, 1.0)),
+                 )
+-            waist_idx = np.nonzero(waist)[0]
+             D[waist_idx, waist_idx] = (
+                 1.0 - alpha
+             ) / near_weight + alpha / far_weight
+ 
++        # 主任务误差越小，零空间次任务权重越大（达标后再放大 1.5 倍做姿态整理）
+         null_weight = (1.5 if pose_ok else 1.0) / (
+             1.0
+             + (
+@@ -1501,17 +1680,16 @@
+         )
+         diag["sns_clamp_incomplete"] |= not clamped_ok
+ 
+-        # 末端已达标且零空间步长收敛：验证试探步是否仍满足位姿容差且次要代价更优
++        # 末端已达标且零空间步长收敛：最后试一次整步，仍达标且择优通过才采纳
+         if pose_ok and float(np.linalg.norm(dq_null)) < POSTURE_SETTLE_TOL:
+-            trial = q + dq
+-            if np.all(trial >= lo) and np.all(trial <= hi):
++            trial = snap(q + dq)
++            if trial is not None:
+                 tt = terms(trial, jac=False)
+                 if is_pose(tt):
+-                    trial_cost = objective(trial, tt["q_full"], False)[1]
+-                    trial_key = pose_key(trial, trial_cost)
+-                    if best_key is None or trial_key < best_key:
++                    tparts = {}
++                    trial_cost = objective(trial, tt["q_full"], False, tparts)[1]
++                    if offer_pose(trial, trial_cost, tparts):
+                         q = trial
+-                        best_pose, best_key = trial.copy(), trial_key
+             diag["stop_reason"] = "SETTLED"
+             break
+ 
+@@ -1519,40 +1697,30 @@
+             diag["stop_reason"] = "SMALL_STEP"
+             break
+ 
+-        attempts = [dq]
+-        if not pose_ok and float(np.linalg.norm(dq_null)) > 1e-12:
+-            pure_dq, _ = _solve_sns_clamped_step(
+-                t["J"],
+-                t["error"],
+-                None,
+-                0.0,
+-                D,
+-                movable,
+-                q,
+-                lo,
+-                hi,
+-                damping,
+-                max_step,
+-            )
+-            attempts.append(pure_dq)
+-
++        # 回溯线搜索（严格单调）：先试“主任务 + 零空间”合成步，失败再试纯主任务步（按需才求解）
++        directions = [dq]
++        need_pure = (not pose_ok) and float(np.linalg.norm(dq_null)) > 1e-12
+         accepted = False
+-        for direction in attempts:
++        d_idx = 0
++        while d_idx < len(directions) and not accepted and not timed_out:
++            direction = directions[d_idx]
+             for backtrack in range(int(backtrack_steps)):
+                 if deadline is not None and time.monotonic() >= deadline:
++                    timed_out = True
+                     break
+-                trial = q + (0.5 ** backtrack) * direction
+-                if np.any(trial < lo) or np.any(trial > hi):
++                trial = snap(q + (0.5 ** backtrack) * direction)
++                if trial is None:
+                     continue
+                 tt = terms(trial, jac=False)
+                 if pose_ok:
++                    # 姿态整理阶段：必须保持位姿达标，且次任务代价严格下降
+                     progress = (
+                         is_pose(tt)
+                         and objective(trial, tt["q_full"], False)[1]
+                         < cost - 1e-13
+                     )
+                 elif t["antipodal"]:
+-                    # P3 特殊逃逸判据：在 180° 对径死点处，允许在方向误差严格减小且位置误差不超容差裕度时跳出死点
++                    # 180° 对径死点逃逸：方向误差严格减小、位置误差增量不超过一个容差即可
+                     progress = (
+                         tt["ori_violation"] < t["ori_violation"] - 1e-8
+                         and tt["pos_err"] <= t["pos_err"] + pos_tol
+@@ -1568,11 +1736,27 @@
+                     if not pose_ok and t["antipodal"]:
+                         diag["antipodal_escape_steps"] += 1
+                     break
+-            if accepted:
+-                break
++            d_idx += 1
++            if d_idx == 1 and need_pure and not accepted and not timed_out:
++                pure_dq, _ = _solve_sns_clamped_step(
++                    t["J"],
++                    t["error"],
++                    None,
++                    0.0,
++                    D,
++                    movable,
++                    q,
++                    lo,
++                    hi,
++                    damping,
++                    max_step,
++                )
++                directions.append(pure_dq)
+ 
+         if not accepted:
+-            if pose_ok:
++            if timed_out:
++                diag["stop_reason"] = "TIME_BUDGET"
++            elif pose_ok:
+                 diag["stop_reason"] = "SETTLED"
+             else:
+                 diag["stalled"] = True
+@@ -1581,13 +1765,12 @@
+ 
+     last = terms(q, jac=False)
+     if is_pose(last):
+-        key = pose_key(q, objective(q, last["q_full"], False)[1])
+-        if best_key is None or key < best_key:
+-            best_pose, best_key = q.copy(), key
++        lparts = {}
++        offer_pose(q, objective(q, last["q_full"], False, lparts)[1], lparts)
+     elif last["merit"] < best_merit:
+         best_q = q.copy()
+ 
+-    result = best_pose if best_pose is not None else best_q
++    result = pose_best["q"] if pose_best["q"] is not None else best_q
+     # 严格在有效限位 [lo, hi]（包含 virtual_half_windows 约束）内选择最接近起始 seed 的合法 2πk 分支
+     multi_turn = pin_maps.get(
+         "active_multi_turn",
+@@ -1608,22 +1791,27 @@
+         secondary_components=parts,
+     )
+     if context is not None:
+-        p = load_physics(pin_model, pin_data, pin_maps, result, context, False)
+         diag.update(
+-            final_peak_ratio=p["peak_ratio"], final_load_ok=p["load_ok"]
++            final_peak_ratio=float(parts["peak_ratio"]),
++            final_load_ok=bool(parts["load_ok"]),
+         )
+     return result.copy(), diag
+ 
+ 
+ def make_scatter_seeds(q_prev, q_ready, lower, upper, rng):
+-    """生成确定性基准种子与散布种子；对无界 continuous 关节不产生 NaN 中点。"""
++    """生成种子序列：q_prev（就近、连续性最好）-> q_ready（标准姿态）-> 两者附近由小到大的扰动 -> 限位中点。
++
++    q_prev 放在第一位：从当前构型出发的 DLS 天然收敛到最近的解，最不容易“绕大圈”；
++    q_ready 作为第二个基准种子提供“姿态合理”的另一族解。对无界 continuous 关节不产生 NaN 中点。
++    """
+     seeds = [
+-        clip_to_bounds(q_ready, lower, upper),
+         clip_to_bounds(q_prev, lower, upper),
++        clip_to_bounds(q_ready, lower, upper),
+     ]
+-    for base in (q_prev, q_ready):
++    # 交错排列 (轮次 -> 尺度从大到小 -> q_prev / q_ready)，保证前 max_seeds 个种子足够分散
++    for _ in range(max(1, N_NOISE_PER_BASE // len(NOISE_SCALES))):
+         for scale in NOISE_SCALES:
+-            for _ in range(max(1, N_NOISE_PER_BASE // len(NOISE_SCALES))):
++            for base in (q_prev, q_ready):
+                 seeds.append(
+                     clip_to_bounds(
+                         base + rng.normal(scale=scale, size=len(base)),

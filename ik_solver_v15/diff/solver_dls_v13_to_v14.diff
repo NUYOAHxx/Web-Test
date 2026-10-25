@@ -1,0 +1,597 @@
+--- a/ha_arm_ik/solver_dls.py
++++ b/ha_arm_ik/solver_dls.py
+@@ -1,49 +1,37 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""Pinocchio 阻尼最小二乘 IK 核心（merged-v13；单种子迭代与 v8 相同）。
++"""ha_arm_ik.solver_dls —— Pinocchio 数值核心：单种子 DLS/SNS 迭代、静态负荷模型、腰部舒适窗、种子库。
+ 
+ 约束分层（硬约束不满足 = 不是解；软目标只在硬约束内部比较）：
+   硬约束  H1 末端位姿误差 <= pos_tol / ori_tol（full / tool_dir / tool_cone 三种模式）
+           H2 关节限位：URDF 限位 ∩ 可选虚拟搜索窗；迭代中由 SNS 钳制保证从不越界
+           H3 静态负荷：每个守护关节 |tau_g| / allowable <= 1（strict 模式，solver.py 复核）
+           H4 不绕大圈：相对 q_prev 的单关节位移 <= max_joint_jump（solver.py 候选过滤）
+-  偏好    P1 腰部舒适窗（v8）：先只在舒适窗内搜索，窗内没有满足 H1-H4 的解才放开到 H2 限位重试
++  偏好    P1 腰部舒适窗：先只在舒适窗内搜索，窗内没有满足 H1-H4 的解才放开到 H2 限位重试
+   软目标  S1 负荷峰值最小（带 peak_tie 容差带），S2 次任务代价最小：
+           q_ready 物理坐标回中 + 限位裕度 + 重力矩 + 整机质心水平偏移
+ 
+-v13 相对 v8（只增不改：单种子迭代 pinocchio_ik_one_seed、SNS、次任务与 v8 逐位相同）：
+-  1. 任务空间种子库：build_seed_library 在有效限位内均匀采样关节角、记录末端相对运动链基座的位姿；
+-     select_library_seeds 按与目标的任务空间距离（位置 / 特征长度、姿态差口径同主任务）选种子，
+-     入选种子彼此关节差 ∞-范数 >= SEED_LIBRARY_MIN_SEPARATION；seed_library_target 把目标换到库的坐标系
+-  2. chain_base_joint：运动链基座关节（最靠近根的活动关节的父关节）
+-
+-v8 相对 v7（修正 + 腰部舒适窗；公共函数签名只增加可选关键字参数）：
+-  1. 帧查询按 pin.FrameType.BODY：关节与连杆同名的 URDF（Pinocchio 3.x 起同名查询抛 ValueError）可用
+-  2. 姿态整理恢复 v6 的上限 50 步 / 耐心 3（v7 的 15 / 2 在收敛前截断，tool 模式次任务代价平均高 0.7-1.9%）
+-  3. load_mode="off" 的质心参考改用与代价相同的整机质心（含根 link 质量）；v7 参考值漏掉根质量，
+-     q_ready 自身被拉偏（合成模型偏差 73 mm）
+-  4. 臂展估计 estimate_arm_max_reach：沿运动链从肩关节逐段累加到 TCP（v7 只取 Link3 / Link5 两段，
+-     合成模型 0.62 m，实际 1.15 m）；肩关节可用 shoulder_joint 显式指定（不再依赖 "_Link2" 后缀）
+-  5. derive_waist_comfort_bounds：由 q_ready 处的静态重力矩推导腰部舒适窗（见该函数说明）
+-  6. 注释按实际公式更正；v5 起未使用的常量标注为“兼容导出”
+-
+-v7 相对 v6（提速；约束分层、择优规则与公共函数签名不变）：
+-  1. 停滞检测窗口 25 -> 12 次迭代、下降阈值 5% -> 2.5%
+-  2. 低负荷早停阈值默认 0.60 -> min(0.70, soft_ratio)；显式配置 load_early_stop_ratio 时按配置
+-  3. 热路径实现优化（算法与运算顺序不变，与 v6 逐位一致；唯一例外见第 4 条）：
+-     每个种子预计算目标位姿/索引/质心投影/容许力矩向量；次任务直接复用主任务已算好的 Pinocchio q；
+-     只要代价的调用不再算梯度；对角逆度量的 SNS 改为向量运算；迭代内只更新末端单帧位姿
+-  4. SNS 的 Cholesky 直接调用 LAPACK dpotrf/dpotrs（与 scipy 1.18 cho_factor/cho_solve 相差 1e-12 量级）
+-  5. make_scatter_seeds(max_count=...)：只对实际会用到的前缀去重（随机数消耗与种子顺序不变）
+-
+-v6 相对 v5 的修正：
+-  1. 整机质心计入 universe 惯量（URDF 根 link 及固定在根上的 link），nv=1 时雅可比形状正确
+-  2. SNS Cholesky 主路径的零空间步与 SVD 回退一致：D z - D J^T A^-1 J D z（保证下降方向）
+-  3. 位姿达标迭代点的择优改为“峰值容差带 + 代价”，不再因峰值差 0.001 丢弃姿态改善
+-  4. 180° 对径死点按雅可比实际可达方向选切向，单轴/少轴情况也能逃逸
+-  5. 主任务停滞检测：窗口内误差下降不足即换种子，避免不可达种子空转到迭代上限
+-  6. 线搜索边界舍入吸附、回溯内超时记为 TIME_BUDGET、负荷向量缓存与关节映射向量化
++单种子迭代 pinocchio_ik_one_seed（每次迭代）：
++  1. 主任务 _make_task_terms：位姿残差 e（位置按 characteristic_length 归一）与解析雅可比 J
++  2. 逆度量 D（对角）：手臂 = 1；腰部按“肩 -> 目标距离 / 臂展”与腰部偏离 q_ref 平滑释放（无状态，去返程对称）
++  3. 次任务 _SecondaryObjective：H(q) 与 z = -∇H；零空间权重随 |e| 衰减，达标后放大做姿态整理
++  4. _sns_clamped_core：主动集限位钳制 + 正交信赖域，一步内不越界且 ||dq|| <= max_step（_metric_svd_step 回退）
++  5. 回溯线搜索（先合成步、再纯主任务步）、停滞检测、180° 对径死点逃逸、姿态整理与收敛判定
++  返回 (q, diag)：q 为位姿达标点中按“峰值容差带 + 次任务代价”择优者；没有达标点时为主任务误差最小点
++
++模块内容
++  数据结构    JointStateSnapshot（不可变关节快照）、LoadPolicy（负荷门控策略）
++  关节映射    build_pinocchio_joint_maps、configure_model_metadata（URDF 审计、掩码、限位）、
++              active_q_to_pinocchio_q / pinocchio_q_to_active_q、active_periodic_mask / active_multi_turn_mask
++  物理量      model_com_with_jacobian、evaluate_pose_physics、prepare_load_context、load_physics、
++              estimate_arm_max_reach
++  限位与窗口  _build_effective_bounds、derive_waist_comfort_bounds
++  迭代核心    _SecondaryObjective、_sns_clamped_core、_metric_svd_step、_make_task_terms / dls_task_terms、
++              pinocchio_ik_one_seed
++  种子        make_scatter_seeds、build_seed_library / seed_library_target / select_library_seeds
++2πk 分支对齐 / 去重直接用 ik_common 的 select_closest_bounded_branch、bounded_joint_difference、joint_difference。
++测试专用的旧入口（整函数形式的次任务梯度与 SNS 步）在 tests/dls_compat.py。版本演进见 README_v14.md。
+ """
+ 
+ from dataclasses import dataclass, field, replace
+@@ -54,7 +42,6 @@
+ import xml.etree.ElementTree as ET
+ 
+ import numpy as np
+-from scipy.linalg import cho_factor, cho_solve  # noqa: F401  （v6 兼容导出；v7 主路径直接用 LAPACK）
+ from scipy.linalg import lapack as _lapack
+ 
+ try:
+@@ -65,10 +52,11 @@
+ from ha_arm_ik.ik_common import (
+     SAFE_MARGIN,
+     TOOL_AXIS_X,
++    bounded_joint_difference,
+     clip_to_bounds,
+-    closest_direction_on_cone,
+-    normalize,
++    joint_difference,
+     normalize_cone_half_angle,
++    select_closest_bounded_branch,
+     skew,
+     unique_seed_list,
+     validate_orientation_mode,
+@@ -87,10 +75,7 @@
+ PIN_IK_STALL_RTOL = 0.025         # 窗口内主任务误差范数相对下降 < 2.5% -> 判定停滞，换下一个种子
+                                   # （v6 为每 25 次迭代 5%；v7 窗口减半、阈值减半，判定速率与 v6 相当但检查更频繁。
+                                   #   窗口 12 + 5% 会误杀收敛较慢的锁腰种子，tool 模式少数目标丢掉腰部回中解）
+-PIN_IK_STALL_DELTA_M = 5e-5       # 未使用（兼容导出；v6 起改用上面的相对窗口判据）
+ BOUND_SNAP_TOL = 1e-9             # 试探点越界不超过此值（浮点舍入）时吸附回边界，不整步拒绝
+-PIN_IK_MAX_VALID_CANDIDATES = 2   # 未使用（兼容导出）
+-WAIST_RETURN_TOL = 0.10           # 未使用（兼容导出；v5 起外层不再按腰部回中早停）
+ N_NOISE_PER_BASE = 16
+ # 扰动种子标准差（rad），从大到小：前几个扰动种子先探索不同解族（提高成功率、找低负荷解），
+ # 后面的小扰动做局部细化。v5 为 [0.02, 0.05, 0.10, 0.20] 且先排完 q_prev 的 16 个小扰动，
+@@ -113,12 +98,6 @@
+ POSE_PEAK_BAND_FRACTION = 0.25    # 单种子内择优的峰值容差带 = 0.25 * LoadPolicy.peak_tie（默认 0.005）
+ LOAD_EARLY_STOP_RATIO = 0.70      # 低负荷早停阈值默认值，实际取 min(本值, soft_ratio)（v6 默认 0.60）
+ 
+-# 兼容旧版外部导入的别名常量（未使用）
+-WAIST_POST_GAIN = 0.30
+-WAIST_POST_ITERS = MAX_SETTLE_EXTRA_ITERS
+-WAIST_POST_STEP = 0.05
+-WAIST_POST_TOL = POSTURE_SETTLE_TOL
+-
+ # =============================================================================
+ # 3. 无状态腰部自适应释放参数（路径无关，去返程完全对称）
+ # =============================================================================
+@@ -138,8 +117,6 @@
+ COM_XY_GAIN = 0.12                # 零空间整机质心(CoM)水平投影稳定增益（代价 0.5 * 0.12 * |Δc|^2，Δc 单位 m）
+ JOINT_LIMIT_GAIN = 0.03           # 限位排斥增益；排斥区宽度 = max(SAFE_MARGIN, 0.02) rad
+ WAIST_YAW_VIRTUAL_LIM = np.deg2rad(90.0)   # v8：重力无关腰关节（偏航类）的舒适半窗，见 derive_waist_comfort_bounds
+-ARM_ROLL_VIRTUAL_LIM = np.deg2rad(150.0)   # 未使用（兼容导出）
+-MAX_SNS_CLAMP_PASSES = 10         # 未使用（兼容导出；主动集钳制上限按 n_free + 1 动态决定）
+ 
+ # =============================================================================
+ # 5. 腰部舒适窗（v8，详见 derive_waist_comfort_bounds）
+@@ -162,7 +139,8 @@
+ 
+ 
+ # =============================================================================
+-# 基础数值校验、周期/多圈分支处理与数据结构
++# 基础数值校验与数据结构（2πk 分支对齐 / 去重用 ik_common 的 select_closest_bounded_branch、
++# bounded_joint_difference、joint_difference）
+ # =============================================================================
+ def finite_vector(value, size=None, name="vector"):
+     result = np.asarray(value, dtype=float)
+@@ -196,86 +174,6 @@
+     return T.copy()
+ 
+ 
+-def joint_difference(a, b, continuous):
+-    """计算关节角差值 a - b；仅对显式标记为 True 的无界 continuous 旋转关节折叠到 [-π, π)。"""
+-    d = np.asarray(a, dtype=float) - np.asarray(b, dtype=float)
+-    d = d.copy()
+-    mask = np.asarray(continuous, dtype=bool)
+-    if np.any(mask):
+-        d[mask] = (d[mask] + np.pi) % (2.0 * np.pi) - np.pi
+-    return d
+-
+-
+-def select_closest_bounded_branch(
+-    q, reference, lower, upper, multi_turn_mask=None
+-):
+-    """在满足 lower <= q + 2πk <= upper (k ∈ Z) 的 2πk 等价角中，
+-    为显式标记在 multi_turn_mask 中的旋转关节选择最接近 reference 的那一个。
+-
+-    注意：当 multi_turn_mask 为 None 时，绝不根据限位跨度猜测周期性（直接返回原值拷贝），
+-    以防止对无界或大跨度 prismatic 平移关节误执行模 2π 运算。
+-    """
+-    q_arr = finite_vector(q, name="q")
+-    ref_arr = finite_vector(reference, len(q_arr), name="reference")
+-    if multi_turn_mask is None:
+-        return q_arr.copy()
+-
+-    mask = np.asarray(multi_turn_mask, dtype=bool)
+-    if mask.shape != q_arr.shape:
+-        raise ValueError("multi_turn_mask shape mismatch")
+-    if not np.any(mask):
+-        return q_arr.copy()
+-
+-    lo = np.asarray(lower, dtype=float)
+-    hi = np.asarray(upper, dtype=float)
+-    out = q_arr.copy()
+-    two_pi = 2.0 * np.pi
+-    eps = 1e-9
+-
+-    for i in np.nonzero(mask)[0]:
+-        qi = float(q_arr[i])
+-        ri = float(ref_arr[i])
+-        li = float(lo[i])
+-        ui = float(hi[i])
+-
+-        if not np.isfinite(li) and not np.isfinite(ui):
+-            out[i] = ri + ((qi - ri + np.pi) % two_pi - np.pi)
+-            continue
+-
+-        k_min = (
+-            math.ceil((li - eps - qi) / two_pi)
+-            if np.isfinite(li)
+-            else round((ri - qi) / two_pi) - 2
+-        )
+-        k_max = (
+-            math.floor((ui + eps - qi) / two_pi)
+-            if np.isfinite(ui)
+-            else round((ri - qi) / two_pi) + 2
+-        )
+-
+-        best_val = qi
+-        best_dist = abs(qi - ri) if (li - eps <= qi <= ui + eps) else math.inf
+-        for k in range(int(k_min), int(k_max) + 1):
+-            cand = qi + k * two_pi
+-            if li - eps <= cand <= ui + eps:
+-                cand_clipped = float(np.clip(cand, li, ui))
+-                dist = abs(cand_clipped - ri)
+-                if dist < best_dist - 1e-12:
+-                    best_dist = dist
+-                    best_val = cand_clipped
+-        out[i] = best_val
+-
+-    return out
+-
+-
+-def bounded_joint_difference(a, b, lower, upper, multi_turn_mask=None):
+-    """在考虑有限限位内合法 2πk 等价分支的前提下，计算 a 相对于 b 的最小等价差（用于候选解去重）。"""
+-    a_branch = select_closest_bounded_branch(
+-        a, b, lower, upper, multi_turn_mask=multi_turn_mask
+-    )
+-    return a_branch - np.asarray(b, dtype=float)
+-
+-
+ @dataclass(frozen=True)
+ class JointStateSnapshot:
+     """不可变完整关节状态快照。严禁将旧缓存状态重新打时间戳冒充新鲜状态。"""
+@@ -563,6 +461,17 @@
+     }
+ 
+ 
++def active_periodic_mask(pin_maps):
++    """无界 continuous 活动关节（角度差折叠到 [-π, π)）。configure_model_metadata 之前退回 active_continuous。"""
++    return pin_maps.get("active_periodic", pin_maps["active_continuous"])
++
++
++def active_multi_turn_mask(pin_maps):
++    """可做 2πk 分支对齐的活动关节（continuous 或限位跨度 >= 2π 的 revolute）；未配置时依次退回
++    active_periodic / active_continuous。"""
++    return pin_maps.get("active_multi_turn", active_periodic_mask(pin_maps))
++
++
+ def _active_q_layout(pin_maps):
+     """活跃关节在 Pinocchio q 向量中的索引布局（首次调用时构建并缓存在 pin_maps 中）。
+ 
+@@ -668,7 +577,7 @@
+                 ref,
+                 pin_maps["active_lower"],
+                 pin_maps["active_upper"],
+-                pin_maps.get("active_multi_turn", pin_maps["active_continuous"]),
++                active_multi_turn_mask(pin_maps),
+             )
+         else:
+             mask = pin_maps["active_continuous"]
+@@ -714,9 +623,7 @@
+     return reach
+ 
+ 
+-def model_com_with_jacobian(
+-    model, data, q_full, mass_points=None, active_v=None, derivatives=True
+-):
++def model_com_with_jacobian(model, data, q_full, *, active_v=None, derivatives=True):
+     """整机质心（URDF 根坐标系）及其对活跃关节的雅可比，含固定在根上的质量。
+ 
+     Pinocchio 的 centerOfMass / jacobianCenterOfMass 只累加 joint 1..n 的子树质量，
+@@ -725,7 +632,6 @@
+         com   = (M_mov * c_mov + m0 * c0) / (M_mov + m0)
+         J_com = M_mov / (M_mov + m0) * J_mov
+     与 configure_model_metadata 统计的 model_mass_kg（全部 link 质量）保持一致。
+-    mass_points 参数仅为兼容旧调用保留，计算不再使用。
+     """
+     nv = model.nv
+     if derivatives:
+@@ -777,12 +683,7 @@
+     ratio[valid] = 100.0 * np.abs(tau[valid]) / effort[valid]
+ 
+     com, _ = model_com_with_jacobian(
+-        pin_model,
+-        pin_data,
+-        full,
+-        pin_maps.get("mass_points"),
+-        active_v,
+-        derivatives=False,
++        pin_model, pin_data, full, active_v=active_v, derivatives=False
+     )
+     mass = float(
+         pin_maps.get(
+@@ -802,7 +703,7 @@
+         else joint_difference(
+             q_active,
+             q_ref,
+-            pin_maps.get("active_periodic", pin_maps["active_continuous"]),
++            active_periodic_mask(pin_maps),
+         )
+     )
+ 
+@@ -860,17 +761,9 @@
+     return win
+ 
+ 
+-def _build_effective_bounds(
+-    lower,
+-    upper,
+-    q_ref,
+-    _legacy_waist_mask=None,
+-    virtual_half_windows=None,
+-    active_names=None,
+-):
+-    """构建有效关节限位：当显式配置 virtual_half_windows 时，作为硬搜索窗口与真实限位求交。
++def _build_effective_bounds(lower, upper, q_ref, *, virtual_half_windows=None, active_names=None):
++    """构建有效关节限位：显式配置 virtual_half_windows 时作为硬搜索窗口与真实限位求交。
+ 
+-    第 4 个位置参数是旧版的腰部掩码，仅为兼容既有位置参数调用而保留，不参与计算：
+     窗口只由 virtual_half_windows 显式决定，绝不按关节类型或参考角隐式生成。
+     """
+     lo = np.asarray(lower, dtype=float).copy()
+@@ -1061,8 +954,8 @@
+ class _SecondaryObjective:
+     """零空间次任务 H(q) 与负梯度 z = -dH/dq 的求值器：每个种子构造一次，迭代内复用。
+ 
+-    与 v6 的 _compute_nullspace_gradient_and_cost 逐项同序运算（该公共函数现在也经由本类求值，
+-    两条路径是同一份代码）。提速只来自：
++    与 v6 的 _compute_nullspace_gradient_and_cost 逐项同序运算（v14 起该 v6 形式入口只保留在
++    tests/dls_compat.py 供数值测试使用）。提速只来自：
+       - 每次调用都相同的量提前算好：周期掩码、限位缓冲边界、质心水平投影 P、参考质心、
+         容许力矩/权重向量、雅可比索引、根 link 质量项；
+       - 直接复用主任务已算好的 Pinocchio q（单种子循环内两者来自同一组关节角，数值完全相同）；
+@@ -1112,7 +1005,7 @@
+         else:
+             periodic = (
+                 (
+-                    pin_maps.get("active_periodic", pin_maps["active_continuous"])
++                    active_periodic_mask(pin_maps)
+                     if pin_maps is not None
+                     else np.zeros(len(q_ref), dtype=bool)
+                 )
+@@ -1335,68 +1228,6 @@
+         return (z * self.movable if need_z else None), cost
+ 
+ 
+-def _compute_nullspace_gradient_and_cost(
+-    pin_model,
+-    pin_data,
+-    q_full,
+-    q_active_cur,
+-    q_ref,
+-    lower,
+-    upper,
+-    ns_gain,
+-    active_v_indices,
+-    effort_limits,
+-    movable_mask,
+-    include_waist,
+-    tau_g_ref,
+-    com_xy_ref,
+-    gravity_gain,
+-    com_gain,
+-    limit_gain,
+-    load_context=None,
+-    pin_maps=None,
+-    derivatives=True,
+-    components=None,
+-    relative_gravity_gain=0.0,
+-    posture_use_equivalent_branch=False,
+-):
+-    """计算零空间负梯度 z = -dH/dq 与标量代价 H(q)。
+-
+-    关键设计：
+-      - 默认 posture_use_equivalent_branch=False：对所有有限限位 revolute 关节（包括 ±360° 的腰部与臂自转），
+-        使用真实编码器坐标差 (q_active_cur - q_ref)，确保零空间始终将关节拉回真实的物理 q_ready（如 0°），
+-        绝不会因为 200° 等价于 -160° 而把关节反向推向 +360°。
+-      - 仅当显式设置 posture_use_equivalent_branch=True 时，才使用 2πk 等价角度差。
+-    v7：与单种子迭代共用 _SecondaryObjective 的同一份实现；配置负荷上下文时仍按 v6 语义
+-    由 q_active_cur 重算 Pinocchio q（不使用传入的 q_full），未配置时使用传入的 q_full。
+-    """
+-    objective = _SecondaryObjective(
+-        pin_model,
+-        pin_data,
+-        pin_maps,
+-        q_ref,
+-        lower,
+-        upper,
+-        ns_gain,
+-        active_v_indices,
+-        effort_limits,
+-        movable_mask,
+-        include_waist,
+-        tau_g_ref,
+-        com_xy_ref,
+-        gravity_gain,
+-        com_gain,
+-        limit_gain,
+-        load_context=load_context,
+-        relative_gravity_gain=relative_gravity_gain,
+-        posture_use_equivalent_branch=posture_use_equivalent_branch,
+-    )
+-    q_active_cur = np.asarray(q_active_cur, dtype=float)
+-    if load_context is not None:
+-        q_full = active_q_to_pinocchio_q(pin_model, pin_maps, q_active_cur)
+-    return objective(q_active_cur, q_full, derivatives, components, need_z=True)
+-
+-
+ def _metric_svd_step(J, error, z, D, damping, rank_rtol=1e-9):
+     """基于加权度量 SVD 的主任务阻尼步长与精确数值度量零空间下降步。"""
+     J = np.asarray(J, dtype=float)
+@@ -1468,10 +1299,22 @@
+     damping,
+     max_step,
+ ):
+-    """_solve_sns_clamped_step 的实现，返回 (dq_total, dq_null, clamped_converged)。
++    """主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
+ 
+-    d_inv 不为 None 时表示对角逆度量的对角元（单种子迭代的热路径，向量运算）；
+-    否则使用一般矩阵 W_inv。对角情形下 J D J^T == (J * d) J^T、D v == d * v 逐位一致。
++    返回 (dq_total, dq_null, clamped_converged)。记 D 为逆度量（关节权重越大 D 越小、该关节越“贵”），
++    A = J_f D_f J_f^T + λI：
++      任务步   dq_task = D_f J_f^T A^-1 e_rem
++      零空间步 dq_null = w · (D_f z - D_f J_f^T A^-1 J_f D_f z)
++    其中 e_rem = e - J dq_clamped 是扣除已钳制关节位移后的剩余误差，z = -∇H 为次任务负梯度。
++    零空间投影 D - D J^T A^-1 J D 对称半正定，所以 z^T dq_null >= 0，次任务一定是下降方向
++    （与 SVD 回退 _metric_svd_step 的 S Z Z^T S z 一致）。
++    循环：每轮把越界最严重的一个自由关节钳制到边界（位移 = 边界 - 当前值，此后不再缩放），
++    其余自由关节按剩余信赖域半径 sqrt(max_step^2 - ||dq_clamped||^2) 缩放；被钳制关节的越界距离
++    严格小于其本轮位移，故 ||dq_clamped|| < max_step 恒成立。至多 n_free + 1 轮；
++    clamped_converged=False 表示轮数用尽仍有越界（调用方记诊断）。
++
++    d_inv 不为 None 时为对角逆度量的对角元（单种子迭代的热路径，向量运算）；否则用一般矩阵 W_inv。
++    对角情形下 J D J^T == (J * d) J^T、D v == d * v 逐位一致。
+     """
+     if damping < 0.0 or max_step <= 0.0:
+         raise ValueError("invalid damping/max_step")
+@@ -1585,61 +1428,6 @@
+     return dq_total, dq_null_out, clamped_converged
+ 
+ 
+-def _solve_sns_clamped_step(
+-    J_active,
+-    err,
+-    z_grad,
+-    null_weight,
+-    W_inv,
+-    movable_mask,
+-    q_active_cur,
+-    eff_lower,
+-    eff_upper,
+-    damping,
+-    max_step,
+-    *,
+-    return_info=False,
+-):
+-    """主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
+-
+-    记 D = W_inv（逆度量，关节权重越大 D 越小、该关节越“贵”），A = J_f D_f J_f^T + λI：
+-      任务步   dq_task = D_f J_f^T A^-1 e_rem
+-      零空间步 dq_null = w · (D_f z - D_f J_f^T A^-1 J_f D_f z)
+-    其中 e_rem = e - J dq_clamped 是扣除已钳制关节位移后的剩余误差，z = -∇H 为次任务负梯度。
+-    零空间投影 D - D J^T A^-1 J D 对称半正定，所以 z^T dq_null >= 0，次任务一定是下降方向
+-    （与 SVD 回退 _metric_svd_step 的 S Z Z^T S z 一致）。
+-
+-    循环：每轮把越界最严重的一个自由关节钳制到边界（位移 = 边界 - 当前值，此后不再缩放），
+-    其余自由关节按剩余信赖域半径 sqrt(max_step^2 - ||dq_clamped||^2) 缩放；
+-    被钳制关节的越界距离严格小于其本轮位移，故 ||dq_clamped|| < max_step 恒成立。
+-    至多 n_free + 1 轮；返回的 clamped_converged=False 表示轮数用尽仍有越界（调用方记诊断）。
+-    v7：W_inv 为对角阵时自动走向量化实现（与矩阵实现逐位一致），非对角阵仍按一般矩阵计算。
+-    """
+-    W = np.asarray(W_inv, dtype=float)
+-    d_inv = None
+-    if W.ndim == 2 and W.shape[0] == W.shape[1]:
+-        diagonal = np.diagonal(W)
+-        if np.array_equal(W, np.diag(diagonal)):
+-            d_inv = diagonal.copy()
+-    dq_total, dq_null_out, clamped_converged = _sns_clamped_core(
+-        J_active,
+-        err,
+-        z_grad,
+-        null_weight,
+-        d_inv,
+-        None if d_inv is not None else W,
+-        movable_mask,
+-        q_active_cur,
+-        eff_lower,
+-        eff_upper,
+-        damping,
+-        max_step,
+-    )
+-    if return_info:
+-        return dq_total, dq_null_out, clamped_converged
+-    return dq_total, dq_null_out
+-
+-
+ def _antipodal_tangent(a, motion=None):
+     """180° 对径死点（a 与目标方向相反、叉积为零）时选取切向，返回垂直于 a 的单位向量。
+ 
+@@ -1854,17 +1642,16 @@
+     posture_use_equivalent_branch=False,
+     shoulder_joint=None,
+ ):
+-    """单种子 DLS IK（merged-v8，v13 未改）：主任务为末端位姿，零空间次任务为回中/限位裕度/负荷/质心。
++    """单种子 DLS IK：主任务为末端位姿，零空间次任务为回中 / 限位裕度 / 负荷 / 质心。
+ 
+     返回 (q, diag)。q 优先取“位姿达标点”中按负荷峰值容差带 + 次任务代价择优的那个；
+     没有达标点时返回主任务误差最小的迭代点（diag["converged"] = False）。
+     迭代全程满足有效限位（URDF 限位 ∩ virtual_half_windows），由 SNS 钳制 + 边界吸附保证。
+     diag["stop_reason"]：SETTLED / SETTLE_LIMIT / SMALL_STEP / STALLED_NO_PROGRESS /
+     LINE_SEARCH_STALLED / TIME_BUDGET / ITERATION_LIMIT。
+-    v7：迭代内使用每种子预计算的主任务/次任务求值器（_make_task_terms / _SecondaryObjective）
+-    与对角逆度量向量，运算与 v6 逐位一致；Cholesky 走 LAPACK 直接调用。
+-    v8：shoulder_joint 显式指定腰部释放所用的肩关节（None = 旧约定 "_Link2" 后缀）；
+-    未传 waist_max_reach 时按 estimate_arm_max_reach 逐段累加估计；
++    实现要点：每个种子预计算主任务 / 次任务求值器（_make_task_terms / _SecondaryObjective）与对角逆度量
++    向量；SNS 的 Cholesky 直接调用 LAPACK。shoulder_joint 显式指定腰部释放所用的肩关节（None = 旧约定
++    "_Link2" 后缀）；未传 waist_max_reach 时按 estimate_arm_max_reach 沿运动链逐段累加估计；
+     load_context=None 时质心参考与代价使用同一整机质心（含根 link 质量）。
+     """
+     mode = validate_orientation_mode(orientation_mode)
+@@ -1903,8 +1690,7 @@
+         lower,
+         upper,
+         ref,
+-        waist,
+-        virtual_half_windows,
++        virtual_half_windows=virtual_half_windows,
+         active_names=pin_maps["active_names"],
+     )
+     q = np.minimum(np.maximum(q, lo), hi)
+@@ -2042,7 +1828,7 @@
+     best_q, best_merit = q.copy(), math.inf
+     settle = 0
+     periodic_unbounded = np.asarray(
+-        pin_maps.get("active_periodic", pin_maps["active_continuous"]), dtype=bool
++        active_periodic_mask(pin_maps), dtype=bool
+     )
+     periodic_any = bool(np.any(periodic_unbounded))
+     # 逆度量 D 为对角阵：只保存对角元向量（v6 为 np.diag(1.0 / weights)，SNS 结果逐位一致）
+@@ -2052,7 +1838,7 @@
+     has_waist_dof = bool(np.any(waist_movable))
+     target_p = np.array(target[:3, 3], dtype=float)
+ 
+-    # 每种子构造一次的求值器（与 dls_task_terms / _compute_nullspace_gradient_and_cost 同一实现）
++    # 每种子构造一次的求值器（与 dls_task_terms / tests/dls_compat 的 v6 形式入口同一实现）
+     objective = _SecondaryObjective(
+         pin_model,
+         pin_data,
+@@ -2347,10 +2133,7 @@
+ 
+     result = pose_best["q"] if pose_best["q"] is not None else best_q
+     # 严格在有效限位 [lo, hi]（包含 virtual_half_windows 约束）内选择最接近起始 seed 的合法 2πk 分支
+-    multi_turn = pin_maps.get(
+-        "active_multi_turn",
+-        pin_maps.get("active_periodic", pin_maps["active_continuous"]),
+-    )
++    multi_turn = active_multi_turn_mask(pin_maps)
+     result = select_closest_bounded_branch(
+         result, seed, lo, hi, multi_turn_mask=multi_turn
+     )
+@@ -2503,7 +2286,6 @@
+     exclude=(),
+     min_separation=SEED_LIBRARY_MIN_SEPARATION,
+     pool=SEED_LIBRARY_POOL,
+-    orientation_weight=1.0,
+ ):
+     """按任务空间距离选种子：sqrt((位置差 / 特征长度)^2 + 姿态差^2)，姿态差口径与 DLS 主任务相同
+     （full：转角；tool_dir：工具轴夹角；tool_cone：夹角超出锥角的部分）。
+@@ -2533,7 +2315,7 @@
+         angle = np.arccos(np.clip((Rm @ axis) @ (T[:3, :3] @ axis), -1.0, 1.0))
+         if orientation_mode == "tool_cone":
+             angle = np.maximum(0.0, angle - float(cone))
+-    score = np.hypot(dist, float(orientation_weight) * angle)
++    score = np.hypot(dist, angle)
+     k = min(int(pool), idx.size)
+     near = np.argpartition(score, k - 1)[:k] if k < idx.size else np.arange(idx.size)
+     near = near[np.argsort(score[near], kind="stable")]
+@@ -2796,11 +2578,7 @@
+         ),
+         "active_v": np.array(pin_maps["active_v_indices"], dtype=np.intp),
+         "periodic": pin_maps["active_periodic"].copy(),
+-        "multi_turn": pin_maps.get(
+-            "active_multi_turn", pin_maps["active_periodic"]
+-        ).copy(),
+         "model_mass_kg": pin_maps["model_mass_kg"],
+-        "mass_points": pin_maps["mass_points"],
+         "unchecked_joints": sorted(set(pin_maps["all_names"]) - set(guards)),
+     }
+ 
+@@ -2824,12 +2602,7 @@
+         ].copy()
+ 
+     com, Jcom = model_com_with_jacobian(
+-        model,
+-        data,
+-        q_full,
+-        context["mass_points"],
+-        context["active_v"],
+-        derivatives,
++        model, data, q_full, active_v=context["active_v"], derivatives=derivatives
+     )
+     if not np.all(np.isfinite(com)) or not np.all(np.isfinite(Jcom)):
+         raise ValueError("non-finite model COM")

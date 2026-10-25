@@ -1,0 +1,902 @@
+--- baseline/solver_v7.py	2026-10-21 09:05:12.666170244 +0000
++++ ha_arm_ik/solver.py	2026-10-21 09:38:38.804887036 +0000
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""ha_arm_ik.solver -- merged-v7, original HAArmIKSolver entry.
++"""ha_arm_ik.solver -- merged-v8, original HAArmIKSolver entry.
+ 
+ 候选解的约束与择优（与 solver_dls.py 文件头的约束分层一致）：
+   1. 硬约束过滤：位姿达标、有效限位内、静态负荷 <= 容许值（strict）、单关节跳变 <= max_joint_jump_rad
+@@ -20,10 +20,23 @@
+      且腰部与 q_ready 相差 <= locked_seed_skip_tol（默认 0.02 rad）时跳过等价的锁腰种子；
+      锁腰种子触发腰部释放时紧接着用释放状态重跑一次 q_prev（与 v6 的第二个种子相同）。
+      locked_seed_skip_tol=None 恢复 v6 顺序（锁腰种子在前、不跳过）。
++  7. v8：腰部舒适窗（dls_waist_comfort，默认 "auto"）。先只在舒适窗内搜索；窗内没有满足全部硬约束的解时，
++     再放开到真实限位重试，并以窗内主任务误差最小的迭代终点作为续算种子（只多用必要的腰部）。
++     只用于“重新定位”类求解：目标相对 FK(q_prev) 的位置差 > 0.1 × 臂展或姿态差 > 0.1 rad；
++     小位移的续算（路点跟踪）不加舒适窗，与 v7 相同，保证连续性（窗口卡住再放开会产生跳变）。
++     "auto" 由 q_ready 处的静态重力矩推导（solver_dls.derive_waist_comfort_bounds）：俯仰类腰关节取
++     q_ready 所在区间内同时满足“负荷 |τ| <= max(s × min(容许力矩, 上半身放平时的最大重力矩 C), |τ(q_ready)|)”
++     与“质心 |τ - τ(q_ready)| <= s × C（上半身质心水平位移 <= s × 质心到轴的垂距）”的部分，s = soft_ratio；
++     偏航类 q_ready ±90°；None/False/"off" 关闭；{关节名: 半窗 rad} 显式指定。
++     dls_virtual_half_windows 仍是硬约束，两者独立。
++  8. v8 修正：帧查询按 pin.FrameType.BODY（关节与连杆同名的 URDF 可用）；DLS 位姿容差取
++     min(PIN_IK_*_TOL, ik_common.*_TOL)，保证 DLS 判定达标的解不会被最终复核拒绝；腰部释放的肩关节与
++     臂展取配置的 s_joint、沿运动链逐段累加（不再依赖 "_Link2" 命名与 Link3/Link5 两段）。
+ """
+ 
+ from collections import defaultdict, deque
+ from collections.abc import Mapping
++import copy
+ from enum import Enum
+ import math
+ from pathlib import Path
+@@ -152,6 +165,8 @@
+     WAIST_RETURN_TOL,
+     WAIST_TASK_WEIGHT,
+     WAIST_TASK_WEIGHT_FAR,
++    WAIST_COMFORT_CONTINUATION_STEP,
++    WAIST_COMFORT_EDGE_SEEDS,
+     JointStateSnapshot,
+     LoadPolicy,
+     _build_effective_bounds,
+@@ -159,7 +174,9 @@
+     bounded_joint_difference,
+     build_pinocchio_joint_maps,
+     configure_model_metadata,
++    derive_waist_comfort_bounds,
+     dls_task_terms,
++    estimate_arm_max_reach,
+     evaluate_pose_physics,
+     finite_vector,
+     joint_difference,
+@@ -1058,7 +1075,16 @@
+ 
+ 
+ def get_pinocchio_frame_id(model, frame_name):
+-    """Get Pinocchio frame id by name. Raises KeyError if not found."""
++    """按名字取 Pinocchio 帧 id，优先取连杆帧（pin.FrameType.BODY）。
++
++    URDF 中关节与连杆同名时（例如关节按子连杆命名），同一个名字会对应 JOINT 和 BODY 两个帧，
++    Pinocchio 3.x 起不带类型的 getFrameId 会抛 ValueError("Several frames match the filter")。
++    ee_link / base_link 都是连杆，因此按 BODY 查询；没有同名 BODY 帧时再按名字唯一匹配其它类型的帧
++    （例如手工添加的 OP_FRAME；同名多帧时仍抛 ValueError）。找不到时抛 KeyError。
++    """
++    body = pin.FrameType.BODY
++    if model.existFrame(frame_name, body):
++        return model.getFrameId(frame_name, body)
+     if not model.existFrame(frame_name):
+         available = [model.frames[i].name for i in range(model.nframes)]
+         raise KeyError(
+@@ -1093,6 +1119,9 @@
+     dls_params=None,
+     *,
+     load_search=None,
++    comfort_bounds=None,
++    comfort_continuation_tol=None,
++    comfort_info=None,
+ ):
+     """执行多 seed DLS 搜索：统一虚拟窗口边界、显式 multi_turn_mask 分支对齐与严格负荷早停比较。
+ 
+@@ -1105,6 +1134,17 @@
+       - locked_seed_skip_tol=None：v6 顺序 [锁腰种子] -> q_prev -> q_ready -> 扰动种子，不跳过、不重跑。
+     max_seeds 是种子名额上限（运行的种子 + 被跳过的锁腰种子）。每个候选对齐到最接近 q_prev 的
+     2πk 分支后记录单关节跳变；早停只认“跳变不超限”的候选。
++
++    v8 腰部舒适窗 comfort_bounds=(lower, upper)（None = 单阶段，与 v7 相同）：
++      只用于“重新定位”：目标相对 FK(q_prev) 的主任务误差（与 DLS 同一度量）位置 > pos_tol 或姿态 > ori_tol，
++      comfort_continuation_tol=(pos_tol, ori_tol)，默认 (0.1 × waist_max_reach, 0.1 rad)；否则是小位移续算
++      （路点跟踪），不加舒适窗、与 v7 完全相同（窗口先卡住腰部、再放开会在轨迹上产生跳变）。
++      阶段 1 "comfort"：有效限位 ∩ 舒适窗内按上面的顺序与早停规则搜索；
++      阶段 1 没有“可接受”候选（位姿达标、跳变不超限、限位裕度足够，strict 下负荷合格）时进入
++      阶段 2 "full"：放开到有效限位，种子 = q_prev -> 阶段 1 主任务误差最小的迭代终点（贴在舒适窗边缘，
++      从这里续算只多用必要的腰部）-> q_ready -> 扰动种子（与 v7 相同的随机扰动），不再跑锁腰种子；
++      两阶段各自最多 max_seeds 个名额，共享时间预算；阶段 1 的候选保留在候选池中。
++      候选的限位裕度、去重始终按有效限位计算（舒适窗不是物理限位）。per_seed 记录 search_stage。
+     """
+     params = dict(dls_params or {})
+     search = dict(load_search or {})
+@@ -1147,20 +1187,48 @@
+         active_names=pin_maps["active_names"],
+     )
+ 
+-    seeds = make_scatter_seeds(
+-        q_prev, q_ready, eff_lower, eff_upper, rng, max_count=max_seeds
+-    )
+-    # 队列元素：(种子, 固定关节掩码, 种子类别)；make_scatter_seeds 保证第一个是 q_prev
+-    entries = [
+-        (seed, None, "q_prev" if i == 0 else "scatter")
+-        for i, seed in enumerate(seeds)
+-    ]
+-    if include_waist:
+-        locked = clip_to_bounds(q_prev.copy(), eff_lower, eff_upper)
+-        locked[waist_mask] = q_ready[waist_mask]
+-        entries.insert(1 if q_prev_first else 0, (locked, waist_mask, "locked"))
+-    queue = deque(entries)
+-    q_prev_seed = seeds[0]
++    # v8：舒适窗与有效限位求交；不收窄任何关节、或不含 q_ready 时退化为单阶段
++    comfort = None
++    regime = None
++    if include_waist and comfort_bounds is not None:
++        # 求解类别：目标相对 FK(q_prev) 的主任务误差（与 DLS 同一度量）
++        reach = params.get("waist_max_reach") or params.get("characteristic_length", 0.5)
++        tol_pos, tol_ori = (
++            (WAIST_COMFORT_CONTINUATION_STEP * float(reach), WAIST_COMFORT_CONTINUATION_STEP)
++            if comfort_continuation_tol is None
++            else (float(comfort_continuation_tol[0]), float(comfort_continuation_tol[1]))
++        )
++        start = dls_task_terms(
++            pin_model,
++            pin_data,
++            pin_maps,
++            ee_frame_id,
++            np.asarray(q_prev, dtype=float),
++            T_target_pin,
++            orientation_mode,
++            TOOL_AXIS_X if tool_axis is None else tool_axis,
++            normalize_cone_half_angle(tool_cone_half_angle),
++            characteristic_length=params.get("characteristic_length", 0.5),
++            jacobian=False,
++        )
++        regime = (
++            "continuation"
++            if start["pos_err"] <= tol_pos and start["ori_violation"] <= tol_ori
++            else "reposition"
++        )
++    if regime == "reposition":
++        c_lo = np.maximum(eff_lower, np.asarray(comfort_bounds[0], dtype=float))
++        c_hi = np.minimum(eff_upper, np.asarray(comfort_bounds[1], dtype=float))
++        narrows = bool(np.any(c_lo > eff_lower) or np.any(c_hi < eff_upper))
++        if (
++            narrows
++            and np.all(c_lo < c_hi)
++            and np.all(q_ready >= c_lo)
++            and np.all(q_ready <= c_hi)
++        ):
++            comfort = (c_lo, c_hi)
++    # 阶段 2 使用与 v7 完全相同的随机扰动：在阶段 1 消耗随机数之前复制生成器状态
++    rng_full = copy.deepcopy(rng) if comfort is not None else None
+ 
+     near = (
+         WAIST_TASK_WEIGHT
+@@ -1171,22 +1239,18 @@
+         [near if n in WAIST_JOINT_NAMES else 1.0 for n in pin_maps["active_names"]],
+         dtype=float,
+     )
++    char_len = float(params.get("characteristic_length", 0.5))
+ 
+     candidates, per_seed, unique = [], [], []
+     seed_errors, first_seed_error = 0, None
+     unlocked = 0
+     released = False
+-    stop = "SEED_LIMIT"
+     multi_turn = pin_maps.get(
+         "active_multi_turn",
+         pin_maps.get("active_periodic", pin_maps["active_continuous"]),
+     )
+     early_stop_ratio = context["policy"].early_stop_ratio if strict else None
+-    slots = 0                       # 已用名额：运行过的种子 + 被跳过的锁腰种子
+-    locked_done = not include_waist  # 锁腰比较已完成（运行过或因等价而跳过）
+-    locked_skipped = False
+-    prev_rerun_queued = False
+-    prev_info = None                # q_prev 种子的候选信息（v7 顺序下用于跳过锁腰种子 / 旧版早停）
++    edge_pool = []                  # 阶段 1 未达标种子的 (主任务 merit, seed_idx, q)
+ 
+     def qualified(cand):
+         """早停认可的候选：位姿达标、跳变不超限、限位裕度足够；strict 下还需负荷合格且峰值 <= 早停阈值。"""
+@@ -1203,200 +1267,293 @@
+             )
+         return ok
+ 
+-    while queue and slots < max_seeds:
+-        deadline = params.get("deadline")
+-        if deadline is not None and time.monotonic() >= deadline:
+-            stop = "TIME_BUDGET"
+-            break
+-        seed, fixed, kind = queue.popleft()
+-        seed_idx = len(per_seed)
+-        slots += 1
+-        if fixed is None:
+-            unlocked += 1
+-        else:
+-            locked_done = True
++    def acceptable(cand):
++        """v8 舒适阶段的成功判据：满足全部硬约束即可（strict 下负荷合格，不要求低于早停阈值）。"""
++        ok = bool(
++            cand.get("pose_ok")
++            and cand.get("joint_jump_ok", True)
++            and cand.get("margin", -np.inf) >= SAFE_MARGIN
++        )
++        if strict:
++            ok = ok and bool(cand.get("load_ok"))
++        return ok
+ 
+-        started = time.monotonic()
+-        try:
+-            q, diag = pinocchio_ik_one_seed(
+-                pin_model,
+-                pin_data,
+-                pin_maps,
+-                ee_frame_id,
+-                T_target_pin,
+-                seed,
+-                eff_lower,
+-                eff_upper,
+-                orientation_mode=orientation_mode,
+-                tool_axis=tool_axis,
+-                tool_cone_half_angle=tool_cone_half_angle,
+-                joint_weights=weights,
+-                q_ref=q_ready,
+-                include_waist=include_waist,
+-                fixed_joint_mask=fixed,
+-                waist_release=include_waist,
+-                waist_load_release=released,
+-                **params,
+-            )
+-            # 在有效搜索限位 [eff_lower, eff_upper] 内对齐至最接近当前关节角 q_prev 的合法 2πk 分支
+-            q = select_closest_bounded_branch(
+-                q, q_prev, eff_lower, eff_upper, multi_turn_mask=multi_turn
+-            )
++    def run_stage(stage, queue, lo_s, hi_s, q_prev_seed, locked_done):
++        """按队列运行一个搜索阶段；返回该阶段的停止原因与名额统计。"""
++        nonlocal unlocked, released, seed_errors, first_seed_error
++        stop = "SEED_LIMIT"
++        slots = 0                   # 已用名额：运行过的种子 + 被跳过的锁腰种子
++        locked_skipped = False
++        prev_rerun_queued = False
++        prev_info = None            # q_prev 种子的候选信息（v7 顺序下用于跳过锁腰种子 / 旧版早停）
++
++        while queue and slots < max_seeds:
++            deadline = params.get("deadline")
++            if deadline is not None and time.monotonic() >= deadline:
++                stop = "TIME_BUDGET"
++                break
++            seed, fixed, kind = queue.popleft()
++            seed_idx = len(per_seed)
++            slots += 1
++            if fixed is None:
++                unlocked += 1
++            else:
++                locked_done = True
+ 
+-            info = score_candidate(
+-                chain,
+-                q,
+-                T_target_local,
+-                psi_ready,
+-                q_prev,
+-                q_ready,
+-                eff_lower,
+-                eff_upper,
+-                orientation_mode=orientation_mode,
+-                tool_axis=tool_axis,
+-                tool_cone_half_angle=tool_cone_half_angle,
+-                apply_waist_return=include_waist,
+-            )
+-            info.update(
+-                source="pinocchio_ik",
+-                solve_method="pinocchio_damped_ls_ik",
+-                fallback_used=True,
+-                seed_used=seed_idx,
+-                converged=bool(diag["converged"]),
+-            )
+-            jump_max, jump_idx, jump_ok = joint_jump_metrics(
+-                q, q_prev, periodic, jump_limits
+-            )
+-            info.update(
+-                joint_jump_max_rad=jump_max,
+-                joint_jump_joint=pin_maps["active_names"][jump_idx],
+-                joint_jump_ok=jump_ok,
+-            )
+-
+-            if strict:
+-                physical = load_physics(
+-                    pin_model, pin_data, pin_maps, q, context, False
++            started = time.monotonic()
++            try:
++                q, diag = pinocchio_ik_one_seed(
++                    pin_model,
++                    pin_data,
++                    pin_maps,
++                    ee_frame_id,
++                    T_target_pin,
++                    seed,
++                    lo_s,
++                    hi_s,
++                    orientation_mode=orientation_mode,
++                    tool_axis=tool_axis,
++                    tool_cone_half_angle=tool_cone_half_angle,
++                    joint_weights=weights,
++                    q_ref=q_ready,
++                    include_waist=include_waist,
++                    fixed_joint_mask=fixed,
++                    waist_release=include_waist,
++                    waist_load_release=released,
++                    **params,
++                )
++                # 在本阶段搜索限位内对齐至最接近当前关节角 q_prev 的合法 2πk 分支
++                q = select_closest_bounded_branch(
++                    q, q_prev, lo_s, hi_s, multi_turn_mask=multi_turn
++                )
++
++                # 限位裕度按有效限位评估（舒适窗不是物理限位）
++                info = score_candidate(
++                    chain,
++                    q,
++                    T_target_local,
++                    psi_ready,
++                    q_prev,
++                    q_ready,
++                    eff_lower,
++                    eff_upper,
++                    orientation_mode=orientation_mode,
++                    tool_axis=tool_axis,
++                    tool_cone_half_angle=tool_cone_half_angle,
++                    apply_waist_return=include_waist,
+                 )
+                 info.update(
+-                    load_ok=physical["load_ok"],
+-                    load_peak_ratio=physical["peak_ratio"],
+-                    load_peak_joint=physical["peak_joint"],
++                    source="pinocchio_ik",
++                    solve_method="pinocchio_damped_ls_ik",
++                    fallback_used=True,
++                    seed_used=seed_idx,
++                    converged=bool(diag["converged"]),
++                )
++                jump_max, jump_idx, jump_ok = joint_jump_metrics(
++                    q, q_prev, periodic, jump_limits
++                )
++                info.update(
++                    joint_jump_max_rad=jump_max,
++                    joint_jump_joint=pin_maps["active_names"][jump_idx],
++                    joint_jump_ok=jump_ok,
+                 )
+-                if (
+-                    fixed is not None
+-                    and physical["peak_ratio"] > context["policy"].soft_ratio
+-                ):
+-                    released = True
+ 
+-            # 候选去重使用考虑合法 2πk 等价分支的关节差
+-            duplicate = any(
+-                np.linalg.norm(
+-                    bounded_joint_difference(
+-                        q, old, eff_lower, eff_upper, multi_turn_mask=multi_turn
++                if strict:
++                    physical = load_physics(
++                        pin_model, pin_data, pin_maps, q, context, False
++                    )
++                    info.update(
++                        load_ok=physical["load_ok"],
++                        load_peak_ratio=physical["peak_ratio"],
++                        load_peak_joint=physical["peak_joint"],
+                     )
++                    if (
++                        fixed is not None
++                        and physical["peak_ratio"] > context["policy"].soft_ratio
++                    ):
++                        released = True
++
++                # 候选去重使用考虑合法 2πk 等价分支的关节差
++                duplicate = any(
++                    np.linalg.norm(
++                        bounded_joint_difference(
++                            q, old, eff_lower, eff_upper, multi_turn_mask=multi_turn
++                        )
++                    )
++                    < 1e-5
++                    for old in unique
+                 )
+-                < 1e-5
+-                for old in unique
+-            )
+-            if not duplicate:
+-                unique.append(q.copy())
+-                candidates.append(info)
+-
+-            per_seed.append(
+-                {
+-                    "seed_idx": seed_idx,
+-                    "seed_kind": kind,
+-                    **diag,
+-                    "fixed_waist": fixed is not None,
+-                    "pose_ok": bool(info["pose_ok"]),
+-                    "margin": float(info["margin"]),
+-                    "joint_jump_max_rad": jump_max,
+-                    "joint_jump_ok": jump_ok,
+-                    "duplicate": duplicate,
+-                    "elapsed_ms": (time.monotonic() - started) * 1000.0,
+-                }
+-            )
++                if not duplicate:
++                    unique.append(q.copy())
++                    candidates.append(info)
+ 
+-            if kind == "q_prev":
+-                prev_info = info
+-                # v7：q_prev 的解已合格且腰部基本在 q_ready -> 锁腰种子与之等价，跳过
+-                if q_prev_first and not locked_done and qualified(info):
+-                    waist_dev = float(
+-                        np.max(np.abs(q[waist_mask] - q_ready[waist_mask]))
++                per_seed.append(
++                    {
++                        "seed_idx": seed_idx,
++                        "seed_kind": kind,
++                        "search_stage": stage,
++                        **diag,
++                        "fixed_waist": fixed is not None,
++                        "pose_ok": bool(info["pose_ok"]),
++                        "margin": float(info["margin"]),
++                        "joint_jump_max_rad": jump_max,
++                        "joint_jump_ok": jump_ok,
++                        "duplicate": duplicate,
++                        "elapsed_ms": (time.monotonic() - started) * 1000.0,
++                    }
++                )
++                if stage == "comfort" and not diag["converged"]:
++                    merit = 0.5 * (
++                        (float(diag["final_pos_err"]) / char_len) ** 2
++                        + float(diag["final_ori_violation"]) ** 2
+                     )
+-                    if waist_dev <= skip_tol:
+-                        queue = deque(e for e in queue if e[2] != "locked")
+-                        slots += 1
+-                        locked_done = True
+-                        locked_skipped = True
+-            elif (
+-                kind == "locked"
+-                and q_prev_first
+-                and released
+-                and not prev_rerun_queued
+-            ):
+-                # v7：锁腰种子触发腰部释放 -> 下一个种子用释放状态重跑 q_prev（即 v6 的第二个种子）
+-                queue.appendleft((q_prev_seed, None, "q_prev_release"))
+-                prev_rerun_queued = True
++                    if math.isfinite(merit):
++                        edge_pool.append((merit, seed_idx, q.copy()))
+ 
+-            if strict:
+-                low = [c for c in candidates if qualified(c)]
+-                if (
+-                    slots >= min_seeds
+-                    and (
+-                        not include_waist
+-                        or (unlocked >= min_unlocked and locked_done)
+-                    )
+-                    and low
+-                    and min(c["load_peak_ratio"] for c in low)
+-                    <= early_stop_ratio
++                if kind == "q_prev":
++                    prev_info = info
++                    # v7：q_prev 的解已合格且腰部基本在 q_ready -> 锁腰种子与之等价，跳过
++                    if q_prev_first and not locked_done and qualified(info):
++                        waist_dev = float(
++                            np.max(np.abs(q[waist_mask] - q_ready[waist_mask]))
++                        )
++                        if waist_dev <= skip_tol:
++                            queue = deque(e for e in queue if e[2] != "locked")
++                            slots += 1
++                            locked_done = True
++                            locked_skipped = True
++                elif (
++                    kind == "locked"
++                    and q_prev_first
++                    and released
++                    and not prev_rerun_queued
+                 ):
+-                    stop = "LOW_LOAD_AFTER_REQUIRED_COMPARISON"
++                    # v7：锁腰种子触发腰部释放 -> 下一个种子用释放状态重跑 q_prev（即 v6 的第二个种子）
++                    queue.appendleft((q_prev_seed, None, "q_prev_release"))
++                    prev_rerun_queued = True
++
++                if strict:
++                    low = [c for c in candidates if qualified(c)]
++                    if (
++                        slots >= min_seeds
++                        and (
++                            not include_waist
++                            or (unlocked >= min_unlocked and locked_done)
++                        )
++                        and low
++                        and min(c["load_peak_ratio"] for c in low)
++                        <= early_stop_ratio
++                    ):
++                        stop = "LOW_LOAD_AFTER_REQUIRED_COMPARISON"
++                        break
++                elif (
++                    slots >= 2
++                    and locked_done
++                    and qualified(prev_info if kind == "locked" else info)
++                ):
++                    # 旧版规则：至少比较 2 个种子后，以 q_prev 及之后种子的合格解早停（锁腰解本身不触发）
++                    stop = "LEGACY_POSE_EARLY_STOP"
+                     break
+-            elif (
+-                slots >= 2
+-                and locked_done
+-                and qualified(prev_info if kind == "locked" else info)
+-            ):
+-                # 旧版规则：至少比较 2 个种子后，以 q_prev 及之后种子的合格解早停（锁腰解本身不触发）
+-                stop = "LEGACY_POSE_EARLY_STOP"
+-                break
+-        except Exception as exc:
+-            # 种子异常不中断搜索，但必须可见：计数并保留首个异常，失败时写入失败码详情
+-            seed_errors += 1
+-            if first_seed_error is None:
+-                first_seed_error = f"{type(exc).__name__}: {exc}"
+-            per_seed.append(
+-                {
+-                    "seed_idx": seed_idx,
+-                    "seed_kind": kind,
+-                    "converged": False,
+-                    "fixed_waist": fixed is not None,
+-                    "exception": f"{type(exc).__name__}: {exc}",
+-                    "stop_reason": "VISIBLE_SEED_ERROR",
+-                    "elapsed_ms": (time.monotonic() - started) * 1000.0,
+-                }
++            except Exception as exc:
++                # 种子异常不中断搜索，但必须可见：计数并保留首个异常，失败时写入失败码详情
++                seed_errors += 1
++                if first_seed_error is None:
++                    first_seed_error = f"{type(exc).__name__}: {exc}"
++                per_seed.append(
++                    {
++                        "seed_idx": seed_idx,
++                        "seed_kind": kind,
++                        "search_stage": stage,
++                        "converged": False,
++                        "fixed_waist": fixed is not None,
++                        "exception": f"{type(exc).__name__}: {exc}",
++                        "stop_reason": "VISIBLE_SEED_ERROR",
++                        "elapsed_ms": (time.monotonic() - started) * 1000.0,
++                    }
++                )
++        return {
++            "stop": stop,
++            "slots": slots,
++            "locked_skipped": locked_skipped,
++        }
++
++    # ---- 阶段 1：舒适窗（未启用舒适窗时即 v7 的唯一阶段）--------------------------
++    lo1, hi1 = comfort if comfort is not None else (eff_lower, eff_upper)
++    seeds = make_scatter_seeds(
++        q_prev, q_ready, lo1, hi1, rng, max_count=max_seeds
++    )
++    # 队列元素：(种子, 固定关节掩码, 种子类别)；make_scatter_seeds 保证第一个是 q_prev
++    entries = [
++        (seed, None, "q_prev" if i == 0 else "scatter")
++        for i, seed in enumerate(seeds)
++    ]
++    if include_waist:
++        locked = clip_to_bounds(q_prev.copy(), lo1, hi1)
++        locked[waist_mask] = q_ready[waist_mask]
++        entries.insert(1 if q_prev_first else 0, (locked, waist_mask, "locked"))
++    stages = [
++        run_stage(
++            "comfort" if comfort is not None else "full",
++            deque(entries),
++            lo1,
++            hi1,
++            seeds[0],
++            not include_waist,
++        )
++    ]
++
++    # ---- 阶段 2：舒适窗内无可接受解 -> 放开到有效限位 -----------------------------
++    comfort_ok = comfort is not None and any(acceptable(c) for c in candidates)
++    fallback = comfort is not None and not comfort_ok
++    if fallback:
++        seeds_full = make_scatter_seeds(
++            q_prev, q_ready, eff_lower, eff_upper, rng_full, max_count=max_seeds
++        )
++        entries_full = [(seeds_full[0], None, "q_prev")]
++        for _, _, q_edge in sorted(edge_pool, key=lambda e: (e[0], e[1]))[
++            :WAIST_COMFORT_EDGE_SEEDS
++        ]:
++            entries_full.append((q_edge, None, "comfort_edge"))
++        entries_full.extend((seed, None, "scatter") for seed in seeds_full[1:])
++        stages.append(
++            run_stage(
++                "full", deque(entries_full), eff_lower, eff_upper, seeds_full[0], True
+             )
++        )
++
++    if comfort_info is not None:
++        comfort_info.update(
++            regime=regime,
++            applied=comfort is not None,
++            fallback_to_full_bounds=bool(fallback),
++        )
+ 
+     if strict:
+         context["search_diagnostics"] = {
+-            "stop_reason": stop,
++            "stop_reason": stages[-1]["stop"],
+             "unlocked_seeds_attempted": unlocked,
+             "waist_released_for_load": released,
+             "seeds_attempted": len(per_seed),
+-            "seed_slots_used": slots,
++            "seed_slots_used": sum(st["slots"] for st in stages),
+             "seed_order": (
+                 "q_prev_first"
+                 if q_prev_first
+                 else ("locked_first" if include_waist else "no_waist")
+             ),
+-            "locked_seed_skipped": locked_skipped,
++            "locked_seed_skipped": stages[0]["locked_skipped"],
+             "q_prev_release_rerun": any(
+                 p.get("seed_kind") == "q_prev_release" for p in per_seed
+             ),
+             "seed_errors": seed_errors,
+             "first_seed_error": first_seed_error,
+             "candidates": len(candidates),
++            "waist_comfort": {
++                "enabled": comfort is not None,
++                "regime": regime,
++                "comfort_stop_reason": stages[0]["stop"] if comfort is not None else None,
++                "comfort_solution_found": bool(comfort_ok),
++                "fallback_to_full_bounds": bool(fallback),
++            },
+         }
+ 
+     sorted_candidates = sorted(candidates, key=candidate_sort_key)
+@@ -1533,7 +1690,7 @@
+         self._solve_T_root_base = None
+         self._load_deadline = None
+         self.last_load_diagnostics = {
+-            "version": "merged-v7",
++            "version": "merged-v8",
+             "accepted": False,
+             "mode": self.load_mode,
+             "code": "NOT_RUN",
+@@ -1582,6 +1739,22 @@
+         self.dls_posture_use_equivalent_branch = bool(
+             cfg_tune.get("dls_posture_use_equivalent_branch", False)
+         )
++        # v8：腰部舒适窗（偏好，非硬约束）。"auto" = 由 q_ready 处静态重力矩推导（默认）；
++        # None / False / "off" = 关闭（v7 行为）；{关节名: 半窗 rad} = 以 q_ready 为中心显式指定
++        self.dls_waist_comfort = cfg_tune.get("dls_waist_comfort", "auto")
++        # 舒适窗只用于“重新定位”：目标相对 FK(q_prev) 的位置差 > pos_m 或姿态差 > ori_rad；
++        # None = 默认 (0.1 × 臂展, 0.1 rad)。小位移续算（路点跟踪）不加舒适窗，保持 v7 的连续性
++        tol = cfg_tune.get("dls_waist_comfort_continuation_tol")
++        if tol is not None:
++            try:
++                tol = tuple(float(v) for v in tol)
++            except (TypeError, ValueError):
++                tol = ()
++            if len(tol) != 2 or not all(math.isfinite(v) and v >= 0.0 for v in tol):
++                raise ValueError(
++                    "dls_waist_comfort_continuation_tol must be (pos_m, ori_rad) >= 0"
++                )
++        self.dls_waist_comfort_continuation_tol = tol
+ 
+         self.urdf = str(Path(urdf).expanduser().resolve())
+         if not Path(self.urdf).is_file():
+@@ -1820,17 +1993,94 @@
+             active_names=self.active_joint_names,
+         )
+ 
++        self.pin_base_frame_id = None
++        self.dls_waist_max_reach = None
++        self.waist_comfort_lower = None
++        self.waist_comfort_upper = None
++        self.waist_comfort_info = {}
+         if self.pin_model is not None:
+             self.pin_ee_frame_id = get_pinocchio_frame_id(
+                 self.pin_model,
+                 self.ee_link,
+             )
++            # strict 求解时读取 base_link 位姿用；初始化时缓存（按 BODY 类型查询，见 get_pinocchio_frame_id）
++            try:
++                self.pin_base_frame_id = get_pinocchio_frame_id(
++                    self.pin_model, self.base_link
++                )
++            except Exception:
++                self.pin_base_frame_id = None
++            if self.include_waist:
++                # 腰部按距离释放所用的臂展：配置的 s_joint 原点 -> TCP，沿运动链逐段累加
++                self.dls_waist_max_reach = estimate_arm_max_reach(
++                    self.pin_model, self.pin_maps, self.pin_ee_frame_id, self.s_joint
++                )
++                self._configure_waist_comfort(cfg_tune)
+ 
+         self._check_model()
+ 
+         if self.verbose:
+             self.print_info()
+ 
++    def _configure_waist_comfort(self, cfg_tune):
++        """解析 dls_waist_comfort，计算舒适窗 [waist_comfort_lower, waist_comfort_upper]（不收窄时保持 None）。"""
++        spec = self.dls_waist_comfort
++        if spec is None or spec is False or (
++            isinstance(spec, str) and spec.lower() in ("off", "none", "disabled")
++        ):
++            return
++        waist_names = [n for n in self.active_joint_names if n in WAIST_JOINT_NAMES]
++        if isinstance(spec, str):
++            if spec.lower() != "auto":
++                raise ValueError(
++                    "dls_waist_comfort must be 'auto', None/False or {waist_joint: half_window_rad}"
++                )
++            lo, hi, info = derive_waist_comfort_bounds(
++                self.pin_model,
++                self.pin_data,
++                self.pin_maps,
++                self.q_ready,
++                self.search_lower,
++                self.search_upper,
++                allowable_efforts=cfg_tune.get("load_allowable_efforts"),
++                soft_ratio=cfg_tune.get("load_soft_ratio"),
++            )
++            for entry in info.values():
++                entry["source"] = "auto"
++        elif isinstance(spec, Mapping):
++            unknown = set(spec) - set(waist_names)
++            if unknown:
++                raise ValueError(
++                    f"dls_waist_comfort contains non-waist/unknown joints: {sorted(unknown)}"
++                )
++            lo, hi = _build_effective_bounds(
++                self.search_lower,
++                self.search_upper,
++                self.q_ready,
++                None,
++                spec,
++                active_names=self.active_joint_names,
++            )
++            info = {
++                name: {
++                    "source": "explicit",
++                    "half_window": float(spec[name]),
++                    "lower": float(lo[self.active_joint_names.index(name)]),
++                    "upper": float(hi[self.active_joint_names.index(name)]),
++                }
++                for name in spec
++                if spec[name] is not None
++            }
++        else:
++            raise ValueError(
++                "dls_waist_comfort must be 'auto', None/False or {waist_joint: half_window_rad}"
++            )
++        lo = np.maximum(self.search_lower, lo)
++        hi = np.minimum(self.search_upper, hi)
++        self.waist_comfort_info = info
++        if np.any(lo > self.search_lower) or np.any(hi < self.search_upper):
++            self.waist_comfort_lower, self.waist_comfort_upper = lo, hi
++
+     def _resolve_joint_jump_limits(self, value):
+         """解析 max_joint_jump_rad：None = 不限；正标量 = 所有关节同一上限；
+         {关节名: rad 或 None} = 逐关节设置，未列出的关节取默认 MAX_JOINT_JUMP_RAD（π）。"""
+@@ -2024,6 +2274,26 @@
+             print("Pinocchio model nv:", self.pin_model.nv)
+         if self.joint_efforts_active is not None:
+             print("joint effort limits:", self.joint_efforts_active)
++        if self.include_waist:
++            print("waist release max reach (s_joint->TCP):", self.dls_waist_max_reach)
++            if self.waist_comfort_lower is None:
++                print("waist comfort window: disabled")
++            else:
++                for i, name in enumerate(self.active_joint_names):
++                    if name in self.waist_comfort_info:
++                        e = self.waist_comfort_info[name]
++                        print(
++                            f"waist comfort window {name}: "
++                            f"[{self.waist_comfort_lower[i]:.4f}, {self.waist_comfort_upper[i]:.4f}] rad "
++                            f"({e.get('source')}, {e.get('kind', 'explicit')}"
++                            + (
++                                f", tau_max={e['tau_max_nm']:.1f}Nm, cap={e['cap_nm']:.1f}Nm"
++                                f" [{e['cap_basis']}]"
++                                if e.get("kind") == "gravity"
++                                else ""
++                            )
++                            + ")"
++                        )
+         print("=" * 80)
+         print("URDF root link:", self.urdf_root_link)
+         print("solver base link:", self.base_link)
+@@ -2300,7 +2570,19 @@
+                 "characteristic_length": self._load_config.get(
+                     "dls_characteristic_length", 0.5
+                 ),
++                # v8：DLS 内部达标判据不宽于最终复核（ik_common.POS_TOL / ORI_TOL）
++                "pos_tol": min(PIN_IK_POS_TOL, POS_TOL),
++                "ori_tol": min(PIN_IK_ORI_TOL, ORI_TOL),
+             }
++            if self.include_waist:
++                dls_params["shoulder_joint"] = self.s_joint
++                dls_params["waist_max_reach"] = self.dls_waist_max_reach
++            comfort_bounds = (
++                None
++                if self.waist_comfort_lower is None
++                else (self.waist_comfort_lower, self.waist_comfort_upper)
++            )
++            comfort_info = {}
+ 
+             pin_candidates, pin_seeds, pin_per_seed = (
+                 collect_pinocchio_candidates_and_seeds(
+@@ -2335,10 +2617,24 @@
+                         "max_joint_jump": self.max_joint_jump,
+                         "locked_seed_skip_tol": self.locked_seed_skip_tol,
+                     },
++                    comfort_bounds=comfort_bounds,
++                    comfort_continuation_tol=self.dls_waist_comfort_continuation_tol,
++                    comfort_info=comfort_info,
+                 )
+             )
+             candidates.extend(pin_candidates)
+             per_seed.extend(pin_per_seed)
++            stages = [p.get("search_stage") for p in pin_per_seed]
++            self.last_load_diagnostics["waist_comfort"] = {
++                "enabled": comfort_bounds is not None,
++                "regime": comfort_info.get("regime"),
++                "applied": bool(comfort_info.get("applied", False)),
++                "fallback_to_full_bounds": bool(
++                    comfort_info.get("fallback_to_full_bounds", False)
++                ),
++                "comfort_seeds": stages.count("comfort"),
++                "full_bounds_seeds": stages.count("full") if comfort_info.get("applied") else 0,
++            }
+ 
+             if self.use_direct_psi:
+                 all_direct_seeds.extend(pin_seeds)
+@@ -2491,6 +2787,7 @@
+             candidates,
+             use_torque=self.use_torque_cost,
+         )
++        self._record_comfort_selection(best, per_seed)
+ 
+         if best is not None and "joint_jump_max_rad" in best:
+             self.last_load_diagnostics.update(
+@@ -2673,6 +2970,23 @@
+             ),
+         )
+ 
++    def _record_comfort_selection(self, best, per_seed):
++        """v8 诊断：被选中的候选来自哪个搜索阶段、腰部是否在舒适窗内。"""
++        diag = self.last_load_diagnostics.get("waist_comfort")
++        if diag is None or best is None or best.get("source") != "pinocchio_ik":
++            return
++        idx = best.get("seed_used")
++        diag["selected_stage"] = next(
++            (p.get("search_stage") for p in (per_seed or []) if p.get("seed_idx") == idx),
++            None,
++        )
++        if self.waist_comfort_lower is not None and best.get("q") is not None:
++            q = np.asarray(best["q"], dtype=float)
++            diag["selected_in_comfort"] = bool(
++                np.all(q >= self.waist_comfort_lower - 1e-9)
++                and np.all(q <= self.waist_comfort_upper + 1e-9)
++            )
++
+     def _solve_impl(
+         self,
+         T_target,
+@@ -3016,7 +3330,7 @@
+         old_prev = self.q_prev.copy()
+         try:
+             self.last_load_diagnostics = {
+-                "version": "merged-v7",
++                "version": "merged-v8",
+                 "mode": self.load_mode,
+                 "accepted": False,
+                 "protection_enabled": self.load_mode == "strict",
+@@ -3073,10 +3387,13 @@
+                     )
+                     pin.forwardKinematics(self.pin_model, self.pin_data, full)
+                     pin.updateFramePlacements(self.pin_model, self.pin_data)
++                    base_fid = (
++                        self.pin_base_frame_id
++                        if self.pin_base_frame_id is not None
++                        else get_pinocchio_frame_id(self.pin_model, self.base_link)
++                    )
+                     self._solve_T_root_base = np.array(
+-                        self.pin_data.oMf[
+-                            self.pin_model.getFrameId(self.base_link)
+-                        ].homogeneous,
++                        self.pin_data.oMf[base_fid].homogeneous,
+                         copy=True,
+                     )
+                     self.last_load_diagnostics.update(

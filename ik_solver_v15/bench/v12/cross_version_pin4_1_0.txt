@@ -1,0 +1,9 @@
+# v11 代码（ARM_CONFIGS 写明符号 + 扰动噪声镜像） vs v12 代码（v9 + 右臂 q_ready 数值），右臂，Pinocchio 4.1.0
+# bench/v11/dump_right.py <v11 包> v11.npz declared; bench/v12/dump_right.py <v12 包> v12.npz; bench/v11/compare_dumps.py v11.npz v12.npz
+q_ready equal True (-0.0 entries: 0 / 0), seed noise signs equal False
+near: identical 40/40
+far: identical 48/60
+tracking: identical 37/120
+total: identical 125/220
+# 不同的目标：far 下标 [3, 8, 18, 19, 31, 32, 33, 37, 42, 43, 49, 52]（与 mirror_bench 中右臂解不是左臂解镜像的目标相同）；
+# tracking 从下标 37（第 38 个路点）起全部不同

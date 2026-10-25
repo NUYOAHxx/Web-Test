@@ -1,0 +1,16 @@
+路点跟踪（bench/v13/track_time.py，Pinocchio 4.1.0）：与 bench/v12/track_detail.py 相同的双臂合成模型与 120 个路点。
+off = v13 四项改动全部关闭（= v12）；v13 = 默认；v13_libcont = 续算类求解也用种子库（对照，未采用）。
+列：解出数、单步 max|q - q_prev| 的最大值、单步 > 0.3 rad 的次数、续算局部解成立次数、每步耗时（均值 / p90 / 最大，ms）、择优代价均值、NEAR_LIMIT 个数。
+
+off default left solved 120 max_step 0.150 gt0.3 0 local 110 ms mean 13.4 p90 13.1 max 136.1 cost 983.3 near_limit 9
+off default right solved 120 max_step 1.242 gt0.3 1 local 109 ms mean 9.9 p90 16.5 max 92.1 cost 821.3 near_limit 9
+v13 default left solved 120 max_step 0.150 gt0.3 0 local 110 ms mean 12.2 p90 12.4 max 121.7 cost 983.3 near_limit 9
+v13 default right solved 120 max_step 1.242 gt0.3 1 local 109 ms mean 9.3 p90 14.1 max 84.4 cost 821.3 near_limit 9
+v13_libcont default left solved 120 max_step 1.275 gt0.3 1 local 108 ms mean 10.7 p90 15.3 max 143.1 cost 830.0 near_limit 10
+v13_libcont default right solved 120 max_step 3.047 gt0.3 4 local 107 ms mean 11.6 p90 16.1 max 87.9 cost 2007.2 near_limit 8
+off 0.25 left solved 120 max_step 0.150 gt0.3 0 local 110 ms mean 19.6 p90 13.2 max 274.9 cost 982.8 near_limit 8
+off 0.25 right solved 120 max_step 0.150 gt0.3 0 local 111 ms mean 17.1 p90 12.0 max 221.9 cost 982.7 near_limit 8
+v13 0.25 left solved 120 max_step 0.150 gt0.3 0 local 110 ms mean 18.0 p90 13.0 max 250.9 cost 982.8 near_limit 8
+v13 0.25 right solved 120 max_step 0.150 gt0.3 0 local 111 ms mean 16.4 p90 11.6 max 203.3 cost 982.7 near_limit 8
+v13_libcont 0.25 left solved 120 max_step 0.150 gt0.3 0 local 110 ms mean 18.1 p90 12.4 max 236.2 cost 982.8 near_limit 8
+v13_libcont 0.25 right solved 120 max_step 0.150 gt0.3 0 local 111 ms mean 15.7 p90 13.3 max 182.1 cost 982.7 near_limit 8

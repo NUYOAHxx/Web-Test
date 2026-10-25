@@ -1,0 +1,27 @@
+--- dual-p2/ha_arm_ik/ik_common.py
++++ v15/ha_arm_ik/ik_common.py
+@@ -67,6 +67,8 @@
+ 
+ RIGID_BOTTOM_ROW_TOL = 1e-9
+ RIGID_ROTATION_TOL = 1e-6
++_RIGID_BOTTOM_ROW = np.array([0.0, 0.0, 0.0, 1.0])
++_EYE3 = np.eye(3)
+ 
+ 
+ def validate_transform4x4(T, name="T_target"):
+@@ -80,11 +82,12 @@
+     if not np.all(np.isfinite(T)):
+         raise ValueError(f"{name} contains non-finite values")
+     rot = T[:3, :3]
+-    if not np.allclose(T[3], [0.0, 0.0, 0.0, 1.0], atol=RIGID_BOTTOM_ROW_TOL, rtol=0.0):
++    # 判定与 np.allclose / np.isclose(rtol=0) 逐位等价（参考值有限时 isclose(x, y) ⇔ |x - y| <= atol）
++    if not (np.abs(T[3] - _RIGID_BOTTOM_ROW) <= RIGID_BOTTOM_ROW_TOL).all():
+         raise ValueError(f"{name} bottom row must be [0, 0, 0, 1]")
+     if not (
+-        np.allclose(rot.T @ rot, np.eye(3), atol=RIGID_ROTATION_TOL, rtol=0.0)
+-        and np.isclose(np.linalg.det(rot), 1.0, atol=RIGID_ROTATION_TOL, rtol=0.0)
++        (np.abs(rot.T @ rot - _EYE3) <= RIGID_ROTATION_TOL).all()
++        and abs(np.linalg.det(rot) - 1.0) <= RIGID_ROTATION_TOL
+     ):
+         raise ValueError(f"{name} rotation block is not a proper rotation matrix")
+     return T

@@ -1,0 +1,617 @@
+--- a/ha_arm_ik/solver.py
++++ b/ha_arm_ik/solver.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""ha_arm_ik.solver -- merged-v9, original HAArmIKSolver entry.
++"""ha_arm_ik.solver -- merged-v13 (v12 + speed / success-rate changes), original HAArmIKSolver entry.
+ 
+ 候选解的约束与择优（与 solver_dls.py 文件头的约束分层一致）：
+   1. 硬约束过滤：位姿达标、有效限位内、静态负荷 <= 容许值（strict）、单关节跳变 <= max_joint_jump_rad
+@@ -43,12 +43,27 @@
+         q_prev ± 上限内搜索；框内没有可接受解时按 v8 不加框重搜一次（v8 能解的仍能解，只有超限解时照旧
+         报 JOINT_JUMP_LIMIT）；
+      c) psi(q_ready) 无定义时给出 RuntimeWarning（self.psi_ready_error），臂角项不参与打分。
++ 10. v12：robot_model.py 右臂 q_ready 直接写数值（本文件与 v9 相同）。
++ 11. v13（提速 + 成功率；单种子 DLS 迭代、约束与择优规则不变，四项都可单独关闭，全部关闭 = v12 逐值一致）：
++     a) 任务空间种子库（dls_seed_library_size，默认 16384，0 = 关闭）：初始化时在有效限位内均匀采样、记录末端
++        位姿（约 150 ms、2.8 MB；同一模型的多个实例共享）。每个常规阶段在 q_prev / 锁腰 / q_ready 之后插入与目标
++        任务空间距离最近的 dls_seed_library_seeds（默认 3）个样本，彼此关节差 >= 0.5 rad、满足跳变上限。
++        v12 的随机扰动种子以 q_prev 为中心，目标远离 q_prev 时要试很多个；种子库直接给出末端已在目标附近的关节角。
++        续算类求解（路点跟踪，判据同 v9）不用种子库（dls_seed_library_continuation，默认 False）：库样本是全局的，
++        q_prev 附近的解只差限位裕度时会被远处的合格解替换、轨迹大跳变；
++     b) 舒适阶段提前回退（dls_waist_comfort_early_fallback，默认 True）：种子库种子跑完舒适窗内仍没有可接受解
++        即放开到有效限位（没有种子库时在第 dls_waist_comfort_patience = 4 个名额之后）；
++     c) 跳变重搜（dls_jump_limit_rescue，默认 True）：跳变上限 >= π（v9 不加跳变框）时，只找到跳变超限解则在
++        q_prev ± max_joint_jump_rad 内重搜；舒适阶段已出现这类解时，放开阶段直接在框内搜索（阶段名 "jump_box"）；
++     d) 锁腰种子可达性检查（dls_locked_reach_check，默认 True）：目标到手臂首关节的距离超过“首关节 -> TCP
++        各段长度之和”（腰锁住时手臂够不到）时跳过锁腰种子，按 v7 的跳过语义处理（占名额、视为已比较）。
+ """
+ 
+ from collections import defaultdict, deque
+ from collections.abc import Mapping
+ import copy
+ from enum import Enum
++import hashlib
+ import math
+ from pathlib import Path
+ import threading
+@@ -179,12 +194,17 @@
+     WAIST_TASK_WEIGHT_FAR,
+     WAIST_COMFORT_CONTINUATION_STEP,
+     WAIST_COMFORT_EDGE_SEEDS,
++    SEED_LIBRARY_MIN_SEPARATION,
++    SEED_LIBRARY_RNG_SEED,
++    SEED_LIBRARY_SEEDS,
++    SEED_LIBRARY_SIZE,
+     JointStateSnapshot,
+     LoadPolicy,
+     _build_effective_bounds,
+     active_q_to_pinocchio_q,
+     bounded_joint_difference,
+     build_pinocchio_joint_maps,
++    build_seed_library,
+     configure_model_metadata,
+     derive_waist_comfort_bounds,
+     dls_task_terms,
+@@ -198,7 +218,9 @@
+     pinocchio_ik_one_seed,
+     pinocchio_q_to_active_q,
+     prepare_load_context,
++    seed_library_target,
+     select_closest_bounded_branch,
++    select_library_seeds,
+     validate_transform,
+ )
+ 
+@@ -254,6 +276,30 @@
+ # v9：续算阶段 DLS 单步（2-范数）上限 = 该比例 × CONTINUATION_MAX_STEP：从框中心出发的首步不会越出续算框
+ # （越框会被 SNS 钳制、线搜索停滞）
+ CONTINUATION_DLS_STEP_FRACTION = 0.5
++# v13：舒适阶段提前回退（dls_waist_comfort_early_fallback，默认 True）：q_prev / 锁腰 / q_ready / 种子库种子
++# 都跑完仍没有可接受候选（满足全部硬约束）时结束舒适阶段、回退到有效限位（目标需要舒适窗外的腰部时，
++# v12 要在窗内白跑满 max_seeds 个种子）。没有种子库时检查点放在第 WAIST_COMFORT_PATIENCE 个名额之后。
++WAIST_COMFORT_EARLY_FALLBACK = True
++WAIST_COMFORT_PATIENCE = 4
++LIBRARY_PENDING = "library_pending"   # 搜索队列中的种子库占位（排到时展开，见 collect_pinocchio_candidates_and_seeds）
++COMFORT_CHECKPOINT = "comfort_checkpoint"   # 舒适阶段提前回退的检查点（不占名额）
++# v13：常规搜索只找到“跳变超限”的位姿解（其余硬约束都满足）时，在跳变框 q_prev ± max_joint_jump_rad 内
++# 重搜一次（阶段 "jump_box"）。v9 的跳变框只对 < π 的上限生效，默认 π 时 DLS 不知道跳变上限，
++# 会收敛到要转过半圈以上的解、整批被拒（JOINT_JUMP_LIMIT）。False = v12 行为。
++JUMP_LIMIT_RESCUE = True
++# v13：锁腰种子可达性检查（见 locked_arm_reach_bound）：目标超出锁腰时手臂的严格可达范围就跳过锁腰种子
++# （v12 会让它迭代到停滞，平均 37 次迭代）。False = v12 行为。
++LOCKED_REACH_CHECK = True
++# v13：续算类求解（目标就在 FK(q_prev) 附近，即路点跟踪）不排种子库种子。库样本是全局的，收敛到的多是离
++# q_prev 很远的分支；q_prev 附近的解只差限位裕度（NEAR_LIMIT）时，择优会换成这类远处的合格解（跟踪基准、
++# 未设跳变上限：单步 > 0.3 rad 由 v12 的 1 次增至 5 次，最大 3.05 rad）。续算类求解按 v12 的种子顺序搜索。
++# True = 续算类求解也用种子库。
++SEED_LIBRARY_CONTINUATION = False
++# v13：种子库只取决于运动学模型、活动关节、末端帧、有效限位、q_ready、舒适窗与库大小，同一模型的多个
++# 求解器实例（如左右臂各建多个实例、测试反复构造）共享同一份只读库，不重复建库
++_SEED_LIBRARY_CACHE = {}
++_SEED_LIBRARY_CACHE_MAX = 8
++_SEED_LIBRARY_CACHE_LOCK = threading.Lock()
+ 
+ 
+ def joint_jump_metrics(q, q_prev, periodic_mask, jump_limits):
+@@ -1125,6 +1171,34 @@
+ # =============================================================================
+ # Pinocchio DLS candidate orchestration
+ # =============================================================================
++def locked_arm_reach_bound(pin_model, pin_maps, ee_frame_id):
++    """v13：(手臂首关节编号, 首关节原点 -> TCP 距离的严格上界)；腰部以外第一个活动关节为手臂首关节。
++
++    上界 = 首关节之后各关节原点偏移长度 + TCP 帧偏移长度（三角不等式；转动关节不改变到其原点的距离）。
++    路径上有非转动关节（如移动关节）或 TCP 不在首关节的子树上时返回 None（不做检查）。
++    """
++    names = pin_maps["active_names"]
++    arm_ids = [
++        int(pin_maps["name_to_joint_id"][n]) for n in names if n not in WAIST_JOINT_NAMES
++    ]
++    if not arm_ids or len(arm_ids) == len(names):
++        return None
++    first = min(arm_ids)
++    frame = pin_model.frames[int(ee_frame_id)]
++    bound = float(np.linalg.norm(frame.placement.translation))
++    joint = int(frame.parentJoint)
++    while joint != first:
++        if joint <= 0:
++            return None
++        if not pin_model.joints[joint].shortname().startswith("JointModelR"):
++            return None
++        bound += float(np.linalg.norm(pin_model.jointPlacements[joint].translation))
++        joint = int(pin_model.parents[joint])
++    if not pin_model.joints[first].shortname().startswith("JointModelR"):
++        return None
++    return first, bound
++
++
+ def collect_pinocchio_candidates_and_seeds(
+     pin_model,
+     pin_data,
+@@ -1150,6 +1224,8 @@
+     comfort_continuation_tol=None,
+     comfort_info=None,
+     continuation_local=False,
++    seed_library=None,
++    locked_reach=None,
+ ):
+     """执行多 seed DLS 搜索：统一虚拟窗口边界、显式 multi_turn_mask 分支对齐与严格负荷早停比较。
+ 
+@@ -1186,6 +1262,24 @@
+ 
+     v9 跳变框：joint_jump_policy="reject" 且 max_joint_jump < π 的关节，阶段 1/2 的搜索范围再与
+       q_prev ± 上限求交；框内没有可接受候选（且未用局部解）时跑 "unboxed" 阶段（有效限位，v8 种子与规则）。
++
++    v13 种子库 seed_library（build_seed_library 的结果，None = v12 行为）：常规阶段（comfort / full / unboxed）
++      在 q_prev、锁腰（或 comfort_edge）、q_ready 之后插入 load_search["library_seeds"] 个种子库种子
++      （seed_kind "library"）：只用完全落在本阶段搜索范围（舒适窗 / 跳变框）内的样本，按任务空间距离
++      由近到远、彼此及与本阶段已跑种子的关节差 ∞-范数 >= library_min_separation。排到时才计算
++      （前两个种子就早停的求解不付出任何代价），随机扰动种子与 v12 相同、排在其后。
++      种子库种子还要满足跳变上限（max_joint_jump，与候选过滤同一度量）：超限的种子收敛到的解多半也超限。
++      求解类别为“续算”时默认不用种子库（load_search["library_continuation"]，默认 SEED_LIBRARY_CONTINUATION
++      = False）：搜索与 v12 相同，诊断 library_skipped_continuation = True。
++    v13 舒适阶段提前回退 load_search["comfort_early_fallback"]（默认 False = v12 行为）：q_prev / 锁腰 /
++      q_ready / 种子库种子都跑完仍没有可接受候选时结束舒适阶段（stop = "COMFORT_PATIENCE"），按 v8 规则
++      回退到有效限位；没有种子库时检查点在第 load_search["comfort_patience"] 个名额之后。
++    v13 跳变重搜 load_search["jump_rescue"]（默认 False = v12 行为）：没有跳变框（上限都 >= π）、常规阶段
++      没有可接受候选、但有“只因跳变超限被拒”的位姿解时，跑 "jump_box" 阶段：搜索范围 = 有效限位 ∩
++      q_prev ± max_joint_jump，种子 q_prev -> 锁腰 -> q_ready -> 种子库 -> 扰动，早停规则同常规阶段。
++    v13 锁腰种子臂展检查 locked_reach=(手臂首关节 Pinocchio 编号, 首关节原点 -> TCP 距离严格上界)：
++      腰锁在 q_ready 时目标位置离手臂首关节原点超过上界 + 位置容差，锁腰种子不可能达标，不再运行
++      （与 v7 的等价跳过相同：占一个名额并视为已完成锁腰比较，locked_seed_skipped = True）。
+     """
+     params = dict(dls_params or {})
+     continuation_reach = params.pop("continuation_reach", None)  # 只用于求解类别判据，不传给 DLS
+@@ -1307,6 +1401,39 @@
+     early_stop_ratio = context["policy"].early_stop_ratio if strict else None
+     edge_pool = []                  # 阶段 1 未达标种子的 (主任务 merit, seed_idx, q)
+ 
++    # v13：种子库种子（延迟计算：只有排到时才把目标换到库基座坐标系并选样本）
++    lib_k = 0 if seed_library is None else int(search.get("library_seeds", SEED_LIBRARY_SEEDS) or 0)
++    # 续算类求解默认不用种子库（见 SEED_LIBRARY_CONTINUATION）
++    lib_skip_continuation = bool(
++        lib_k > 0
++        and regime == "continuation"
++        and not search.get("library_continuation", SEED_LIBRARY_CONTINUATION)
++    )
++    if lib_skip_continuation:
++        lib_k = 0
++    lib_sep = float(search.get("library_min_separation", SEED_LIBRARY_MIN_SEPARATION))
++    lib_target = []
++    lib_used = 0
++    reach_skips = 0
++    pos_tol_reach = float(params.get("pos_tol", PIN_IK_POS_TOL))
++
++    def locked_unreachable(seed):
++        """腰锁在 q_ready 的种子：目标位置是否超出手臂严格可达范围（三角不等式上界）。"""
++        if locked_reach is None:
++            return False
++        joint_id, bound = locked_reach
++        pin.forwardKinematics(
++            pin_model, pin_data, active_q_to_pinocchio_q(pin_model, pin_maps, seed)
++        )
++        origin = np.asarray(pin_data.oMi[int(joint_id)].translation, dtype=float)
++        target_p = np.asarray(T_target_pin, dtype=float)[:3, 3]
++        return float(np.linalg.norm(target_p - origin)) > float(bound) + pos_tol_reach
++
++    early_fallback = bool(search.get("comfort_early_fallback", False))
++    patience = int(search.get("comfort_patience", WAIST_COMFORT_PATIENCE))
++    if patience < 1:
++        raise ValueError("comfort_patience must be >= 1")
++
+     def qualified(cand):
+         """早停认可的候选：位姿达标、跳变不超限、限位裕度足够；strict 下还需负荷合格且峰值 <= 早停阈值。"""
+         if cand is None:
+@@ -1333,20 +1460,57 @@
+             ok = ok and bool(cand.get("load_ok"))
+         return ok
+ 
++    def library_entries(lo_s, hi_s, ran):
++        """本阶段的种子库种子（队列元素）；ran = 本阶段已运行的种子（参与关节差去重）。"""
++        nonlocal lib_used
++        if lib_k <= 0:
++            return []
++        if not lib_target:
++            lib_target.append(
++                seed_library_target(
++                    pin_model, pin_data, pin_maps, seed_library, q_prev, T_target_pin
++                )
++            )
++        if jump_limits is not None and search.get("library_jump_filter", True):
++            # 跳变上限内的样本：|q - q_prev| <= 上限（多圈关节在库里只采了一圈，按 2π 折叠后比较）
++            lim = np.asarray(jump_limits, dtype=float)
++            lo_s = np.maximum(lo_s, np.where(multi_turn, -np.inf, q_prev - lim))
++            hi_s = np.minimum(hi_s, np.where(multi_turn, np.inf, q_prev + lim))
++        picked = select_library_seeds(
++            seed_library,
++            lib_target[0],
++            orientation_mode,
++            TOOL_AXIS_X if tool_axis is None else tool_axis,
++            normalize_cone_half_angle(tool_cone_half_angle),
++            char_len,
++            lo_s,
++            hi_s,
++            lib_k,
++            exclude=ran,
++            min_separation=lib_sep,
++            orientation_weight=float(search.get("library_orientation_weight", 1.0)),
++        )
++        lib_used += len(picked)
++        return [(q, None, "library") for q in picked]
++
+     def run_stage(
+         stage, queue, lo_s, hi_s, q_prev_seed, locked_done, max_step=None, release_rerun=True
+     ):
+         """按队列运行一个搜索阶段；返回该阶段的停止原因与名额统计。
+ 
+         max_step 覆盖本阶段 DLS 的单步上限；release_rerun=False 时锁腰种子触发腰部释放后不在本阶段重跑 q_prev。
++        v13：队列里的 LIBRARY_PENDING 占位在排到时展开为种子库种子、COMFORT_CHECKPOINT 为舒适阶段提前
++        回退检查点（本阶段还没有可接受候选即结束），两者都不占名额。
+         """
+-        nonlocal unlocked, released, seed_errors, first_seed_error
++        nonlocal unlocked, released, seed_errors, first_seed_error, reach_skips
+         stop = "SEED_LIMIT"
+         slots = 0                   # 已用名额：运行过的种子 + 被跳过的锁腰种子
+         locked_skipped = False
+         prev_rerun_queued = False
+         prev_info = None            # q_prev 种子的候选信息（v7 顺序下用于跳过锁腰种子 / 旧版早停）
+         stage_params = params if max_step is None else {**params, "max_step": float(max_step)}
++        n_stage = len(candidates)
++        ran = []
+ 
+         while queue and slots < max_seeds:
+             deadline = params.get("deadline")
+@@ -1354,6 +1518,22 @@
+                 stop = "TIME_BUDGET"
+                 break
+             seed, fixed, kind = queue.popleft()
++            if kind == LIBRARY_PENDING:
++                queue.extendleft(reversed(library_entries(lo_s, hi_s, ran)))
++                continue
++            if kind == COMFORT_CHECKPOINT:
++                if not any(acceptable(c) for c in candidates[n_stage:]):
++                    stop = "COMFORT_PATIENCE"
++                    break
++                continue
++            if kind == "locked" and locked_unreachable(seed):
++                # v13：目标超出锁腰时的手臂可达范围 -> 与 v7 的等价跳过相同处理（占名额、完成锁腰比较）
++                slots += 1
++                locked_done = True
++                locked_skipped = True
++                reach_skips += 1
++                continue
++            ran.append(seed)
+             seed_idx = len(per_seed)
+             slots += 1
+             if fixed is None:
+@@ -1551,6 +1731,12 @@
+         if np.any(np.isfinite(limits)):
+             box_half = limits
+     rng_unboxed = copy.deepcopy(rng) if box_half is not None else None
++    # v13 跳变重搜与 unboxed 一样使用常规阶段之前的随机数状态（两者互斥：一个要求有框、一个要求无框）
++    rng_rescue = (
++        copy.deepcopy(rng)
++        if box_half is None and jump_limits is not None and search.get("jump_rescue", False)
++        else None
++    )
+ 
+     def boxed(lo, hi, half):
+         if half is None:
+@@ -1560,6 +1746,22 @@
+         empty = b_lo >= b_hi
+         return np.where(empty, lo, b_lo), np.where(empty, hi, b_hi)
+ 
++    def with_library(entries, n_lead, seeds_s, lo_s, hi_s, checkpoint=False):
++        """v13：在前 n_lead 个固定种子（q_prev / 锁腰 / comfort_edge）与 q_ready（若与 q_prev 不同）之后
++        插入种子库占位（make_scatter_seeds 去重后 q_ready 若存在必在第 2 位）；checkpoint=True 时其后
++        再放舒适阶段提前回退检查点（没有种子库时放在第 patience 个名额之后）。"""
++        pos = n_lead
++        if len(seeds_s) > 1 and np.array_equal(
++            seeds_s[1], clip_to_bounds(q_ready, lo_s, hi_s)
++        ):
++            pos += 1
++        marks = [(None, None, LIBRARY_PENDING)] if lib_k > 0 else []
++        if checkpoint:
++            if lib_k <= 0:
++                pos = patience
++            marks.append((None, None, COMFORT_CHECKPOINT))
++        return entries[:pos] + marks + entries[pos:]
++
+     stages = []
+     # ---- v9：续算阶段（局部优先）----------------------------------------------------
+     # 只用与 q_prev 连续的候选，避免在“锁腰（腰回 q_ready）”与“随动”两个分支间来回切换：
+@@ -1639,6 +1841,10 @@
+         locked = clip_to_bounds(q_prev.copy(), lo1, hi1)
+         locked[waist_mask] = q_ready[waist_mask]
+         entries.insert(1 if q_prev_first else 0, (locked, waist_mask, "locked"))
++    entries = with_library(
++        entries, 2 if include_waist else 1, seeds, lo1, hi1,
++        checkpoint=early_fallback and comfort is not None,
++    )
+     if not local_used:
+         stages.append(
+             run_stage(
+@@ -1651,11 +1857,36 @@
+             )
+         )
+ 
++    # ---- v13 跳变重搜的判据（舒适阶段之后的提前重搜与常规阶段之后的重搜共用）----------------
++    def jump_only(cand):
++        """除跳变超限外满足全部硬约束的候选（位姿达标、限位裕度足够；strict 下负荷合格）。"""
++        ok = bool(
++            cand.get("pose_ok")
++            and not cand.get("joint_jump_ok", True)
++            and cand.get("margin", -np.inf) >= SAFE_MARGIN
++        )
++        return ok and (not strict or bool(cand.get("load_ok")))
++
++    rescue_allowed = bool(
++        search.get("jump_rescue", False)
++        and box_half is None
++        and jump_limits is not None
++        and search.get("joint_jump_policy", "reject") == "reject"
++        and not local_used
++    )
++
+     # ---- 阶段 2：舒适窗内无可接受解 -> 放开到有效限位 -----------------------------
+     comfort_ok = comfort is not None and any(acceptable(c) for c in candidates)
+     fallback = comfort is not None and not comfort_ok and not local_used
++    # v13：舒适阶段已出现“只因跳变超限被拒”的解 -> 放开阶段直接在跳变框内搜索（阶段名 "jump_box"）。
++    # 框外的解必被跳变过滤拒绝，不加框的放开阶段多半只会再收敛到一批超限解（回放基准里这类目标
++    # 先跑满 10 个放开种子、再跳变重搜，单目标 300~500 ms）
++    early_rescue = bool(
++        fallback and rescue_allowed and any(jump_only(c) for c in candidates)
++    )
+     if fallback:
+-        lo2, hi2 = boxed(eff_lower, eff_upper, box_half)
++        half2 = np.asarray(jump_limits, dtype=float) if early_rescue else box_half
++        lo2, hi2 = boxed(eff_lower, eff_upper, half2)
+         seeds_full = make_scatter_seeds(
+             q_prev, q_ready, lo2, hi2, rng_full, max_count=max_seeds
+         )
+@@ -1663,10 +1894,17 @@
+         for _, _, q_edge in sorted(edge_pool, key=lambda e: (e[0], e[1]))[
+             :WAIST_COMFORT_EDGE_SEEDS
+         ]:
++            if early_rescue:
++                q_edge = clip_to_bounds(q_edge, lo2, hi2)
+             entries_full.append((q_edge, None, "comfort_edge"))
++        n_lead = len(entries_full)
+         entries_full.extend((seed, None, "scatter") for seed in seeds_full[1:])
++        entries_full = with_library(entries_full, n_lead, seeds_full, lo2, hi2)
+         stages.append(
+-            run_stage("full", deque(entries_full), lo2, hi2, seeds_full[0], True)
++            run_stage(
++                "jump_box" if early_rescue else "full",
++                deque(entries_full), lo2, hi2, seeds_full[0], True,
++            )
+         )
+     # ---- v9：跳变框内没有可接受解 -> 按 v8 不加框重搜一次 -------------------------------
+     # 既保证 v8 能解的目标 v9 仍能解，也让“只有超限解”的目标照旧报 JOINT_JUMP_LIMIT（而不是位姿不可达）
+@@ -1687,6 +1925,9 @@
+             locked_u = clip_to_bounds(q_prev.copy(), eff_lower, eff_upper)
+             locked_u[waist_mask] = q_ready[waist_mask]
+             entries_u.insert(1 if q_prev_first else 0, (locked_u, waist_mask, "locked"))
++        entries_u = with_library(
++            entries_u, 2 if include_waist else 1, seeds_u, eff_lower, eff_upper
++        )
+         stages.append(
+             run_stage(
+                 "unboxed",
+@@ -1697,10 +1938,42 @@
+                 not include_waist,
+             )
+         )
++    # ---- v13：只因跳变超限而失败 -> 在跳变框内重搜一次（放开阶段已在框内搜过则不再重搜）------------
++    rescue = bool(
++        rescue_allowed
++        and not early_rescue
++        and not any(acceptable(c) for c in candidates)
++        and any(jump_only(c) for c in candidates)
++    )
++    if rescue:
++        lo_r, hi_r = boxed(eff_lower, eff_upper, np.asarray(jump_limits, dtype=float))
++        seeds_r = make_scatter_seeds(
++            q_prev, q_ready, lo_r, hi_r, rng_rescue, max_count=max_seeds
++        )
++        entries_r = [
++            (seed, None, "q_prev" if i == 0 else "scatter")
++            for i, seed in enumerate(seeds_r)
++        ]
++        if include_waist:
++            locked_r = clip_to_bounds(q_prev.copy(), lo_r, hi_r)
++            locked_r[waist_mask] = np.minimum(
++                np.maximum(q_ready[waist_mask], lo_r[waist_mask]), hi_r[waist_mask]
++            )
++            entries_r.insert(1, (locked_r, waist_mask, "locked"))
++        entries_r = with_library(
++            entries_r, 2 if include_waist else 1, seeds_r, lo_r, hi_r
++        )
++        stages.append(
++            run_stage(
++                "jump_box", deque(entries_r), lo_r, hi_r, seeds_r[0], not include_waist
++            )
++        )
+     if local_used:
+         # 续算局部解：候选池只保留局部可接受候选（离 q_prev 远的候选不参与择优，避免分支切换）
+         candidates[:] = local_pick
+-    main_stages = [st for st in stages if st["name"] not in ("continuation", "unboxed")]
++    main_stages = [
++        st for st in stages if st["name"] not in ("continuation", "unboxed", "jump_box")
++    ]
+ 
+     if comfort_info is not None:
+         comfort_info.update(
+@@ -1732,6 +2005,12 @@
+             ),
+             "seed_errors": seed_errors,
+             "first_seed_error": first_seed_error,
++            "library_seeds_queued": lib_used,
++            "library_skipped_continuation": lib_skip_continuation,
++            "locked_seed_unreachable": reach_skips,
++            "jump_limit_rescue": rescue or early_rescue,
++            "jump_limit_rescue_early": early_rescue,
++            "comfort_patience_stop": any(st["stop"] == "COMFORT_PATIENCE" for st in stages),
+             "candidates": len(candidates),
+             "waist_comfort": {
+                 "enabled": comfort is not None,
+@@ -1876,7 +2155,7 @@
+         self._solve_T_root_base = None
+         self._load_deadline = None
+         self.last_load_diagnostics = {
+-            "version": "merged-v9",
++            "version": "merged-v13",
+             "accepted": False,
+             "mode": self.load_mode,
+             "code": "NOT_RUN",
+@@ -1954,6 +2233,51 @@
+         if not math.isfinite(step) or step <= 0.0:
+             raise ValueError("dls_continuation_max_step must be a positive finite angle")
+         self.dls_continuation_max_step = step
++        # v13：任务空间种子库（初始化时建库，见 solver_dls.build_seed_library）与舒适阶段耐心
++        size = cfg_tune.get("dls_seed_library_size", SEED_LIBRARY_SIZE)
++        if size is None or size is False:
++            size = 0
++        if isinstance(size, (bool, np.bool_)) or not isinstance(size, (int, np.integer)) or size < 0:
++            raise ValueError("dls_seed_library_size must be a nonnegative integer (0 = off)")
++        self.dls_seed_library_size = int(size)
++        k = cfg_tune.get("dls_seed_library_seeds", SEED_LIBRARY_SEEDS)
++        if isinstance(k, (bool, np.bool_)) or not isinstance(k, (int, np.integer)) or k < 0:
++            raise ValueError("dls_seed_library_seeds must be a nonnegative integer")
++        self.dls_seed_library_seeds = int(k)
++        sep = cfg_tune.get("dls_seed_library_min_separation", SEED_LIBRARY_MIN_SEPARATION)
++        try:
++            sep = float("nan") if isinstance(sep, (bool, np.bool_)) else float(sep)
++        except (TypeError, ValueError):
++            sep = float("nan")
++        if not math.isfinite(sep) or sep < 0.0:
++            raise ValueError("dls_seed_library_min_separation must be a finite angle >= 0")
++        self.dls_seed_library_min_separation = sep
++        early = cfg_tune.get("dls_waist_comfort_early_fallback", WAIST_COMFORT_EARLY_FALLBACK)
++        if not isinstance(early, (bool, np.bool_)):
++            raise ValueError("dls_waist_comfort_early_fallback must be True or False")
++        self.dls_waist_comfort_early_fallback = bool(early)
++        patience = cfg_tune.get("dls_waist_comfort_patience", WAIST_COMFORT_PATIENCE)
++        if (
++            isinstance(patience, (bool, np.bool_))
++            or not isinstance(patience, (int, np.integer))
++            or patience < 1
++        ):
++            raise ValueError("dls_waist_comfort_patience must be an integer >= 1")
++        self.dls_waist_comfort_patience = int(patience)
++        self.seed_library = None
++        rescue = cfg_tune.get("dls_jump_limit_rescue", JUMP_LIMIT_RESCUE)
++        if not isinstance(rescue, (bool, np.bool_)):
++            raise ValueError("dls_jump_limit_rescue must be True or False")
++        self.dls_jump_limit_rescue = bool(rescue)
++        reach_check = cfg_tune.get("dls_locked_reach_check", LOCKED_REACH_CHECK)
++        if not isinstance(reach_check, (bool, np.bool_)):
++            raise ValueError("dls_locked_reach_check must be True or False")
++        self.dls_locked_reach_check = bool(reach_check)
++        lib_cont = cfg_tune.get("dls_seed_library_continuation", SEED_LIBRARY_CONTINUATION)
++        if not isinstance(lib_cont, (bool, np.bool_)):
++            raise ValueError("dls_seed_library_continuation must be True or False")
++        self.dls_seed_library_continuation = bool(lib_cont)
++        self.dls_locked_reach = None
+ 
+         self.urdf = str(Path(urdf).expanduser().resolve())
+         if not Path(self.urdf).is_file():
+@@ -2236,12 +2560,58 @@
+             if self.include_waist:
+                 self.dls_waist_max_reach = self.dls_arm_max_reach
+                 self._configure_waist_comfort(cfg_tune)
++            if self.include_waist and self.dls_locked_reach_check:
++                self.dls_locked_reach = locked_arm_reach_bound(
++                    self.pin_model, self.pin_maps, self.pin_ee_frame_id
++                )
++            if self.use_pinocchio_ik and self.dls_seed_library_size > 0:
++                self.seed_library = self._shared_seed_library()
+ 
+         self._check_model()
+ 
+         if self.verbose:
+             self.print_info()
+ 
++    def _shared_seed_library(self):
++        """v13：建种子库；同一模型（URDF 内容、活动关节、末端帧、有效限位、q_ready、舒适窗、库大小）的实例共享。"""
++        comfort = (
++            None
++            if self.waist_comfort_lower is None
++            else (self.waist_comfort_lower, self.waist_comfort_upper)
++        )
++        key = (
++            hashlib.sha256(Path(self.urdf).read_bytes()).hexdigest(),
++            tuple(self.pin_maps["active_names"]),
++            int(self.pin_ee_frame_id),
++            np.asarray(self.search_lower, dtype=float).tobytes(),
++            np.asarray(self.search_upper, dtype=float).tobytes(),
++            np.asarray(self.q_ready, dtype=float).tobytes(),
++            None if comfort is None else tuple(np.asarray(b, dtype=float).tobytes() for b in comfort),
++            int(self.dls_seed_library_size),
++            int(SEED_LIBRARY_RNG_SEED),
++        )
++        with _SEED_LIBRARY_CACHE_LOCK:
++            library = _SEED_LIBRARY_CACHE.get(key)
++        if library is not None:
++            return library
++        library = build_seed_library(
++            self.pin_model,
++            self.pin_data,
++            self.pin_maps,
++            self.pin_ee_frame_id,
++            self.search_lower,
++            self.search_upper,
++            self.q_ready,
++            self.dls_seed_library_size,
++            comfort_bounds=comfort,
++            rng_seed=SEED_LIBRARY_RNG_SEED,
++        )
++        with _SEED_LIBRARY_CACHE_LOCK:
++            while len(_SEED_LIBRARY_CACHE) >= _SEED_LIBRARY_CACHE_MAX:
++                _SEED_LIBRARY_CACHE.pop(next(iter(_SEED_LIBRARY_CACHE)))
++            library = _SEED_LIBRARY_CACHE.setdefault(key, library)
++        return library
++
+     def _configure_waist_comfort(self, cfg_tune):
+         """解析 dls_waist_comfort，计算舒适窗 [waist_comfort_lower, waist_comfort_upper]（不收窄时保持 None）。"""
+         spec = self.dls_waist_comfort
+@@ -2839,11 +3209,19 @@
+                         "joint_jump_policy": self.joint_jump_policy,
+                         "locked_seed_skip_tol": self.locked_seed_skip_tol,
+                         "continuation_max_step": self.dls_continuation_max_step,
++                        "library_seeds": self.dls_seed_library_seeds,
++                        "library_min_separation": self.dls_seed_library_min_separation,
++                        "library_continuation": self.dls_seed_library_continuation,
++                        "comfort_early_fallback": self.dls_waist_comfort_early_fallback,
++                        "jump_rescue": self.dls_jump_limit_rescue,
++                        "comfort_patience": self.dls_waist_comfort_patience,
+                     },
+                     comfort_bounds=comfort_bounds,
+                     comfort_continuation_tol=self.dls_waist_comfort_continuation_tol,
+                     comfort_info=comfort_info,
+                     continuation_local=self.dls_continuation_local,
++                    seed_library=self.seed_library,
++                    locked_reach=self.dls_locked_reach,
+                 )
+             )
+             local_used = bool(comfort_info.get("continuation_local_used"))
+@@ -2869,6 +3247,7 @@
+                 ),
+                 "comfort_seeds": stages.count("comfort"),
+                 "full_bounds_seeds": stages.count("full") if comfort_info.get("applied") else 0,
++                "jump_box_seeds": stages.count("jump_box"),
+             }
+ 
+             if self.use_direct_psi and not local_used:
+@@ -3567,7 +3946,7 @@
+         old_prev = self.q_prev.copy()
+         try:
+             self.last_load_diagnostics = {
+-                "version": "merged-v9",
++                "version": "merged-v13",
+                 "mode": self.load_mode,
+                 "accepted": False,
+                 "protection_enabled": self.load_mode == "strict",

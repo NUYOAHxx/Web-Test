@@ -1,0 +1,137 @@
+--- baseline/user_v9_input/ik_candidate.py
++++ ha_arm_ik/ik_candidate.py
+@@ -194,6 +194,22 @@
+     return "SUCCESS"
+ 
+ 
++def _waist_indices(chain, n):
++    """腰关节在活动关节向量中的下标：优先按链的关节名匹配 WAIST_JOINT_NAMES；
++    链没有关节名信息时沿用旧约定（2 腰 + 7 臂时取前两个）。"""
++    joints = getattr(chain, "active_joints", None)
++    if joints is not None and len(joints) == n:
++        names = [j.get("name") if isinstance(j, dict) else None for j in joints]
++        if all(name is not None for name in names):
++            return np.array(
++                [i for i, name in enumerate(names) if name in WAIST_JOINT_NAMES],
++                dtype=np.intp,
++            )
++    if n == len(WAIST_JOINT_NAMES) + 7:
++        return np.arange(len(WAIST_JOINT_NAMES), dtype=np.intp)
++    return np.zeros(0, dtype=np.intp)
++
++
+ def score_candidate(
+     chain,
+     q,
+@@ -221,6 +237,9 @@
+         tool_axis = TOOL_AXIS_X
+ 
+     tool_axis = normalize(tool_axis)
++    # psi_ready 不可用（q_ready 处臂角无定义，如肘部伸直）时臂角项不参与打分，其余代价照算；
++    # 旧实现会让所有候选 cost = inf，力矩 / 腰回中 / 限位择优全部失效
++    psi_ready_ok = psi_ready is not None and bool(np.isfinite(psi_ready))
+ 
+     psi = np.nan
+     phi = np.nan
+@@ -256,7 +275,7 @@
+                 joint_T[W_joint][:3, 3],
+                 REF_DIR,
+             ))
+-            phi = float(wrap_to_pi(psi - psi_ready))
++            phi = float(wrap_to_pi(psi - psi_ready)) if psi_ready_ok else np.nan
+         except Exception:
+             psi = np.nan
+             phi = np.nan
+@@ -266,12 +285,13 @@
+     dq_ready = joint_dist_periodic(q, q_ready, periodic_mask)
+ 
+     waist_dev = float("nan")
+-    if len(q) == len(WAIST_JOINT_NAMES) + 7:
++    waist_idx = _waist_indices(chain, len(q))
++    if waist_idx.size:
+         waist_dev = joint_dist_periodic(
+-            q[:len(WAIST_JOINT_NAMES)],
+-            q_ready[:len(WAIST_JOINT_NAMES)],
++            q[waist_idx],
++            np.asarray(q_ready, dtype=float)[waist_idx],
+             (
+-                periodic_mask[:len(WAIST_JOINT_NAMES)]
++                np.asarray(periodic_mask, dtype=bool)[waist_idx]
+                 if periodic_mask is not None
+                 else None
+             ),
+@@ -300,13 +320,14 @@
+             pass
+     pose_ok = (pos_err <= POS_TOL) and (ori_err <= ORI_TOL)
+ 
+-    if np.isfinite(phi):
+-        psi_cost = W_NOM * phi * phi
++    if np.isfinite(phi) or (not psi_ready_ok and Tq is not None):
++        psi_cost = W_NOM * phi * phi if np.isfinite(phi) else 0.0
+         smooth_cost = W_SMOOTH * dq_prev * dq_prev
+         limit_cost = W_LIMIT * limit_pen
++        # 链上没有腰关节（waist_dev = NaN）时没有可回中的腰，腰回中项为 0（旧实现得到 NaN 代价）
+         waist_cost = (
+             W_WAIST_RETURN * waist_dev * waist_dev
+-            if apply_waist_return
++            if apply_waist_return and np.isfinite(waist_dev)
+             else 0.0
+         )
+         cost_no_torque = psi_cost + smooth_cost + limit_cost + waist_cost
+@@ -317,9 +338,14 @@
+         waist_cost = np.inf
+         cost_no_torque = np.inf
+ 
+-    status = "VALID" if pose_ok else "BAD_POSE"
+-    if pose_ok and margin < SAFE_MARGIN:
++    # 与公共状态词表一致（candidate_status 同一规则）；旧值 "VALID" / "BAD_POSE" 会让
++    # info["status"] 与 IKResult.status 不一致
++    if not pose_ok:
++        status = "NO_VALID_POSE"
++    elif margin < SAFE_MARGIN:
+         status = "NEAR_LIMIT"
++    else:
++        status = "SUCCESS"
+ 
+     return {
+         "q": q.copy(),
+@@ -378,9 +404,28 @@
+     try:
+         import pinocchio as pin
+ 
+-        q_full = pin.neutral(pin_model)
+-        for k, q_idx in enumerate(pin_maps["active_q_indices"]):
+-            q_full[q_idx] = float(q[k])
++        q = np.asarray(q, dtype=float)
++        idx = list(pin_maps["active_q_indices"])
++        if q.shape != (len(idx),) or not np.all(np.isfinite(q)):
++            raise ValueError("q must be a finite active-joint vector")
++        # 非活动关节取 q_template（strict 模式下的实测全身状态），没有时取 neutral；
++        # continuous 关节在 Pinocchio q 中占 (cos, sin) 两个分量
++        template = pin_maps.get("q_template")
++        q_full = (
++            pin.neutral(pin_model)
++            if template is None
++            else np.array(template, dtype=float, copy=True)
++        )
++        cont = np.asarray(
++            pin_maps.get("active_continuous", np.zeros(len(idx), dtype=bool)),
++            dtype=bool,
++        )
++        for k, q_idx in enumerate(idx):
++            if cont[k]:
++                q_full[q_idx] = np.cos(q[k])
++                q_full[q_idx + 1] = np.sin(q[k])
++            else:
++                q_full[q_idx] = float(q[k])
+         J_full = pin.computeFrameJacobian(
+             pin_model, pin_data, q_full, ee_frame_id, pin.LOCAL
+         )
+@@ -527,6 +572,7 @@
+             best, "APPROXIMATE", per_seed=per_seed or None
+         )
+ 
++    per_seed = per_seed or []
+     if failure_diagnosis is not None:
+         failure_reason, failure_detail = failure_diagnosis(candidates, per_seed)
+     elif not candidates:

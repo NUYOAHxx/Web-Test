@@ -1,0 +1,527 @@
+--- baseline/solver_v8.py
++++ ha_arm_ik/solver.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""ha_arm_ik.solver -- merged-v8, original HAArmIKSolver entry.
++"""ha_arm_ik.solver -- merged-v9, original HAArmIKSolver entry.
+ 
+ 候选解的约束与择优（与 solver_dls.py 文件头的约束分层一致）：
+   1. 硬约束过滤：位姿达标、有效限位内、静态负荷 <= 容许值（strict）、单关节跳变 <= max_joint_jump_rad
+@@ -32,6 +32,17 @@
+   8. v8 修正：帧查询按 pin.FrameType.BODY（关节与连杆同名的 URDF 可用）；DLS 位姿容差取
+      min(PIN_IK_*_TOL, ik_common.*_TOL)，保证 DLS 判定达标的解不会被最终复核拒绝；腰部释放的肩关节与
+      臂展取配置的 s_joint、沿运动链逐段累加（不再依赖 "_Link2" 命名与 Link3/Link5 两段）。
++  9. v9：接入真实 ik_common / ik_candidate / robot_model。真实权重下 W_WAIST_RETURN（2000）≫ W_SMOOTH（8），
++     路点跟踪时逐帧在“锁腰（腰回 q_ready）”与“随动”两个分支间切换（单步跳变 0.8~2.5 rad；设了
++     max_joint_jump_rad 时切换点被拒、q_prev 不再更新、后续路点全部失败）。修正：
++     a) 续算局部优先（dls_continuation_local，默认 True）：续算类求解（判据同 v8 舒适窗）先跑续算阶段——
++        随动续算（种子 q_prev，搜索范围 = 有效限位 ∩ q_prev ± dls_continuation_max_step，默认 0.15 rad，
++        DLS 单步 <= 0.5 × 该值）与锁腰续算（腰保持 q_ready）；单关节步长 <= 该值的可接受候选按常规规则
++        择优，没有时按 v8 常规搜索（重新定位类求解与 v8 相同）；
++     b) 跳变上限前移：joint_jump_policy="reject" 且 max_joint_jump_rad < π 的关节，所有种子都在
++        q_prev ± 上限内搜索；框内没有可接受解时按 v8 不加框重搜一次（v8 能解的仍能解，只有超限解时照旧
++        报 JOINT_JUMP_LIMIT）；
++     c) psi(q_ready) 无定义时给出 RuntimeWarning（self.psi_ready_error），臂角项不参与打分。
+ """
+ 
+ from collections import defaultdict, deque
+@@ -42,6 +53,7 @@
+ from pathlib import Path
+ import threading
+ import time
++import warnings
+ import xml.etree.ElementTree as ET
+ 
+ import numpy as np
+@@ -227,6 +239,21 @@
+ # v7：q_prev 的解已合格且腰部偏离 q_ready 不超过该值（rad，逐关节最大值）时跳过锁腰种子；None = v6 顺序
+ LOCKED_SEED_SKIP_TOL = 0.02
+ JOINT_JUMP_POLICIES = ("reject", "prefer")
++# v9：续算（目标相对 FK(q_prev) 的主任务误差在 continuation_tol 以内，即路点跟踪）时先跑续算阶段，
++# 只用与 q_prev 连续的候选（见 collect_pinocchio_candidates_and_seeds）。原因：ik_candidate 的
++# W_WAIST_RETURN（2000）远大于 W_SMOOTH（8），逐帧在全部种子里择优会在“锁腰（腰回 q_ready）”与“随动”
++# 两个分支间来回切换，造成 0.8~2.5 rad 的单步跳变；设了 max_joint_jump_rad 时切换点的跳变超限，
++# q_prev 不再更新，后续路点全部失败。False = v8 行为。
++CONTINUATION_LOCAL = True
++# v9：续算阶段的单关节步长上限（rad，相对 q_prev，与 joint_jump_metrics 同一度量）：随动续算的搜索
++# 范围是 q_prev ± 该值；步长更大的候选（典型：q_prev 腰部远离 q_ready 时的锁腰解）不算局部解。
++# 取值依据（bench/v9，真实 ik_candidate）：0.1~0.2 普通跟踪逐帧步长 <= 0.020、腰部不漂；0.3 时随动解
++# 在负荷容差带边界与锁腰解来回切换（单步 0.198，与 v8 相同）；0.1 时腰部斜坡跟踪在框边上反复切换
++# （单步均值 0.081，0.15 时 0.034）；腰部大幅跟踪单步上限即该值，0.15 无回退。
++CONTINUATION_MAX_STEP = 0.15
++# v9：续算阶段 DLS 单步（2-范数）上限 = 该比例 × CONTINUATION_MAX_STEP：从框中心出发的首步不会越出续算框
++# （越框会被 SNS 钳制、线搜索停滞）
++CONTINUATION_DLS_STEP_FRACTION = 0.5
+ 
+ 
+ def joint_jump_metrics(q, q_prev, periodic_mask, jump_limits):
+@@ -1122,6 +1149,7 @@
+     comfort_bounds=None,
+     comfort_continuation_tol=None,
+     comfort_info=None,
++    continuation_local=False,
+ ):
+     """执行多 seed DLS 搜索：统一虚拟窗口边界、显式 multi_turn_mask 分支对齐与严格负荷早停比较。
+ 
+@@ -1145,8 +1173,24 @@
+       从这里续算只多用必要的腰部）-> q_ready -> 扰动种子（与 v7 相同的随机扰动），不再跑锁腰种子；
+       两阶段各自最多 max_seeds 个名额，共享时间预算；阶段 1 的候选保留在候选池中。
+       候选的限位裕度、去重始终按有效限位计算（舒适窗不是物理限位）。per_seed 记录 search_stage。
++
++    v9 续算局部优先 continuation_local=True：求解类别为“续算”（判据同上）时先跑续算阶段 "continuation"：
++      随动续算 = 种子 q_prev，搜索范围 = 有效限位 ∩ q_prev ± continuation_max_step（∩ 跳变框），
++        DLS 单步上限 min(max_step, CONTINUATION_DLS_STEP_FRACTION × continuation_max_step)；
++      锁腰续算 = 腰部锁在 q_ready（与常规锁腰种子相同），只在 q_prev 腰部偏离 q_ready <= continuation_max_step
++        时运行（否则不可能是局部解），不按 locked_seed_skip_tol 跳过；锁腰解负荷超 soft_ratio 时释放腰部并在
++        续算框内重跑随动续算；
++      局部候选 = 续算阶段的可接受候选（acceptable）且单关节步长 <= continuation_max_step。有局部候选时
++      候选池只保留它们（stop = CONTINUATION_LOCAL），不再跑常规搜索；否则按 v8 常规搜索（续算候选留在池中）。
++      comfort_info 额外写入 continuation_regime 与 continuation_local_used。
++
++    v9 跳变框：joint_jump_policy="reject" 且 max_joint_jump < π 的关节，阶段 1/2 的搜索范围再与
++      q_prev ± 上限求交；框内没有可接受候选（且未用局部解）时跑 "unboxed" 阶段（有效限位，v8 种子与规则）。
+     """
+     params = dict(dls_params or {})
++    continuation_reach = params.pop("continuation_reach", None)  # 只用于求解类别判据，不传给 DLS
++    q_prev = np.asarray(q_prev, dtype=float)
++    q_ready = np.asarray(q_ready, dtype=float)
+     search = dict(load_search or {})
+     context = params.get("load_context")
+     strict = context is not None
+@@ -1190,9 +1234,14 @@
+     # v8：舒适窗与有效限位求交；不收窄任何关节、或不含 q_ready 时退化为单阶段
+     comfort = None
+     regime = None
+-    if include_waist and comfort_bounds is not None:
++    comfort_enabled = bool(include_waist and comfort_bounds is not None)
++    if comfort_enabled or continuation_local:
+         # 求解类别：目标相对 FK(q_prev) 的主任务误差（与 DLS 同一度量）
+-        reach = params.get("waist_max_reach") or params.get("characteristic_length", 0.5)
++        reach = (
++            continuation_reach
++            or params.get("waist_max_reach")
++            or params.get("characteristic_length", 0.5)
++        )
+         tol_pos, tol_ori = (
+             (WAIST_COMFORT_CONTINUATION_STEP * float(reach), WAIST_COMFORT_CONTINUATION_STEP)
+             if comfort_continuation_tol is None
+@@ -1216,7 +1265,13 @@
+             if start["pos_err"] <= tol_pos and start["ori_violation"] <= tol_ori
+             else "reposition"
+         )
+-    if regime == "reposition":
++    local_first = bool(continuation_local and regime == "continuation")
++    cont_step = float(search.get("continuation_max_step", CONTINUATION_MAX_STEP))
++    if not math.isfinite(cont_step) or cont_step <= 0.0:
++        raise ValueError("continuation_max_step must be a positive finite angle")
++    local_used = False
++    local_pick = None
++    if comfort_enabled and regime == "reposition":
+         c_lo = np.maximum(eff_lower, np.asarray(comfort_bounds[0], dtype=float))
+         c_hi = np.minimum(eff_upper, np.asarray(comfort_bounds[1], dtype=float))
+         narrows = bool(np.any(c_lo > eff_lower) or np.any(c_hi < eff_upper))
+@@ -1278,14 +1333,20 @@
+             ok = ok and bool(cand.get("load_ok"))
+         return ok
+ 
+-    def run_stage(stage, queue, lo_s, hi_s, q_prev_seed, locked_done):
+-        """按队列运行一个搜索阶段；返回该阶段的停止原因与名额统计。"""
++    def run_stage(
++        stage, queue, lo_s, hi_s, q_prev_seed, locked_done, max_step=None, release_rerun=True
++    ):
++        """按队列运行一个搜索阶段；返回该阶段的停止原因与名额统计。
++
++        max_step 覆盖本阶段 DLS 的单步上限；release_rerun=False 时锁腰种子触发腰部释放后不在本阶段重跑 q_prev。
++        """
+         nonlocal unlocked, released, seed_errors, first_seed_error
+         stop = "SEED_LIMIT"
+         slots = 0                   # 已用名额：运行过的种子 + 被跳过的锁腰种子
+         locked_skipped = False
+         prev_rerun_queued = False
+         prev_info = None            # q_prev 种子的候选信息（v7 顺序下用于跳过锁腰种子 / 旧版早停）
++        stage_params = params if max_step is None else {**params, "max_step": float(max_step)}
+ 
+         while queue and slots < max_seeds:
+             deadline = params.get("deadline")
+@@ -1320,7 +1381,7 @@
+                     fixed_joint_mask=fixed,
+                     waist_release=include_waist,
+                     waist_load_release=released,
+-                    **params,
++                    **stage_params,
+                 )
+                 # 在本阶段搜索限位内对齐至最接近当前关节角 q_prev 的合法 2πk 分支
+                 q = select_closest_bounded_branch(
+@@ -1426,6 +1487,7 @@
+                     kind == "locked"
+                     and q_prev_first
+                     and released
++                    and release_rerun
+                     and not prev_rerun_queued
+                 ):
+                     # v7：锁腰种子触发腰部释放 -> 下一个种子用释放状态重跑 q_prev（即 v6 的第二个种子）
+@@ -1472,13 +1534,99 @@
+                     }
+                 )
+         return {
++            "name": stage,
+             "stop": stop,
+             "slots": slots,
+             "locked_skipped": locked_skipped,
+         }
+ 
++    # ---- v9：跳变上限前移到搜索 ------------------------------------------------------
++    # joint_jump_policy="reject" 且显式上限 < π 的关节：种子与迭代都限制在 q_prev ± 上限内（与有效限位 /
++    # 舒适窗求交；交集为空的关节不加）。否则 DLS 会在零空间里漂到上限之外、再被跳变过滤整批剔除，
++    # q_prev 不再更新，后续路点全部失败。框内没有可接受解时，按 v8 不加框重搜一次（见下方 "unboxed"）。
++    box_half = None
++    if jump_limits is not None and search.get("joint_jump_policy", "reject") == "reject":
++        limits = np.asarray(jump_limits, dtype=float)
++        limits = np.where(limits < np.pi, limits, np.inf)
++        if np.any(np.isfinite(limits)):
++            box_half = limits
++    rng_unboxed = copy.deepcopy(rng) if box_half is not None else None
++
++    def boxed(lo, hi, half):
++        if half is None:
++            return lo, hi
++        b_lo = np.maximum(lo, q_prev - half)
++        b_hi = np.minimum(hi, q_prev + half)
++        empty = b_lo >= b_hi
++        return np.where(empty, lo, b_lo), np.where(empty, hi, b_hi)
++
++    stages = []
++    # ---- v9：续算阶段（局部优先）----------------------------------------------------
++    # 只用与 q_prev 连续的候选，避免在“锁腰（腰回 q_ready）”与“随动”两个分支间来回切换：
++    #   随动续算：种子 q_prev，DLS 限制在 q_prev ± continuation_max_step（∩ 有效限位 ∩ 跳变框）内，
++    #            零空间整理不会一步漂到远处的姿态；单步上限取 min(max_step, 0.5 × continuation_max_step)；
++    #   锁腰续算：腰部锁在 q_ready、其余从 q_prev 出发（与常规锁腰种子相同），只有单关节步长
++    #            <= continuation_max_step 时才算局部（q_prev 腰部离 q_ready 远时它就是分支切换）；
++    #            锁腰解负荷超 soft_ratio 时释放腰部、在续算框内重跑随动续算。
++    # 局部可接受候选（满足全部硬约束且步长 <= continuation_max_step）按常规择优规则比较；
++    # 没有时进入常规搜索（与 v8 相同），续算阶段的候选留在候选池中。
++    if local_first:
++        n_before = len(candidates)
++        released_before = released
++        half_a = np.full(len(q_prev), cont_step)
++        if box_half is not None:
++            half_a = np.minimum(half_a, box_half)
++        lo_a, hi_a = boxed(eff_lower, eff_upper, half_a)
++        seed_a = clip_to_bounds(q_prev, lo_a, hi_a)
++        step_a = min(
++            float(params.get("max_step", PIN_IK_MAX_STEP)),
++            CONTINUATION_DLS_STEP_FRACTION * cont_step,
++        )
++        stages.append(
++            run_stage(
++                "continuation", deque([(seed_a, None, "q_prev")]), lo_a, hi_a,
++                seed_a, True, max_step=step_a,
++            )
++        )
++        # 锁腰续算：腰部离 q_ready 不超过续算步长时才可能是局部解（否则只多花一次 DLS，常规搜索也会跑锁腰种子）。
++        # 不按 v7 规则用“随动解腰部 ≈ q_ready”跳过：腰部等价不代表手臂等价（零空间整理可能已把手臂推到
++        # 续算框边上，而锁腰解只需跟着目标小步移动），跳过会让轨迹离开锁腰分支、之后再也回不来
++        if include_waist and np.any(waist_mask) and (
++            float(np.max(np.abs(q_prev[waist_mask] - q_ready[waist_mask])))
++            <= cont_step + 1e-9
++        ):
++            lo_b, hi_b = boxed(eff_lower, eff_upper, box_half)
++            locked_b = clip_to_bounds(q_prev.copy(), lo_b, hi_b)
++            locked_b[waist_mask] = q_ready[waist_mask]
++            stages.append(
++                run_stage(
++                    "continuation", deque([(locked_b, waist_mask, "locked")]),
++                    lo_b, hi_b, seed_a, True, release_rerun=False,
++                )
++            )
++            if released and not released_before:
++                # 锁腰续算负荷超 soft_ratio -> 释放腰部，在续算框内重跑随动续算（对应常规的 q_prev_release）
++                stages.append(
++                    run_stage(
++                        "continuation", deque([(seed_a, None, "q_prev_release")]),
++                        lo_a, hi_a, seed_a, True, max_step=step_a,
++                    )
++                )
++        local = [
++            c
++            for c in candidates[n_before:]
++            # 与 joint_jump_metrics 相同的 1e-9 容差：贴在续算框边上的解（q - q_prev 舍入后略大于框）仍算局部
++            if acceptable(c) and c["joint_jump_max_rad"] <= cont_step + 1e-9
++        ]
++        if local:
++            local_used, local_pick = True, local
++            stages[-1]["stop"] = "CONTINUATION_LOCAL"
++        else:
++            released = released_before  # 回到常规搜索：腰部释放状态从头判定（与 v8 相同）
++
+     # ---- 阶段 1：舒适窗（未启用舒适窗时即 v7 的唯一阶段）--------------------------
+     lo1, hi1 = comfort if comfort is not None else (eff_lower, eff_upper)
++    lo1, hi1 = boxed(lo1, hi1, box_half)
+     seeds = make_scatter_seeds(
+         q_prev, q_ready, lo1, hi1, rng, max_count=max_seeds
+     )
+@@ -1491,23 +1639,25 @@
+         locked = clip_to_bounds(q_prev.copy(), lo1, hi1)
+         locked[waist_mask] = q_ready[waist_mask]
+         entries.insert(1 if q_prev_first else 0, (locked, waist_mask, "locked"))
+-    stages = [
+-        run_stage(
+-            "comfort" if comfort is not None else "full",
+-            deque(entries),
+-            lo1,
+-            hi1,
+-            seeds[0],
+-            not include_waist,
++    if not local_used:
++        stages.append(
++            run_stage(
++                "comfort" if comfort is not None else "full",
++                deque(entries),
++                lo1,
++                hi1,
++                seeds[0],
++                not include_waist,
++            )
+         )
+-    ]
+ 
+     # ---- 阶段 2：舒适窗内无可接受解 -> 放开到有效限位 -----------------------------
+     comfort_ok = comfort is not None and any(acceptable(c) for c in candidates)
+-    fallback = comfort is not None and not comfort_ok
++    fallback = comfort is not None and not comfort_ok and not local_used
+     if fallback:
++        lo2, hi2 = boxed(eff_lower, eff_upper, box_half)
+         seeds_full = make_scatter_seeds(
+-            q_prev, q_ready, eff_lower, eff_upper, rng_full, max_count=max_seeds
++            q_prev, q_ready, lo2, hi2, rng_full, max_count=max_seeds
+         )
+         entries_full = [(seeds_full[0], None, "q_prev")]
+         for _, _, q_edge in sorted(edge_pool, key=lambda e: (e[0], e[1]))[
+@@ -1516,16 +1666,49 @@
+             entries_full.append((q_edge, None, "comfort_edge"))
+         entries_full.extend((seed, None, "scatter") for seed in seeds_full[1:])
+         stages.append(
++            run_stage("full", deque(entries_full), lo2, hi2, seeds_full[0], True)
++        )
++    # ---- v9：跳变框内没有可接受解 -> 按 v8 不加框重搜一次 -------------------------------
++    # 既保证 v8 能解的目标 v9 仍能解，也让“只有超限解”的目标照旧报 JOINT_JUMP_LIMIT（而不是位姿不可达）
++    unboxed = bool(
++        box_half is not None
++        and not local_used
++        and not any(acceptable(c) for c in candidates)
++    )
++    if unboxed:
++        seeds_u = make_scatter_seeds(
++            q_prev, q_ready, eff_lower, eff_upper, rng_unboxed, max_count=max_seeds
++        )
++        entries_u = [
++            (seed, None, "q_prev" if i == 0 else "scatter")
++            for i, seed in enumerate(seeds_u)
++        ]
++        if include_waist:
++            locked_u = clip_to_bounds(q_prev.copy(), eff_lower, eff_upper)
++            locked_u[waist_mask] = q_ready[waist_mask]
++            entries_u.insert(1 if q_prev_first else 0, (locked_u, waist_mask, "locked"))
++        stages.append(
+             run_stage(
+-                "full", deque(entries_full), eff_lower, eff_upper, seeds_full[0], True
++                "unboxed",
++                deque(entries_u),
++                eff_lower,
++                eff_upper,
++                seeds_u[0],
++                not include_waist,
+             )
+         )
++    if local_used:
++        # 续算局部解：候选池只保留局部可接受候选（离 q_prev 远的候选不参与择优，避免分支切换）
++        candidates[:] = local_pick
++    main_stages = [st for st in stages if st["name"] not in ("continuation", "unboxed")]
+ 
+     if comfort_info is not None:
+         comfort_info.update(
+-            regime=regime,
++            regime=regime if comfort_enabled else None,
+             applied=comfort is not None,
+             fallback_to_full_bounds=bool(fallback),
++            continuation_regime=regime,
++            continuation_local_used=local_used,
+         )
+ 
+     if strict:
+@@ -1540,7 +1723,10 @@
+                 if q_prev_first
+                 else ("locked_first" if include_waist else "no_waist")
+             ),
+-            "locked_seed_skipped": stages[0]["locked_skipped"],
++            "locked_seed_skipped": bool(main_stages and main_stages[0]["locked_skipped"]),
++            "continuation_local_used": local_used,
++            "jump_limit_search_box": box_half is not None,
++            "jump_limit_unboxed_retry": unboxed,
+             "q_prev_release_rerun": any(
+                 p.get("seed_kind") == "q_prev_release" for p in per_seed
+             ),
+@@ -1550,7 +1736,7 @@
+             "waist_comfort": {
+                 "enabled": comfort is not None,
+                 "regime": regime,
+-                "comfort_stop_reason": stages[0]["stop"] if comfort is not None else None,
++                "comfort_stop_reason": main_stages[0]["stop"] if comfort is not None else None,
+                 "comfort_solution_found": bool(comfort_ok),
+                 "fallback_to_full_bounds": bool(fallback),
+             },
+@@ -1690,7 +1876,7 @@
+         self._solve_T_root_base = None
+         self._load_deadline = None
+         self.last_load_diagnostics = {
+-            "version": "merged-v8",
++            "version": "merged-v9",
+             "accepted": False,
+             "mode": self.load_mode,
+             "code": "NOT_RUN",
+@@ -1755,6 +1941,19 @@
+                     "dls_waist_comfort_continuation_tol must be (pos_m, ori_rad) >= 0"
+                 )
+         self.dls_waist_comfort_continuation_tol = tol
++        # v9：续算局部优先（见 CONTINUATION_LOCAL）；续算判据与舒适窗共用 dls_waist_comfort_continuation_tol
++        local = cfg_tune.get("dls_continuation_local", CONTINUATION_LOCAL)
++        if not isinstance(local, (bool, np.bool_)):
++            raise ValueError("dls_continuation_local must be True or False")
++        self.dls_continuation_local = bool(local)
++        step = cfg_tune.get("dls_continuation_max_step", CONTINUATION_MAX_STEP)
++        try:
++            step = float("nan") if isinstance(step, (bool, np.bool_)) else float(step)
++        except (TypeError, ValueError):
++            step = float("nan")
++        if not math.isfinite(step) or step <= 0.0:
++            raise ValueError("dls_continuation_max_step must be a positive finite angle")
++        self.dls_continuation_max_step = step
+ 
+         self.urdf = str(Path(urdf).expanduser().resolve())
+         if not Path(self.urdf).is_file():
+@@ -1923,10 +2122,23 @@
+                 )
+         self.locked_seed_skip_tol = skip_tol
+ 
++        # v9：q_ready 处臂角无定义（肘部伸直 / S->W 与参考方向平行 / S、E、W 关节名不在链上）时
++        # psi_ready = NaN：ik_candidate 的臂角项不参与打分（其余代价照算），并给出可见告警
++        self.psi_ready_error = None
+         try:
+             self.psi_ready = float(self.chain.psi(self.q_ready))
+-        except Exception:
++        except Exception as exc:
+             self.psi_ready = float("nan")
++            self.psi_ready_error = f"{type(exc).__name__}: {exc}"
++        if not math.isfinite(self.psi_ready):
++            self.psi_ready = float("nan")
++            self.psi_ready_error = self.psi_ready_error or "psi(q_ready) is not finite"
++            warnings.warn(
++                "psi(q_ready) undefined; the arm-angle term is excluded from candidate "
++                f"scoring ({self.psi_ready_error})",
++                RuntimeWarning,
++                stacklevel=2,
++            )
+ 
+         # ---- SSIK ----
+         self.arm = None
+@@ -1995,6 +2207,7 @@
+ 
+         self.pin_base_frame_id = None
+         self.dls_waist_max_reach = None
++        self.dls_arm_max_reach = None
+         self.waist_comfort_lower = None
+         self.waist_comfort_upper = None
+         self.waist_comfort_info = {}
+@@ -2010,11 +2223,18 @@
+                 )
+             except Exception:
+                 self.pin_base_frame_id = None
+-            if self.include_waist:
+-                # 腰部按距离释放所用的臂展：配置的 s_joint 原点 -> TCP，沿运动链逐段累加
+-                self.dls_waist_max_reach = estimate_arm_max_reach(
++            # 臂展：配置的 s_joint 原点 -> TCP，沿运动链逐段累加（续算判据的位置尺度；include_waist 时
++            # 同时是腰部按距离释放所用的臂展）
++            try:
++                self.dls_arm_max_reach = estimate_arm_max_reach(
+                     self.pin_model, self.pin_maps, self.pin_ee_frame_id, self.s_joint
+                 )
++            except Exception:
++                if self.include_waist:
++                    raise
++                self.dls_arm_max_reach = None
++            if self.include_waist:
++                self.dls_waist_max_reach = self.dls_arm_max_reach
+                 self._configure_waist_comfort(cfg_tune)
+ 
+         self._check_model()
+@@ -2574,6 +2794,7 @@
+                 "pos_tol": min(PIN_IK_POS_TOL, POS_TOL),
+                 "ori_tol": min(PIN_IK_ORI_TOL, ORI_TOL),
+             }
++            dls_params["continuation_reach"] = self.dls_arm_max_reach
+             if self.include_waist:
+                 dls_params["shoulder_joint"] = self.s_joint
+                 dls_params["waist_max_reach"] = self.dls_waist_max_reach
+@@ -2615,14 +2836,28 @@
+                             "load_min_unlocked_seeds", 1
+                         ),
+                         "max_joint_jump": self.max_joint_jump,
++                        "joint_jump_policy": self.joint_jump_policy,
+                         "locked_seed_skip_tol": self.locked_seed_skip_tol,
++                        "continuation_max_step": self.dls_continuation_max_step,
+                     },
+                     comfort_bounds=comfort_bounds,
+                     comfort_continuation_tol=self.dls_waist_comfort_continuation_tol,
+                     comfort_info=comfort_info,
++                    continuation_local=self.dls_continuation_local,
+                 )
+             )
+-            candidates.extend(pin_candidates)
++            local_used = bool(comfort_info.get("continuation_local_used"))
++            self.last_load_diagnostics["continuation"] = {
++                "local_enabled": self.dls_continuation_local,
++                "regime": comfort_info.get("continuation_regime"),
++                "local_used": local_used,
++            }
++            if local_used:
++                # 续算局部解：只保留局部候选（可选的 SSIK 候选不再参与择优，direct-psi 阶段也跳过）
++                candidates = list(pin_candidates)
++                all_direct_seeds = []
++            else:
++                candidates.extend(pin_candidates)
+             per_seed.extend(pin_per_seed)
+             stages = [p.get("search_stage") for p in pin_per_seed]
+             self.last_load_diagnostics["waist_comfort"] = {
+@@ -2636,7 +2871,7 @@
+                 "full_bounds_seeds": stages.count("full") if comfort_info.get("applied") else 0,
+             }
+ 
+-            if self.use_direct_psi:
++            if self.use_direct_psi and not local_used:
+                 all_direct_seeds.extend(pin_seeds)
+ 
+         return candidates, unique_seed_list(all_direct_seeds), per_seed
+@@ -3062,8 +3297,10 @@
+         candidates.extend(portfolio_candidates)
+         direct_seeds.extend(portfolio_seeds)
+ 
+-        # 3. direct-psi stage
+-        if self.use_direct_psi:
++        # 3. direct-psi stage（v9：续算局部解已采用时跳过）
++        if self.use_direct_psi and not (
++            self.last_load_diagnostics.get("continuation") or {}
++        ).get("local_used"):
+             candidates.extend(
+                 self._solve_direct_psi_stage(
+                     T_target_local,
+@@ -3330,7 +3567,7 @@
+         old_prev = self.q_prev.copy()
+         try:
+             self.last_load_diagnostics = {
+-                "version": "merged-v8",
++                "version": "merged-v9",
+                 "mode": self.load_mode,
+                 "accepted": False,
+                 "protection_enabled": self.load_mode == "strict",

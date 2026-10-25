@@ -1,0 +1,828 @@
+--- dual-p2/ha_arm_ik/solver_dls.py
++++ v15/ha_arm_ik/solver_dls.py
+@@ -96,6 +96,9 @@
+ SETTLE_COST_RTOL = 1e-3           # 姿态整理阶段：单步次任务代价相对下降 < 0.1% 记为“慢步”
+ SETTLE_PATIENCE = 3               # 连续 3 个慢步即视为已收敛（收敛判据，v8 恢复 v6 取值；v7 为 2）
+ POSE_PEAK_BAND_FRACTION = 0.25    # 单种子内择优的峰值容差带 = 0.25 * LoadPolicy.peak_tie（默认 0.005）
++NO_SETTLE_NULL_STEP_RATIO = 2.0   # v15：posture_settle=False（续算）时未达标的零空间原始步 |w·D z| <= 2 × |e|
++                                  # （e 为缩放后的主任务误差，与双臂 NULL_STEP_RATIO 相同）：回中幅度与手的
++                                  # 移动量成正比；不限幅时 1 mm 的目标移动也会让关节在收敛过程中变 0.1 rad
+ LOAD_EARLY_STOP_RATIO = 0.70      # 低负荷早停阈值默认值，实际取 min(本值, soft_ratio)（v6 默认 0.60）
+ 
+ # =============================================================================
+@@ -160,15 +163,21 @@
+     return math.sqrt(x.dot(x))
+ 
+ 
++_RIGID_BOTTOM_ROW = np.array([0.0, 0.0, 0.0, 1.0])
++_EYE3 = np.eye(3)
++
++
+ def validate_transform(value):
+     T = np.asarray(value, dtype=float)
+-    if T.shape != (4, 4) or not np.all(np.isfinite(T)):
++    if T.shape != (4, 4) or not np.isfinite(T).all():
+         raise ValueError("target must be a finite 4x4 transform")
+     rot = T[:3, :3]
++    # 判定与 np.allclose / np.isclose(rtol=0) 逐位等价：参考值有限时 isclose(x, y) ⇔ |x - y| <= atol
++    # （含 inf / NaN 情形均为 False）；省去 isclose 的通用分派开销
+     if (
+-        not np.allclose(T[3], [0.0, 0.0, 0.0, 1.0], atol=1e-9, rtol=0.0)
+-        or not np.allclose(rot.T @ rot, np.eye(3), atol=1e-6, rtol=0.0)
+-        or not np.isclose(np.linalg.det(rot), 1.0, atol=1e-6, rtol=0.0)
++        not (np.abs(T[3] - _RIGID_BOTTOM_ROW) <= 1e-9).all()
++        or not (np.abs(rot.T @ rot - _EYE3) <= 1e-6).all()
++        or not abs(np.linalg.det(rot) - 1.0) <= 1e-6
+     ):
+         raise ValueError("target rotation/bottom row is not a rigid transform")
+     return T.copy()
+@@ -538,14 +547,28 @@
+     cont_idx_sin = cont_idx + 1
+     has_cont = bool(cont_pos.size)
+     shape = (n_active,)
++    # v15：全部为标量关节、按活跃顺序连续存放时用切片赋值（纯拷贝，与花式索引逐位相同）
++    scalar_range = _contiguous_range(scalar_idx)
++    direct = (
++        not has_cont
++        and scalar_range is not None
++        and np.array_equal(scalar_pos, np.arange(n_active))
++    )
++    q_slice = slice(*scalar_range) if direct else None
+ 
+     def build(q_active):
+         values = np.asarray(q_active, dtype=float)
+-        if values.shape != shape or not np.isfinite(values).all():
++        # 有限性：x·x 有限 => 全部有限；为 inf/NaN（或极端值溢出）时再逐元素判定，异常与原实现相同
++        if values.shape != shape or (
++            not math.isfinite(values.dot(values)) and not np.isfinite(values).all()
++        ):
+             raise ValueError(
+                 f"active q: expected a finite 1-D vector of size {n_active}"
+             )
+         q = base.copy()
++        if direct:
++            q[q_slice] = values
++            return q
+         q[scalar_idx] = values[scalar_pos]
+         if has_cont:
+             angles = values[cont_pos]
+@@ -951,6 +974,20 @@
+     return comfort_lo, comfort_hi, info
+ 
+ 
++def _contiguous_range(indices):
++    """indices 为连续递增整数序列时返回 (start, stop)，否则 None（用于把花式索引换成切片）。"""
++    if indices is None:
++        return None
++    values = np.asarray(indices).ravel()
++    if values.size == 0 or values.dtype.kind not in "iu":
++        return None
++    seq = values.tolist()
++    start = seq[0]
++    if start < 0 or seq != list(range(start, start + len(seq))):
++        return None
++    return start, start + len(seq)
++
++
+ class _SecondaryObjective:
+     """零空间次任务 H(q) 与负梯度 z = -dH/dq 的求值器：每个种子构造一次，迭代内复用。
+ 
+@@ -1068,6 +1105,41 @@
+             ghat = ghat / max(float(np.linalg.norm(ghat)), 1e-30)
+             self.P = np.eye(3) - np.outer(ghat, ghat)
+ 
++        # v15 热路径预计算（只改写法，不改任何参与结果的浮点运算）
++        self.movable_f = np.asarray(movable_mask, dtype=float).copy()
++        self.movable_all = bool(np.all(np.asarray(movable_mask, dtype=bool)))
++        if limit_gain > 0.0:
++            self.b_low_list = np.asarray(self.b_low, dtype=float).tolist()
++            self.b_high_list = np.asarray(self.b_high, dtype=float).tolist()
++        col_range = _contiguous_range(self.com_cols)
++        self.com_col_slice = None if col_range is None else slice(*col_range)
++        self.dtau_slices = None
++        dtau_rows = dtau_cols = None
++        if load_context is not None:
++            dtau_rows, dtau_cols = load_context["guard_v"], load_context["active_v"]
++            policy = self.policy
++            self.n_guard = len(load_context["guard_v"])   # == len(tau)，与 _cost_terms 的 n 相同
++            self.soft_ratio = float(policy.soft_ratio)
++            self.half_aw = 0.5 * policy.absolute_weight
++            self.aw_w = policy.absolute_weight * self.weights
++            # 快路径（所有关节负荷率 <= soft_ratio 时 excess 恒为 +0.0）：见 __call__ 注释
++            self.fast_load_cost = bool(
++                policy.relative_weight == 0.0 and policy.absolute_weight > 0.0
++            )
++        elif getattr(self, "use_gravity", False):
++            dtau_rows = dtau_cols = active_v_indices
++        if dtau_rows is not None:
++            r_rng, c_rng = _contiguous_range(dtau_rows), _contiguous_range(dtau_cols)
++            if r_rng is not None and c_rng is not None:
++                self.dtau_slices = (slice(*r_rng), slice(*c_rng))
++
++    def _dtau(self, raw):
++        """重力矩导数子块（与 reshape(nv, nv)[np.ix_(rows, cols)] 同值、同为行主序连续）。"""
++        full = np.asarray(raw).reshape(self.nv, self.nv)
++        if self.dtau_slices is None:
++            return full[self.dtau_index]
++        return np.ascontiguousarray(full[self.dtau_slices])
++
+     def _com(self, q_full, derivatives):
+         """model_com_with_jacobian 的同序运算（根 link 质量项已预计算）。导数关闭时雅可比返回 None。"""
+         model, data = self.model, self.data
+@@ -1086,13 +1158,78 @@
+         com = (m_mov * c_mov + self.root_term) / m_total
+         if J_mov is None:
+             return com, None
+-        J_cols = J_mov if self.com_cols is None else J_mov[:, self.com_cols]
++        if self.com_cols is None:
++            J_cols = J_mov
++        elif self.com_col_slice is not None:
++            # 与 J_mov[:, cols]（花式索引结果为列主序）同值同布局
++            J_cols = np.asfortranarray(J_mov[:, self.com_col_slice])
++        else:
++            J_cols = J_mov[:, self.com_cols]
+         return com, (m_mov / m_total) * J_cols
+ 
++    def _limit_terms(self, q_active, need_z):
++        """单侧安全裕度排斥项：返回 (z 增量或 None, c_lim)。
++
++        与原 numpy 写法逐位一致：under = max(0, b_low - q) / margin，over = max(0, q - b_high) / margin，
++        z 增量 = limit_gain * (under - over) / margin，c_lim = 0.5 * limit_gain * dot(under^2 + over^2, movable)。
++        q 全部处于缓冲区外（常见情形）时 under = over = +0.0：z 增量恰为 +0.0（返回标量 0.0，
++        与加零向量逐位相同），c_lim = 0.0。含 NaN 时回到 numpy 原写法。
++        """
++        margin, gain = self.margin, self.limit_gain
++        q_list = q_active.tolist()
++        active = False
++        for qi, lo_i, hi_i in zip(q_list, self.b_low_list, self.b_high_list):
++            if qi < lo_i or qi > hi_i:
++                active = True
++            elif qi != qi:
++                under = np.maximum(0.0, self.b_low - q_active) / margin
++                over = np.maximum(0.0, q_active - self.b_high) / margin
++                dz = gain * (under - over) / margin if need_z else None
++                c_lim = (
++                    0.5 * gain * float(np.dot(under ** 2 + over ** 2, self.movable))
++                )
++                return dz, c_lim
++        if not active:
++            return (0.0 if need_z else None), 0.5 * gain * 0.0
++        dz_list, sq_list = [], []
++        for qi, lo_i, hi_i in zip(q_list, self.b_low_list, self.b_high_list):
++            u = lo_i - qi
++            u = (u if u > 0.0 else 0.0) / margin
++            o = qi - hi_i
++            o = (o if o > 0.0 else 0.0) / margin
++            dz_list.append(gain * (u - o) / margin)
++            sq_list.append(u * u + o * o)
++        c_lim = 0.5 * gain * float(np.dot(np.array(sq_list), self.movable_f))
++        return (np.array(dz_list) if need_z else None), c_lim
++
++    def _raise_nonfinite(self, com, Jcom, tau, ratios, dtau, g_load, c_load, cost, z, derivatives, need_z):
++        """v14 的逐项有限性检查（原顺序、原异常消息）；v15 仅在末尾合并检查失败时调用。"""
++        if self.context is not None:
++            if not np.isfinite(com).all() or (
++                Jcom is not None and not np.isfinite(Jcom).all()
++            ):
++                raise ValueError("non-finite model COM")
++            if not np.isfinite(tau).all():
++                raise ValueError("gravity efforts: non-finite values")
++            if not np.isfinite(ratios).all():
++                raise ValueError("non-finite normalized load; check capacities/model")
++            if derivatives and not np.isfinite(dtau).all():
++                raise ValueError("invalid gravity effort derivative")
++            if derivatives:
++                if not np.isfinite(g_load).all() or not math.isfinite(c_load):
++                    raise ValueError("non-finite load objective")
++            elif not math.isfinite(c_load):
++                raise ValueError("non-finite load objective")
++        if not math.isfinite(cost) or (need_z and not np.isfinite(z).all()):
++            raise ValueError("non-finite secondary objective")
++
+     def __call__(self, q_active, q_full, derivatives=True, components=None, need_z=True):
+         """返回 (z * movable_mask, H)；need_z=False 且 derivatives=False 时返回 (None, H)。
+ 
+         q_full 必须是 q_active 对应的 Pinocchio q（active_q_to_pinocchio_q 的结果）。
++        v15：与 v14 逐位一致的改写——限位项按关节标量运算（缓冲区外直接为零）、严格负荷代价在
++        全部负荷率 <= soft_ratio 时跳过恒为零的 excess 项、有限性检查合并到末尾（失败时按原顺序
++        复核并抛出原异常）、少做冗余拷贝与布尔转换。
+         """
+         need_z = need_z or derivatives
+         if self.multi_turn is not None:
+@@ -1106,62 +1243,55 @@
+                 diff[mask] = (diff[mask] + np.pi) % (2.0 * np.pi) - np.pi
+ 
+         z = self.neg_ns_gain * diff if need_z else None
+-        posture = 0.5 * float(np.dot(self.ns_gain * (diff ** 2), self.movable))
++        posture = 0.5 * float(np.dot(self.ns_gain * (diff ** 2), self.movable_f))
+         cost = posture
+         c_lim = 0.0
+         abs_load = excess_load = rel_load = 0.0
+         c_com = 0.0
+         peak = load_ok = None
++        com = Jcom = tau = ratios = dtau = g_load = None
++        c_load = 0.0
+ 
+         # 1. 单侧安全裕度排斥项
+         if self.limit_gain > 0.0:
+-            margin = self.margin
+-            under = np.maximum(0.0, self.b_low - q_active) / margin
+-            over = np.maximum(0.0, q_active - self.b_high) / margin
++            dz, c_lim = self._limit_terms(q_active, need_z)
+             if need_z:
+-                z += self.limit_gain * (under - over) / margin
+-            c_lim = (
+-                0.5
+-                * self.limit_gain
+-                * float(np.dot(under ** 2 + over ** 2, self.movable))
+-            )
++                z += dz
+             cost += c_lim
+ 
+         model, data = self.model, self.data
+         if self.context is not None:
+             # 2a. 严格负荷模式：与 load_physics + LoadPolicy.evaluate/cost_gradient 同序
+-            tau = np.array(
+-                pin.computeGeneralizedGravity(model, data, q_full), copy=True
+-            )[self.guard_v]
++            tau = pin.computeGeneralizedGravity(model, data, q_full)[self.guard_v]
+             if derivatives:
+-                dtau = np.asarray(
++                dtau = self._dtau(
+                     pin.computeGeneralizedGravityDerivatives(model, data, q_full)
+-                ).reshape(self.nv, self.nv)[self.dtau_index]
++                )
+             com, Jcom = self._com(q_full, derivatives)
+-            if not np.isfinite(com).all() or (
+-                Jcom is not None and not np.isfinite(Jcom).all()
+-            ):
+-                raise ValueError("non-finite model COM")
+-            if not np.isfinite(tau).all():
+-                raise ValueError("gravity efforts: non-finite values")
+             ratios = np.abs(tau) / self.caps
+-            if not np.isfinite(ratios).all():
+-                raise ValueError("non-finite normalized load; check capacities/model")
+             peak = float(ratios.max())
+             load_ok = peak <= 1.0
+-            if derivatives and not np.isfinite(dtau).all():
+-                raise ValueError("invalid gravity effort derivative")
+-            abs_load, excess_load, rel_load, dcost_dtau = self.policy._cost_terms(
+-                tau, self.caps, self.weights, self.tau_ref, derivatives
+-            )
++            if self.fast_load_cost and peak <= self.soft_ratio:
++                # 全部 |r| <= soft_ratio：excess = max(|r| - soft, 0) 恒为 +0.0，故
++                #   excess 代价 = 0.5*w_e*0.0/n = 0.0；梯度第二项为 ±0.0（r<0 时 -0.0），
++                #   x + (-0.0) == x，x + (+0.0) 只把 -0.0 变 +0.0（r == -0.0 时第二项为 +0.0），
++                #   所以 first + 0.0 与原式逐位相同（absolute_weight > 0 保证 r<0 时 first 非零）。
++                r = tau / self.caps
++                n = self.n_guard
++                abs_load = self.half_aw * float((self.weights * r * r).sum()) / n
++                excess_load = 0.5 * self.policy.excess_weight * 0.0 / n
++                rel_load = 0.0
++                dcost_dtau = (
++                    (self.aw_w * r / self.caps + 0.0) / n if derivatives else None
++                )
++            else:
++                abs_load, excess_load, rel_load, dcost_dtau = self.policy._cost_terms(
++                    tau, self.caps, self.weights, self.tau_ref, derivatives
++                )
+             c_load = float(abs_load + excess_load + rel_load)
+             if derivatives:
+                 g_load = dtau.T @ dcost_dtau
+-                if not np.isfinite(g_load).all() or not math.isfinite(c_load):
+-                    raise ValueError("non-finite load objective")
+                 z -= g_load
+-            elif not math.isfinite(c_load):
+-                raise ValueError("non-finite load objective")
+             cost += c_load
+             if self.use_com:
+                 dcom = self.P @ (com - self.ref_com)
+@@ -1169,19 +1299,30 @@
+                     z -= self.com_gain * (Jcom.T @ dcom)
+                 c_com = 0.5 * self.com_gain * float(dcom @ dcom)
+                 cost += c_com
++            finite = (
++                math.isfinite(cost)
++                and math.isfinite(float(com @ com))
++                and (
++                    not derivatives
++                    or (
++                        math.isfinite(float(dtau.sum()))
++                        and math.isfinite(float(Jcom.sum()))
++                    )
++                )
++            )
+         else:
+             # 2b. 未配置负荷上下文：可选的 URDF 力矩归一化项（与 v6 同序）
+             if self.use_gravity:
+-                tau_cur = np.array(
+-                    pin.computeGeneralizedGravity(model, data, q_full), copy=True
+-                )[self.active_v]
++                tau_cur = pin.computeGeneralizedGravity(model, data, q_full)[
++                    self.active_v
++                ]
+                 inv_eff_sq, n_act = self.inv_eff_sq, self.n_act
+                 dcost_dtau = np.zeros_like(tau_cur) if derivatives else None
+                 if self.gravity_gain > 0.0:
+                     abs_load = (
+                         0.5
+                         * self.gravity_gain
+-                        * float(np.sum((tau_cur ** 2) * inv_eff_sq))
++                        * float(((tau_cur ** 2) * inv_eff_sq).sum())
+                         / n_act
+                     )
+                     cost += abs_load
+@@ -1192,16 +1333,16 @@
+                     rel_load = (
+                         0.5
+                         * self.rel_gain
+-                        * float(np.sum((tau_diff ** 2) * inv_eff_sq))
++                        * float(((tau_diff ** 2) * inv_eff_sq).sum())
+                         / n_act
+                     )
+                     cost += rel_load
+                     if derivatives:
+                         dcost_dtau += self.rel_gain * (tau_diff * inv_eff_sq) / n_act
+                 if derivatives:
+-                    dtau_act = np.asarray(
++                    dtau_act = self._dtau(
+                         pin.computeGeneralizedGravityDerivatives(model, data, q_full)
+-                    ).reshape(self.nv, self.nv)[self.dtau_index]
++                    )
+                     z -= dtau_act.T @ dcost_dtau
+             if self.use_com:
+                 com_cur, J_com = self._com(q_full, derivatives)
+@@ -1210,22 +1351,25 @@
+                 cost += c_com
+                 if derivatives:
+                     z -= self.com_gain * (J_com.T @ dcom)
++            finite = math.isfinite(cost)
+ 
+-        if not math.isfinite(cost) or (need_z and not np.isfinite(z).all()):
+-            raise ValueError("non-finite secondary objective")
++        if not finite or (need_z and not math.isfinite(float(z @ z))):
++            self._raise_nonfinite(
++                com, Jcom, tau, ratios, dtau, g_load, c_load, cost, z, derivatives, need_z
++            )
+         if components is not None:
+-            parts = {
+-                "posture": posture,
+-                "joint_limit": c_lim,
+-                "absolute_load": abs_load,
+-                "excess_load": excess_load,
+-                "relative_load": rel_load,
+-                "com": c_com,
+-            }
++            components["posture"] = posture
++            components["joint_limit"] = c_lim
++            components["absolute_load"] = abs_load
++            components["excess_load"] = excess_load
++            components["relative_load"] = rel_load
++            components["com"] = c_com
+             if self.context is not None:
+-                parts.update(peak_ratio=peak, load_ok=load_ok)
+-            components.update(parts)
+-        return (z * self.movable if need_z else None), cost
++                components["peak_ratio"] = peak
++                components["load_ok"] = load_ok
++        if not need_z:
++            return None, cost
++        return (z if self.movable_all else z * self.movable_f), cost
+ 
+ 
+ def _metric_svd_step(J, error, z, D, damping, rank_rtol=1e-9):
+@@ -1301,6 +1445,206 @@
+ ):
+     """主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
+ 
++    数学与返回值见 _sns_clamped_core_reference（v14 原实现）。v15 只改对角逆度量热路径的写法，
++    每一个参与结果的浮点运算（矩阵乘、Cholesky、逐元素运算）与原实现同序、同内存布局，结果逐位一致：
++      - 第一轮（尚无钳制）e_rem = e - J @ 0 恰为 e，||dq_clamped||^2 = 0，直接取用；
++      - 全部关节自由时 J_free 用 np.asfortranarray(J)（与 J[:, mask] 同值同为列主序），
++        d / z 不再做布尔索引；dq_total / dq_null 不再经零向量拷贝赋值；
++      - 无零空间项时不建零向量，dq_task + 0.0 与 dq_task + zeros 逐位相同；
++      - 越界检查用 Python 标量逐关节比较（与 numpy 逐元素减法同一 IEEE 运算），只在出现 NaN 时
++        回到 numpy 原写法，保证最坏关节的选择与原实现完全相同。
++    W_inv（一般矩阵度量）仍走原实现。
++    """
++    if damping < 0.0 or max_step <= 0.0:
++        raise ValueError("invalid damping/max_step")
++    if d_inv is None:
++        return _sns_clamped_core_reference(
++            J_active,
++            err,
++            z_grad,
++            null_weight,
++            None,
++            W_inv,
++            movable_mask,
++            q_active_cur,
++            eff_lower,
++            eff_upper,
++            damping,
++            max_step,
++        )
++
++    n_active = len(q_active_cur)
++    free_mask = np.array(movable_mask, dtype=bool)
++    free_list = free_mask.tolist()
++    n_free = free_list.count(True)
++    all_free = n_free == n_active
++    dq_clamped = None
++    task_dim = err.size
++    eff_damping = damping + min(1e-3, 1e-4 * float(err @ err))
++    use_null = z_grad is not None and null_weight > 0.0
++    clamped_converged = False
++    dq_total = dq_null_out = None
++    max_step_sq = float(max_step * max_step)
++    q_list = lo_list = hi_list = None
++
++    for _ in range(n_free + 1):
++        if n_free == 0:
++            dq_total = (
++                np.zeros(n_active, dtype=float)
++                if dq_clamped is None
++                else dq_clamped.copy()
++            )
++            dq_null_out = np.zeros(n_active, dtype=float)
++            clamped_converged = True
++            break
++
++        if dq_clamped is None:
++            rem_step_sq = max_step_sq - 0.0
++        else:
++            rem_step_sq = max_step_sq - float(dq_clamped @ dq_clamped)
++        if rem_step_sq <= 1e-18:
++            # 信赖域预算已完全由边界钳制位移占满
++            dq_total = (
++                np.zeros(n_active, dtype=float)
++                if dq_clamped is None
++                else dq_clamped.copy()
++            )
++            dq_null_out = np.zeros(n_active, dtype=float)
++            clamped_converged = True
++            break
++
++        err_rem = err if dq_clamped is None else err - J_active @ dq_clamped
++        if all_free:
++            J_free = np.asfortranarray(J_active)
++            d_free = d_inv
++        else:
++            J_free = J_active[:, free_mask]
++            d_free = d_inv[free_mask]
++        A = (J_free * d_free) @ J_free.T
++        A.flat[:: task_dim + 1] += eff_damping
++
++        dq_null_free = None
++        try:
++            chol_fac = _chol_factor(A)
++            rhs = _chol_solve(chol_fac, err_rem)
++            dq_task_free = d_free * (J_free.T @ rhs)
++            if use_null:
++                # 度量一致的零空间下降步：w (D z - D J^T A^-1 J D z)
++                Dz = d_free * (z_grad if all_free else z_grad[free_mask])
++                JT_inv = J_free.T @ _chol_solve(chol_fac, J_free @ Dz)
++                dq_null_free = null_weight * (Dz - d_free * JT_inv)
++        except (np.linalg.LinAlgError, ValueError):
++            dq_task_free, sec_free = _metric_svd_step(
++                J_free,
++                err_rem,
++                None if z_grad is None else z_grad[free_mask],
++                np.diag(d_free),
++                eff_damping,
++            )
++            dq_null_free = null_weight * sec_free
++
++        dq_free = dq_task_free + (0.0 if dq_null_free is None else dq_null_free)
++        free_norm = math.sqrt(float(dq_free @ dq_free))
++        max_free_norm = math.sqrt(rem_step_sq)
++
++        # 仅缩放自由关节子空间步长，绝不改动已钳制在边界的 dq_clamped
++        if free_norm > max_free_norm:
++            scale_free = max_free_norm / free_norm
++            dq_free *= scale_free
++            if dq_null_free is not None:
++                dq_null_free *= scale_free
++
++        if all_free:
++            dq_total = dq_free
++            dq_null_out = (
++                np.zeros(n_active, dtype=float)
++                if dq_null_free is None
++                else dq_null_free
++            )
++        else:
++            dq_total = (
++                np.zeros(n_active, dtype=float)
++                if dq_clamped is None
++                else dq_clamped.copy()
++            )
++            dq_total[free_mask] = dq_free
++            dq_null_out = np.zeros(n_active, dtype=float)
++            if dq_null_free is not None:
++                dq_null_out[free_mask] = dq_null_free
++
++        # 越界检查：viol_i = max(0, lo_i - q_i', q_i' - hi_i)（仅自由关节），取首个最大者钳制
++        if q_list is None:
++            q_list = q_active_cur.tolist()
++            lo_list = eff_lower.tolist()
++            hi_list = eff_upper.tolist()
++        worst_idx, worst_val, worst_under = -1, 0.0, False
++        has_nan = False
++        for i, (qi, di) in enumerate(zip(q_list, dq_total.tolist())):
++            if not free_list[i]:
++                continue
++            qt = qi + di
++            under = lo_list[i] - qt
++            over = qt - hi_list[i]
++            if under != under or over != over:
++                has_nan = True
++                break
++            if under > worst_val:
++                worst_idx, worst_val, worst_under = i, under, True
++            if over > worst_val:
++                worst_idx, worst_val, worst_under = i, over, False
++        if has_nan:
++            # NaN：按原实现的 numpy 写法确定（max 为 NaN -> 未收敛，argmax 取首个 NaN）
++            q_trial = q_active_cur + dq_total
++            under_amt = np.where(
++                free_mask, np.maximum(0.0, eff_lower - q_trial), 0.0
++            )
++            over_amt = np.where(
++                free_mask, np.maximum(0.0, q_trial - eff_upper), 0.0
++            )
++            viol_amt = np.maximum(under_amt, over_amt)
++            if viol_amt.max() <= 1e-12:
++                clamped_converged = True
++                break
++            worst_idx = int(np.argmax(viol_amt))
++            worst_under = bool(under_amt[worst_idx] >= over_amt[worst_idx])
++        elif worst_val <= 1e-12:
++            clamped_converged = True
++            break
++
++        # 钳制本轮越界最严重的单个自由关节；由于边界距离严格小于 |dq_free[worst_idx]|，
++        # 钳制后的 ||dq_clamped|| 必然严格小于 max_step
++        if dq_clamped is None:
++            dq_clamped = np.zeros(n_active, dtype=float)
++        if worst_under:
++            dq_clamped[worst_idx] = eff_lower[worst_idx] - q_active_cur[worst_idx]
++        else:
++            dq_clamped[worst_idx] = eff_upper[worst_idx] - q_active_cur[worst_idx]
++        free_mask[worst_idx] = False
++        free_list[worst_idx] = False
++        n_free -= 1
++        all_free = False
++
++    return dq_total, dq_null_out, clamped_converged
++
++
++def _sns_clamped_core_reference(
++    J_active,
++    err,
++    z_grad,
++    null_weight,
++    d_inv,
++    W_inv,
++    movable_mask,
++    q_active_cur,
++    eff_lower,
++    eff_upper,
++    damping,
++    max_step,
++):
++    """v14 原实现（逐行未改），v15 起只服务一般矩阵 W_inv 路径与逐位对照测试。
++
++    主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
++
+     返回 (dq_total, dq_null, clamped_converged)。记 D 为逆度量（关节权重越大 D 越小、该关节越“贵”），
+     A = J_f D_f J_f^T + λI：
+       任务步   dq_task = D_f J_f^T A^-1 e_rem
+@@ -1472,6 +1816,8 @@
+     v_idx = pin_maps["active_v_indices"]
+     n_v = len(v_idx)
+     nv = model.nv
++    v_range = _contiguous_range(v_idx)
++    v_slice = None if v_range is None else slice(*v_range)
+     cl = characteristic_length
+     target_p = np.array(target[:3, 3], dtype=float)
+     if mode == "full":
+@@ -1494,14 +1840,22 @@
+             pin.updateFramePlacements(model, data)
+         else:
+             pin.updateFramePlacement(model, data, fid)
+-        current = data.oMf[fid].copy()
+-        pos_error = target_p - np.asarray(current.translation)
++        # v15：不再拷贝 SE3。computeFrameJacobian 会按同一公式重写 data.oMf[fid]（数值逐位相同），
++        # 其余读取都在下一次 Pinocchio 调用之前完成
++        current = data.oMf[fid]
++        pos_error = target_p - current.translation
+         pos = _vec_norm(pos_error)
+ 
+         if jacobian:
+-            J = np.asarray(
++            J_all = np.asarray(
+                 pin.computeFrameJacobian(model, data, q_full, fid, ref_frame)
+-            ).reshape(6, nv)[:, v_idx]
++            ).reshape(6, nv)
++            # 与 J_all[:, v_idx]（花式索引结果为列主序）同值同布局
++            J = (
++                np.asfortranarray(J_all[:, v_slice])
++                if v_slice is not None
++                else J_all[:, v_idx]
++            )
+         elif build_A:
+             J = np.zeros((6, n_v), dtype=float)
+         else:
+@@ -1514,11 +1868,8 @@
+             e = np.array(pin.log6(delta).vector, copy=True)
+             angle = _vec_norm(e[3:])
+             if build_A:
+-                A = (
+-                    np.array(pin.Jlog6(delta.inverse()) @ J, copy=True)
+-                    if jacobian
+-                    else J.copy()
+-                )
++                # 矩阵乘结果本身就是新数组（v14 多一次 np.array 拷贝）
++                A = pin.Jlog6(delta.inverse()) @ J if jacobian else J.copy()
+                 A[:3] /= cl
+             e[:3] /= cl
+             violation = angle
+@@ -1641,6 +1992,8 @@
+     relative_gravity_gain=None,
+     posture_use_equivalent_branch=False,
+     shoulder_joint=None,
++    posture_settle=True,
++    margin_bounds=None,
+ ):
+     """单种子 DLS IK：主任务为末端位姿，零空间次任务为回中 / 限位裕度 / 负荷 / 质心。
+ 
+@@ -1648,7 +2001,12 @@
+     没有达标点时返回主任务误差最小的迭代点（diag["converged"] = False）。
+     迭代全程满足有效限位（URDF 限位 ∩ virtual_half_windows），由 SNS 钳制 + 边界吸附保证。
+     diag["stop_reason"]：SETTLED / SETTLE_LIMIT / SMALL_STEP / STALLED_NO_PROGRESS /
+-    LINE_SEARCH_STALLED / TIME_BUDGET / ITERATION_LIMIT。
++    LINE_SEARCH_STALLED / TIME_BUDGET / ITERATION_LIMIT / POSE_REACHED。
++    posture_settle=False（v15，续算用，与双臂 continuation 相同）：未达标时零空间原始步长限幅为
++    NO_SETTLE_NULL_STEP_RATIO × |e|；位姿达标、负荷合格（strict）且可动关节离限位 >= SAFE_MARGIN 的
++    第一个迭代点即返回（stop_reason = POSE_REACHED，不做达标后的姿态整理）；种子本身满足时原样返回。
++    达标点负荷超限或贴限位时照常整理，直到满足上述条件或按原判据停止。margin_bounds = (lower, upper)
++    给出该裕度所用的限位（调用方的有效限位；续算框边不是物理限位），None = 本次迭代限位。
+     实现要点：每个种子预计算主任务 / 次任务求值器（_make_task_terms / _SecondaryObjective）与对角逆度量
+     向量；SNS 的 Cholesky 直接调用 LAPACK。shoulder_joint 显式指定腰部释放所用的肩关节（None = 旧约定
+     "_Link2" 后缀）；未传 waist_max_reach 时按 estimate_arm_max_reach 沿运动链逐段累加估计；
+@@ -1875,9 +2233,32 @@
+     def is_pose(t_dict):
+         return t_dict["pos_err"] <= pos_tol and t_dict["ori_violation"] <= ori_tol
+ 
++    lo_list, hi_list = lo.tolist(), hi.tolist()
++
+     def snap(trial):
+-        """试探点只允许浮点舍入级越界（<= BOUND_SNAP_TOL），吸附回边界；真实越界返回 None。"""
+-        viol = max(float((lo - trial).max()), float((trial - hi).max()))
++        """试探点只允许浮点舍入级越界（<= BOUND_SNAP_TOL），吸附回边界；真实越界返回 None。
++
++        v15：越界量按关节标量计算（与 numpy 逐元素减法同一 IEEE 运算），NaN 传播与
++        max(float((lo - trial).max()), float((trial - hi).max())) 相同。
++        """
++        under_max = over_max = -math.inf
++        nan_under = nan_over = False
++        for t_i, lo_i, hi_i in zip(trial.tolist(), lo_list, hi_list):
++            a = lo_i - t_i
++            b = t_i - hi_i
++            if a > under_max:
++                under_max = a
++            elif a != a:
++                nan_under = True
++            if b > over_max:
++                over_max = b
++            elif b != b:
++                nan_over = True
++        if nan_under:
++            under_max = math.nan
++        if nan_over:
++            over_max = math.nan
++        viol = max(under_max, over_max)
+         if viol <= 0.0:
+             return trial
+         if viol > BOUND_SNAP_TOL:
+@@ -1927,6 +2308,28 @@
+     stall_ref, stall_it = None, 0
+     settle_prev_cost, settle_slow = None, 0
+     timed_out = False
++    pose_reached = False
++    if not posture_settle:
++        if margin_bounds is None:
++            margin_lo, margin_hi = lo, hi
++        else:
++            margin_lo = np.asarray(margin_bounds[0], dtype=float)
++            margin_hi = np.asarray(margin_bounds[1], dtype=float)
++            if (
++                margin_lo.shape != q.shape
++                or margin_hi.shape != q.shape
++                or np.isnan(margin_lo).any()
++                or np.isnan(margin_hi).any()
++            ):
++                raise ValueError("margin_bounds must be two vectors of joint bounds")
++
++    def settle_free(values, parts_val):
++        """posture_settle=False 的停止条件：负荷合格且可动关节离限位 >= SAFE_MARGIN（无界关节不计）。"""
++        if context is not None and not parts_val.get("load_ok", True):
++            return False
++        gap = np.minimum(values - margin_lo, margin_hi - values)[movable]
++        gap = gap[np.isfinite(gap)]
++        return gap.size == 0 or float(gap.min()) >= SAFE_MARGIN
+ 
+     for it in range(int(max_iter)):
+         if deadline is not None and time.monotonic() >= deadline:
+@@ -1934,8 +2337,9 @@
+             break
+ 
+         t = terms(q, jacobian=True)
+-        shoulder_cur = (
+-            np.array(pin_data.oMi[shoulder_id].translation, copy=True)
++        # 目标 - 当前肩位置（v14 先拷贝肩位置、稍后再相减；同一减法，提前做省一次拷贝）
++        shoulder_gap = (
++            target_p - pin_data.oMi[shoulder_id].translation
+             if release_enabled
+             else None
+         )
+@@ -1959,6 +2363,17 @@
+             best_q, best_merit = q.copy(), t["merit"]
+ 
+         if pose_ok:
++            if not posture_settle and settle_free(q, parts):
++                # v15 续算：不做姿态整理，直接返回本点（不经 offer_pose 择优：之前的达标点都不满足停止条件）
++                pose_best.update(
++                    q=q.copy(),
++                    overloaded=False,
++                    peak=0.0 if context is None else float(parts.get("peak_ratio", 0.0)),
++                    cost=cost,
++                )
++                pose_reached = True
++                diag["stop_reason"] = "POSE_REACHED"
++                break
+             offer_pose(q, cost, parts)
+             settle += 1
+             if settle > MAX_SETTLE_EXTRA_ITERS:
+@@ -1990,8 +2405,8 @@
+         d_inv = d_base.copy()
+         if has_waist_dof:
+             alpha = 1.0 if waist_load_release else 0.0
+-            if release_enabled and shoulder_cur is not None:
+-                current_distance = _vec_norm(target_p - shoulder_cur)
++            if release_enabled and shoulder_gap is not None:
++                current_distance = _vec_norm(shoulder_gap)
+                 waist_diff = q - ref
+                 if periodic_any:
+                     waist_diff[periodic_unbounded] = (
+@@ -2019,6 +2434,13 @@
+             ** 2
+         )
+ 
++        if not posture_settle and not pose_ok:
++            # v15 续算：零空间原始步 w·D z（可动关节）限幅到 NO_SETTLE_NULL_STEP_RATIO × |e|
++            raw = null_weight * _vec_norm((d_inv * z)[movable])
++            cap = NO_SETTLE_NULL_STEP_RATIO * _vec_norm(t["error"])
++            if raw > cap:
++                null_weight *= cap / raw
++
+         dq, dq_null, clamped_ok = _sns_clamped_core(
+             t["J"],
+             t["error"],
+@@ -2066,7 +2488,10 @@
+                 if deadline is not None and time.monotonic() >= deadline:
+                     timed_out = True
+                     break
+-                trial = snap(q + (0.5 ** backtrack) * direction)
++                # 1.0 * direction 与 direction 逐位相同，首个试探点省一次乘法
++                trial = snap(
++                    q + direction if backtrack == 0 else q + (0.5 ** backtrack) * direction
++                )
+                 if trial is None:
+                     continue
+                 tt = terms(trial, jacobian=False)
+@@ -2122,14 +2547,15 @@
+                 diag["stop_reason"] = "LINE_SEARCH_STALLED"
+             break
+ 
+-    last = terms(q, jacobian=False)
+-    if is_pose(last):
+-        lparts = {}
+-        offer_pose(
+-            q, objective(q, last["q_full"], False, lparts, need_z=False)[1], lparts
+-        )
+-    elif last["merit"] < best_merit:
+-        best_q = q.copy()
++    if not pose_reached:
++        last = terms(q, jacobian=False)
++        if is_pose(last):
++            lparts = {}
++            offer_pose(
++                q, objective(q, last["q_full"], False, lparts, need_z=False)[1], lparts
++            )
++        elif last["merit"] < best_merit:
++            best_q = q.copy()
+ 
+     result = pose_best["q"] if pose_best["q"] is not None else best_q
+     # 严格在有效限位 [lo, hi]（包含 virtual_half_windows 约束）内选择最接近起始 seed 的合法 2πk 分支

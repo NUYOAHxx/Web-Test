@@ -1,0 +1,47 @@
+--- baseline/user_v9_input/robot.py
++++ ha_arm_ik/robot_model.py
+@@ -15,9 +15,12 @@
+     sew_angle_from_points,
+ )
+ 
+-S_JOINT = "Left_J2"
+-E_JOINT = "Left_J4"
+-W_JOINT = "Left_J6"
++# 臂角 S / E / W 关节的兜底名（SerialChain 未给 s_joint / e_joint / w_joint 时使用）。
++# 与 ARM_CONFIGS["left"] 的命名一致；旧值 "Left_J2/4/6" 与 ARM_CONFIGS 的 LHand_Link* 命名不符，
++# 兜底生效时找不到关节，臂角恒为 NaN。
++S_JOINT = "LHand_Link2"
++E_JOINT = "LHand_Link4"
++W_JOINT = "LHand_Link6"
+ REF_DIR = np.array([0.0, 0.0, 1.0], dtype=float)
+ WAIST_JOINT_NAMES = ["Hip_Link1", "Body_Link"]
+ 
+@@ -32,7 +35,7 @@
+         "w_joint": "LHand_Link6",
+         "mount_xyz": np.array([0.0, 0.0, 0.5087]),
+         "mount_rpy": np.array([0.0, 0.0, 0.0]),
+-      "q_ready": np.array([-0.523599, -0.785398, 0.0,-0.698132, 0.0, 1.570796, 0.0,]),
++        "q_ready": np.array([-0.523599, -0.785398, 0.0, -0.698132, 0.0, 1.570796, 0.0]),
+     },
+     "right": {
+         "base_link": "Body_Link",
+@@ -42,7 +45,8 @@
+         "w_joint": "RHand_Link6",
+         "mount_xyz": np.array([0.0, 0.0, 0.5087]),
+         "mount_rpy": np.array([0.0, 0.0, 0.0]),
+-      "q_ready": np.array([-0.523599, -0.785398, 0.0,-0.698132, 0.0, 1.570796, 0.0,]),
++        # 待按真实 URDF 核对：与左臂取值完全相同；若右臂关节轴按镜像定义，部分关节需要反号
++        "q_ready": np.array([-0.523599, -0.785398, 0.0, -0.698132, 0.0, 1.570796, 0.0]),
+     },
+ }
+ 
+@@ -287,6 +291,9 @@
+                     f"Unsupported joint type: {joint['type']}"
+                 )
+ 
++        missing = wanted.difference(joint_T)
++        if missing:
++            raise KeyError(f"Joints not found in chain: {sorted(missing)}")
+         return T, joint_T
+ 
+     def joint_position(self, q, joint_name):

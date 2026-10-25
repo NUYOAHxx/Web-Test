@@ -1,0 +1,27 @@
+# bench/v9/run_targets.py + compare.py（评估尺子 = v14 包；v14 = ik_solver_dual(merged-v14)，v15 = 本包）
+# 重定位四类（无 q_prev 续算，v15 与 v14 逐值相同）
+== near_full
+  v14          succ 40/40  H 0.1736  Hip_Link1 mean 0.139 max 0.427 >0.8 0  Body_Link mean 0.149 max 0.554 >0.8 0  margin<0.1 0  peak 0.124  C 206.69 (Cw 177.10 Ct 1.32)  ms mean 35.2 p90 54.3  fallback 0
+  v15          succ 40/40  H 0.1736  Hip_Link1 mean 0.139 max 0.427 >0.8 0  Body_Link mean 0.149 max 0.554 >0.8 0  margin<0.1 0  peak 0.124  C 206.69 (Cw 177.10 Ct 1.32)  ms mean 25.0 p90 37.0  fallback 0
+    v15     vs v14_all: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+== far_full
+  v14          succ 60/60  H 1.6542  Hip_Link1 mean 0.174 max 0.710 >0.8 0  Body_Link mean 0.210 max 1.555 >0.8 5  margin<0.1 5  peak 0.073  C 712.87 (Cw 565.06 Ct 0.53)  ms mean 50.6 p90 78.8  fallback 0
+  v15          succ 60/60  H 1.6542  Hip_Link1 mean 0.174 max 0.710 >0.8 0  Body_Link mean 0.210 max 1.555 >0.8 5  margin<0.1 5  peak 0.073  C 712.87 (Cw 565.06 Ct 0.53)  ms mean 36.7 p90 66.2  fallback 0
+    v15     vs v14_all: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+== far_tool_dir
+  v14          succ 50/50  H 1.1549  Hip_Link1 mean 0.146 max 0.707 >0.8 0  Body_Link mean 0.133 max 0.972 >0.8 1  margin<0.1 3  peak 0.072  C 362.57 (Cw 282.15 Ct 0.48)  ms mean 62.8 p90 112.9  fallback 0
+  v15          succ 50/50  H 1.1549  Hip_Link1 mean 0.146 max 0.707 >0.8 0  Body_Link mean 0.133 max 0.972 >0.8 1  margin<0.1 3  peak 0.072  C 362.57 (Cw 282.15 Ct 0.48)  ms mean 45.4 p90 98.3  fallback 0
+    v15     vs v14_all: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+== far_tool_cone
+  v14          succ 50/50  H 1.1551  Hip_Link1 mean 0.093 max 0.706 >0.8 0  Body_Link mean 0.110 max 1.182 >0.8 3  margin<0.1 3  peak 0.077  C 369.76 (Cw 267.01 Ct 0.53)  ms mean 61.7 p90 111.1  fallback 0
+  v15          succ 50/50  H 1.1551  Hip_Link1 mean 0.093 max 0.706 >0.8 0  Body_Link mean 0.110 max 1.182 >0.8 3  margin<0.1 3  peak 0.077  C 369.76 (Cw 267.01 Ct 0.53)  ms mean 46.5 p90 79.0  fallback 0
+    v15     vs v14_all: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+# 路点跟踪两类（续算；v15 默认 = 不整理姿态 + 零空间步限幅）
+== tracking
+  v14   succ 119/119  H 0.1061  Hip_Link1 mean 0.000 max 0.000 >0.8 0  Body_Link mean 0.000 max 0.000 >0.8 0  margin<0.1 0  peak 0.130  C 3.47 (Cw 0.00 Ct 1.21)  ms mean 10.6 p90 14.1  fallback 0  step max 0.020 p99 0.020 >0.3 0  nonlocal 0
+  v15   succ 119/119  H 0.1062  Hip_Link1 mean 0.000 max 0.000 >0.8 0  Body_Link mean 0.000 max 0.000 >0.8 0  margin<0.1 0  peak 0.130  C 3.46 (Cw 0.00 Ct 1.21)  ms mean 7.5 p90 7.8  fallback 0  step max 0.020 p99 0.020 >0.3 0  nonlocal 0
+    v15 vs v14: dH +0.00007 (+0.07%)  worse 0  better 0  dC -0.012 (-0.34%)
+== tracking_waist
+  v14   succ 239/239  H 0.4335  Hip_Link1 mean 0.507 max 1.536 >0.8 74  Body_Link mean 0.615 max 1.774 >0.8 85  margin<0.1 0  peak 0.123  C 2600.12 (Cw 2541.18 Ct 1.52)  ms mean 7.2 p90 11.2  fallback 0  step max 0.150 p99 0.150 >0.3 0  nonlocal 0
+  v15   succ 239/239  H 0.4331  Hip_Link1 mean 0.551 max 1.584 >0.8 78  Body_Link mean 0.643 max 1.672 >0.8 86  margin<0.1 0  peak 0.123  C 2641.05 (Cw 2581.52 Ct 1.55)  ms mean 5.4 p90 5.7  fallback 0  step max 0.105 p99 0.081 >0.3 0  nonlocal 0
+    v15 vs v14: dH -0.00038 (-0.09%)  worse 143  better 49  dC +40.927 (+1.57%)

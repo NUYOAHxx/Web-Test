@@ -1,0 +1,8 @@
+runs: {'v8': 2, 'v9': 2}
+case           |   v8 ms |   v9 ms | v9/v8
+near_full      |    12.4 |    12.7 |   +2.6%
+far_full       |    22.6 |    22.6 |   +0.3%
+far_tool_dir   |    27.9 |    28.2 |   +0.9%
+far_tool_cone  |    30.1 |    30.1 |   +0.1%
+tracking       |     8.4 |     8.3 |   -1.5%
+tracking_waist |    13.4 |     5.6 |  -57.8%

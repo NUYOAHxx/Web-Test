@@ -1,0 +1,52 @@
+--- a/tests/test_v7_speed.py
++++ b/tests/test_v7_speed.py
+@@ -277,8 +277,9 @@
+             # 工具轴反向 180°：触发对径点逃逸
+             ({}, True, lambda s, st, q0: (None, rotated_target(s, st, q0, [0.0, math.pi, 0.0])), "tool_dir"),
+             # 锁腰种子超出软阈值 -> 腰部释放（v7 顺序下会重跑 q_prev）
+-            # （v6 的早停阈值固定默认 0.60，须显式给出 <= soft_ratio 的值）
+-            ({"load_soft_ratio": 0.05, "load_early_stop_ratio": 0.05}, True,
++            # （v6 的早停阈值固定默认 0.60，须显式给出 <= soft_ratio 的值；该目标超出锁腰时的手臂可达范围，
++            # v13 默认跳过锁腰种子，这里关掉可达性检查以覆盖腰部负荷释放）
++            ({"load_soft_ratio": 0.05, "load_early_stop_ratio": 0.05, "dls_locked_reach_check": False}, True,
+              lambda s, st, q0: (q0 + [0.2, -0.3, 0.5, 0.4, -0.3, 0.2, 0.3, -0.2, 0.4], None), "full"),
+             # 负荷保护关闭：load_context=None 路径
+             ({"load_mode": "off"}, True, lambda s, st, q0: (far[0], None), "full"),
+@@ -496,7 +497,8 @@
+         self.assertTrue(per_seed[0]["fixed_waist"])
+ 
+     def test_locked_seed_runs_when_waist_moves(self):
+-        s, state = make_solver(config={"dls_continuation_local": False})
++        # 目标超出锁腰时的手臂可达范围（v13 默认跳过锁腰种子，见 test_v13_changes）；这里检查 v7 的种子顺序
++        s, state = make_solver(config={"dls_continuation_local": False, "dls_locked_reach_check": False})
+         qt = np.array([state[n] for n in s.active_joint_names])
+         qt[:2] += [0.6, -0.6]
+         q, _, result = solve(s, state, qt)
+@@ -508,7 +510,8 @@
+         self.assertGreaterEqual(search["unlocked_seeds_attempted"], 1)
+ 
+     def test_release_reruns_q_prev_within_seed_limit(self):
+-        s, state = make_solver(config={"load_soft_ratio": 0.05, "dls_continuation_local": False})
++        s, state = make_solver(config={"load_soft_ratio": 0.05, "dls_continuation_local": False,
++                                       "dls_locked_reach_check": False})
+         qt = np.array([state[n] for n in s.active_joint_names])
+         qt[:2] += [0.4, -0.3]
+         q, _, result = solve(s, state, qt)
+--- a/run_validation.py
++++ b/run_validation.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Offline validation only. v12 (= v9 + right-arm q_ready values): the user-provided ik_common / ik_candidate / robot_model are tested (no test doubles)."""
++"""Offline validation only. v13 (= v12 + seed library / early comfort fallback / jump-limit rescue / locked-seed reach check): the user-provided ik_common / ik_candidate / robot_model are tested (no test doubles)."""
+ import ast
+ import json
+ from pathlib import Path
+@@ -13,7 +13,7 @@
+ def main():
+     suffix="pin"+pin.__version__.replace(".","_")
+     counts={}
+-    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes"):
++    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes","test_v13_changes"):
+         counts[name]=unittest.defaultTestLoader.loadTestsFromName("tests."+name).countTestCases()
+     suite=unittest.defaultTestLoader.discover("tests",top_level_dir=".")
+     with open("validation_"+suffix+".txt","w",encoding="utf-8") as out:

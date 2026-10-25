@@ -1,0 +1,156 @@
+--- dual-p2/ha_arm_ik/solver.py
++++ v15/ha_arm_ik/solver.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""ha_arm_ik.solver —— HAArmIKSolver：7 轴单臂 / 腰 + 单臂 9 轴逆运动学求解入口（merged-v14）。
++"""ha_arm_ik.solver —— HAArmIKSolver：7 轴单臂 / 腰 + 单臂 9 轴逆运动学求解入口（merged-v15）。
+ 
+ 公共接口（自用户原版起签名不变）
+   HAArmIKSolver(urdf, side, use_ssik, use_pinocchio_ik, use_torque_cost, use_direct_psi,
+@@ -38,7 +38,8 @@
+           S2 同档内交给 select_best_candidate（连续性 / 标准姿态 / 限位裕度 / 腰部回中 / 可选力矩代价）
+ 
+ 搜索阶段（collect_pinocchio_candidates_and_seeds；每阶段最多 load_max_seeds 个名额，共享时间预算）
+-  continuation  续算（目标在 FK(q_prev) 附近）：q_prev ± dls_continuation_max_step 内随动 + 锁腰，有局部解即采用
++  continuation  续算（目标在 FK(q_prev) 附近）：q_prev ± dls_continuation_max_step 内随动 + 锁腰，有局部解即采用；
++                v15 起续算不做达标后的姿态整理（CONTINUATION_POSTURE_SETTLE），q_prev 已是解时原样返回
+   comfort       重新定位：有效限位 ∩ 腰部舒适窗
+   full          有效限位：未启用舒适窗时的唯一常规阶段，或舒适窗内没有可接受解时的回退
+   jump_box      只找到跳变超限解时，在 q_prev ± max_joint_jump_rad 内重搜（dls_jump_limit_rescue）
+@@ -46,7 +47,7 @@
+   常规阶段的种子顺序：q_prev -> 锁腰（腰部 = q_ready）-> q_ready -> 种子库（dls_seed_library_*）-> 随机扰动
+ 
+ 可选引擎：SSIK（ssik 包）与 direct-psi（臂角参数化最小二乘）只用于 7 轴（include_waist=False），默认关闭。
+-版本演进与各项改动的数据见 README_v14.md。
++版本演进与各项改动的数据见 README_v14.md（v15 的续算漂移修复与提速见 README_v15.md）。
+ """
+ 
+ from collections import deque
+@@ -181,7 +182,7 @@
+     "LoadPolicy",
+ ]
+ 
+-SOLVER_VERSION = "merged-v14"   # 写入 last_load_diagnostics["version"]
++SOLVER_VERSION = "merged-v15"   # 写入 last_load_diagnostics["version"]
+ 
+ # =============================================================================
+ # CONFIG
+@@ -232,6 +233,11 @@
+ # 在负荷容差带边界与锁腰解来回切换（单步 0.198，与 v8 相同）；0.1 时腰部斜坡跟踪在框边上反复切换
+ # （单步均值 0.081，0.15 时 0.034）；腰部大幅跟踪单步上限即该值，0.15 无回退。
+ CONTINUATION_MAX_STEP = 0.15
++# v15：续算阶段不做达标后的姿态整理（DLS posture_settle=False：位姿达标、负荷合格且离限位 >= SAFE_MARGIN 的
++# 第一个迭代点即返回），q_prev 本身已是可接受解时原样返回、不再跑锁腰续算。v14 在续算框内照常整理：目标不动、
++# q_prev 已是解时每次调用关节仍变 0.10~0.15 rad，伺服循环里等于机器人自己在动。回中只来自收敛过程中的
++# 零空间步，与手的移动量成正比（与双臂 continuation 相同）。True = v14 行为（等价回放用）。
++CONTINUATION_POSTURE_SETTLE = False
+ # v9：续算阶段 DLS 单步（2-范数）上限 = 该比例 × CONTINUATION_MAX_STEP：从框中心出发的首步不会越出续算框
+ # （越框会被 SNS 钳制、线搜索停滞）
+ CONTINUATION_DLS_STEP_FRACTION = 0.5
+@@ -1466,11 +1472,13 @@
+         return [(q, None, "library") for q in picked]
+ 
+     def run_stage(
+-        stage, queue, lo_s, hi_s, q_prev_seed, locked_done, max_step=None, release_rerun=True
++        stage, queue, lo_s, hi_s, q_prev_seed, locked_done, max_step=None, release_rerun=True,
++        posture_settle=True,
+     ):
+         """按队列运行一个搜索阶段；返回该阶段的停止原因与名额统计。
+ 
+-        max_step 覆盖本阶段 DLS 的单步上限；release_rerun=False 时锁腰种子触发腰部释放后不在本阶段重跑 q_prev。
++        max_step 覆盖本阶段 DLS 的单步上限；release_rerun=False 时锁腰种子触发腰部释放后不在本阶段重跑 q_prev；
++        posture_settle=False 时本阶段 DLS 不做达标后的姿态整理（v15 续算，见 CONTINUATION_POSTURE_SETTLE）。
+         v13：队列里的 LIBRARY_PENDING 占位在排到时展开为种子库种子、COMFORT_CHECKPOINT 为舒适阶段提前
+         回退检查点（本阶段还没有可接受候选即结束），两者都不占名额。
+         """
+@@ -1481,6 +1489,11 @@
+         prev_rerun_queued = False
+         prev_info = None            # q_prev 种子的候选信息（v7 顺序下用于跳过锁腰种子 / 旧版早停）
+         stage_params = params if max_step is None else {**params, "max_step": float(max_step)}
++        if not posture_settle:
++            # 停止条件的限位裕度按有效限位计（与候选判据 SAFE_MARGIN 同一组限位；续算框边不是物理限位）
++            stage_params = {
++                **stage_params, "posture_settle": False, "margin_bounds": (eff_lower, eff_upper)
++            }
+         n_stage = len(candidates)
+         ran = []
+ 
+@@ -1774,9 +1787,13 @@
+     #            锁腰解负荷超 soft_ratio 时释放腰部、在续算框内重跑随动续算。
+     # 局部可接受候选（满足全部硬约束且步长 <= continuation_max_step）按常规择优规则比较；
+     # 没有时进入常规搜索（与 v8 相同），续算阶段的候选留在候选池中。
++    # v15（CONTINUATION_POSTURE_SETTLE = False）：续算 DLS 不做达标后的姿态整理；随动续算的解就是 q_prev 本身
++    # 且可接受（目标不动、q_prev 已是解）时原样返回，不跑锁腰续算（continuation_hold）。
++    hold_used = False
+     if local_first:
+         n_before = len(candidates)
+         released_before = released
++        settle_c = bool(CONTINUATION_POSTURE_SETTLE)
+         half_a = np.full(len(q_prev), cont_step)
+         if box_half is not None:
+             half_a = np.minimum(half_a, box_half)
+@@ -1789,13 +1806,18 @@
+         stages.append(
+             run_stage(
+                 "continuation", deque([(seed_a, None, "q_prev")]), lo_a, hi_a,
+-                seed_a, True, max_step=step_a,
++                seed_a, True, max_step=step_a, posture_settle=settle_c,
+             )
+         )
++        if not settle_c:
++            fresh = candidates[n_before:]
++            hold_used = bool(
++                fresh and acceptable(fresh[0]) and np.array_equal(fresh[0]["q"], q_prev)
++            )
+         # 锁腰续算：腰部离 q_ready 不超过续算步长时才可能是局部解（否则只多花一次 DLS，常规搜索也会跑锁腰种子）。
+         # 不按 v7 规则用“随动解腰部 ≈ q_ready”跳过：腰部等价不代表手臂等价（零空间整理可能已把手臂推到
+         # 续算框边上，而锁腰解只需跟着目标小步移动），跳过会让轨迹离开锁腰分支、之后再也回不来
+-        if include_waist and np.any(waist_mask) and (
++        if not hold_used and include_waist and np.any(waist_mask) and (
+             float(np.max(np.abs(q_prev[waist_mask] - q_ready[waist_mask])))
+             <= cont_step + 1e-9
+         ):
+@@ -1805,7 +1827,7 @@
+             stages.append(
+                 run_stage(
+                     "continuation", deque([(locked_b, waist_mask, "locked")]),
+-                    lo_b, hi_b, seed_a, True, release_rerun=False,
++                    lo_b, hi_b, seed_a, True, release_rerun=False, posture_settle=settle_c,
+                 )
+             )
+             if released and not released_before:
+@@ -1813,7 +1835,7 @@
+                 stages.append(
+                     run_stage(
+                         "continuation", deque([(seed_a, None, "q_prev_release")]),
+-                        lo_a, hi_a, seed_a, True, max_step=step_a,
++                        lo_a, hi_a, seed_a, True, max_step=step_a, posture_settle=settle_c,
+                     )
+                 )
+         local = [
+@@ -1925,6 +1947,7 @@
+             fallback_to_full_bounds=bool(fallback),
+             continuation_regime=regime,
+             continuation_local_used=local_used,
++            continuation_hold=hold_used,
+         )
+ 
+     if strict:
+@@ -1941,6 +1964,7 @@
+             ),
+             "locked_seed_skipped": bool(main_stages and main_stages[0]["locked_skipped"]),
+             "continuation_local_used": local_used,
++            "continuation_hold": hold_used,
+             "jump_limit_search_box": box_half is not None,
+             "jump_limit_unboxed_retry": unboxed,
+             "q_prev_release_rerun": any(
+@@ -3135,6 +3159,7 @@
+                 "local_enabled": self.dls_continuation_local,
+                 "regime": comfort_info.get("continuation_regime"),
+                 "local_used": local_used,
++                "hold": bool(comfort_info.get("continuation_hold", False)),
+             }
+             if local_used:
+                 # 续算局部解：只保留局部候选（可选的 SSIK 候选不再参与择优，direct-psi 阶段也跳过）

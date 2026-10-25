@@ -1,0 +1,44 @@
+--- a/bench/v8/compare.py
++++ b/bench/v8/compare.py
+@@ -24,6 +24,10 @@
+ from tests.fixtures import make_solver  # noqa: E402
+ import ha_arm_ik.solver_dls as D  # noqa: E402
+ from ha_arm_ik.solver_dls import JointStateSnapshot  # noqa: E402
++# merged-v14 起整函数形式的次任务入口移到 tests/dls_compat.py（生产代码不再使用）
++_nullspace_gradient_and_cost = getattr(D, "_compute_nullspace_gradient_and_cost", None)
++if _nullspace_gradient_and_cost is None:
++    from tests.dls_compat import _compute_nullspace_gradient_and_cost as _nullspace_gradient_and_cost  # noqa: E402
+ 
+ s, state = make_solver(config={"load_max_seeds": 10, "dls_max_iter": 500, "load_budget_s": 2.0})
+ M, Dd, maps = s.pin_model, s.pin_data, s.pin_maps
+@@ -39,7 +43,7 @@
+ 
+ def metrics(q):
+     full = D.active_q_to_pinocchio_q(M, maps, q)
+-    _, H = D._compute_nullspace_gradient_and_cost(
++    _, H = _nullspace_gradient_and_cost(
+         M, Dd, full, q, qr, lo, hi, ns_gain, v, maps["effort_limits"], np.ones(len(q), bool), True, None,
+         com_ref, D.GRAVITY_TORQUE_GAIN, D.COM_XY_GAIN, D.JOINT_LIMIT_GAIN, load_context=ctx, pin_maps=maps,
+         derivatives=False)
+--- a/bench/v9/compare.py
++++ b/bench/v9/compare.py
+@@ -29,6 +29,10 @@
+ from ha_arm_ik.ik_candidate import score_candidate  # noqa: E402
+ from ha_arm_ik.solver import add_torque_metrics_to_candidate  # noqa: E402
+ from ha_arm_ik.solver_dls import JointStateSnapshot  # noqa: E402
++# merged-v14 起整函数形式的次任务入口移到 tests/dls_compat.py（生产代码不再使用）
++_nullspace_gradient_and_cost = getattr(D, "_compute_nullspace_gradient_and_cost", None)
++if _nullspace_gradient_and_cost is None:
++    from tests.dls_compat import _compute_nullspace_gradient_and_cost as _nullspace_gradient_and_cost  # noqa: E402
+ 
+ s, state = make_solver(config={"load_max_seeds": 10, "dls_max_iter": 500, "load_budget_s": 2.0})
+ M, Dd, maps = s.pin_model, s.pin_data, s.pin_maps
+@@ -44,7 +48,7 @@
+ 
+ def metrics(q):
+     full = D.active_q_to_pinocchio_q(M, maps, q)
+-    _, H = D._compute_nullspace_gradient_and_cost(
++    _, H = _nullspace_gradient_and_cost(
+         M, Dd, full, q, qr, lo, hi, ns_gain, v, maps["effort_limits"], np.ones(len(q), bool), True, None,
+         com_ref, D.GRAVITY_TORQUE_GAIN, D.COM_XY_GAIN, D.JOINT_LIMIT_GAIN, load_context=ctx, pin_maps=maps,
+         derivatives=False)

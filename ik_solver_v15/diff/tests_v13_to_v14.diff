@@ -1,0 +1,511 @@
+diff -ruN a/tests/dls_compat.py b/tests/dls_compat.py
+--- a/tests/dls_compat.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/dls_compat.py	2026-10-22 12:57:03.908412891 +0000
+@@ -0,0 +1,114 @@
++"""测试用的 solver_dls 旧入口薄封装（merged-v14 起从生产代码移出）。
++
++生产代码只使用内部实现 `_SecondaryObjective`（次任务代价与梯度）和 `_sns_clamped_core`
++（主动集钳制 SNS 步），这两个旧入口只剩测试在用：
++  - 有限差分测试按“整函数”验证次任务梯度与 SNS 步的性质；
++  - test_v7_speed 用它们逐值复算 tests/reference/solver_dls_v6.py 记录的内部调用。
++函数体与 merged-v13 原文一致，只把模块内名字改为经 `ha_arm_ik.solver_dls` 访问
++（调用时取属性，测试对 D._chol_factor 等的 patch 仍然生效）。
++"""
++import numpy as np
++
++import ha_arm_ik.solver_dls as D
++
++
++def _compute_nullspace_gradient_and_cost(
++    pin_model,
++    pin_data,
++    q_full,
++    q_active_cur,
++    q_ref,
++    lower,
++    upper,
++    ns_gain,
++    active_v_indices,
++    effort_limits,
++    movable_mask,
++    include_waist,
++    tau_g_ref,
++    com_xy_ref,
++    gravity_gain,
++    com_gain,
++    limit_gain,
++    load_context=None,
++    pin_maps=None,
++    derivatives=True,
++    components=None,
++    relative_gravity_gain=0.0,
++    posture_use_equivalent_branch=False,
++):
++    """零空间负梯度 z = -dH/dq 与标量代价 H(q)（返回 (z, H)）。
++
++    与单种子迭代共用 _SecondaryObjective；配置负荷上下文时按 v6 语义由 q_active_cur
++    重算 Pinocchio q（不使用传入的 q_full），未配置时使用传入的 q_full。
++    """
++    objective = D._SecondaryObjective(
++        pin_model,
++        pin_data,
++        pin_maps,
++        q_ref,
++        lower,
++        upper,
++        ns_gain,
++        active_v_indices,
++        effort_limits,
++        movable_mask,
++        include_waist,
++        tau_g_ref,
++        com_xy_ref,
++        gravity_gain,
++        com_gain,
++        limit_gain,
++        load_context=load_context,
++        relative_gravity_gain=relative_gravity_gain,
++        posture_use_equivalent_branch=posture_use_equivalent_branch,
++    )
++    q_active_cur = np.asarray(q_active_cur, dtype=float)
++    if load_context is not None:
++        q_full = D.active_q_to_pinocchio_q(pin_model, pin_maps, q_active_cur)
++    return objective(q_active_cur, q_full, derivatives, components, need_z=True)
++
++
++def _solve_sns_clamped_step(
++    J_active,
++    err,
++    z_grad,
++    null_weight,
++    W_inv,
++    movable_mask,
++    q_active_cur,
++    eff_lower,
++    eff_upper,
++    damping,
++    max_step,
++    *,
++    return_info=False,
++):
++    """SNS 钳制步的矩阵入口：W_inv 为对角阵时走向量化实现（与矩阵实现逐位一致）。
++
++    返回 (dq_total, dq_null)；return_info=True 时再附 clamped_converged。数学说明见
++    solver_dls._sns_clamped_core。
++    """
++    W = np.asarray(W_inv, dtype=float)
++    d_inv = None
++    if W.ndim == 2 and W.shape[0] == W.shape[1]:
++        diagonal = np.diagonal(W)
++        if np.array_equal(W, np.diag(diagonal)):
++            d_inv = diagonal.copy()
++    dq_total, dq_null_out, clamped_converged = D._sns_clamped_core(
++        J_active,
++        err,
++        z_grad,
++        null_weight,
++        d_inv,
++        None if d_inv is not None else W,
++        movable_mask,
++        q_active_cur,
++        eff_lower,
++        eff_upper,
++        damping,
++        max_step,
++    )
++    if return_info:
++        return dq_total, dq_null_out, clamped_converged
++    return dq_total, dq_null_out
+diff -ruN a/tests/reference/solver_v12.py b/tests/reference/solver_v12.py
+--- a/tests/reference/solver_v12.py	2026-10-21 19:03:04.000000000 +0000
++++ b/tests/reference/solver_v12.py	2026-10-22 12:57:34.741470697 +0000
+@@ -167,14 +167,11 @@
+     PIN_IK_DAMPING,
+     PIN_IK_MAX_ITER,
+     PIN_IK_MAX_STEP,
+-    PIN_IK_MAX_VALID_CANDIDATES,
+     PIN_IK_ORI_TOL,
+     PIN_IK_POS_TOL,
+-    PIN_IK_STALL_DELTA_M,
+     PIN_IK_STALL_ITERS,
+     RELATIVE_GRAVITY_GAIN,
+     WAIST_NULL_GAIN,
+-    WAIST_RETURN_TOL,
+     WAIST_TASK_WEIGHT,
+     WAIST_TASK_WEIGHT_FAR,
+     WAIST_COMFORT_CONTINUATION_STEP,
+@@ -1226,8 +1223,7 @@
+         lower,
+         upper,
+         q_ready,
+-        waist_mask,
+-        params.get("virtual_half_windows"),
++        virtual_half_windows=params.get("virtual_half_windows"),
+         active_names=pin_maps["active_names"],
+     )
+ 
+@@ -2200,8 +2196,7 @@
+             self.lower,
+             self.upper,
+             self.q_ready,
+-            waist_mask,
+-            self.dls_virtual_half_windows,
++            virtual_half_windows=self.dls_virtual_half_windows,
+             active_names=self.active_joint_names,
+         )
+ 
+@@ -2277,8 +2272,7 @@
+                 self.search_lower,
+                 self.search_upper,
+                 self.q_ready,
+-                None,
+-                spec,
++                virtual_half_windows=spec,
+                 active_names=self.active_joint_names,
+             )
+             info = {
+diff -ruN a/tests/test_pinocchio_numeric.py b/tests/test_pinocchio_numeric.py
+--- a/tests/test_pinocchio_numeric.py	2026-10-22 10:00:56.000000000 +0000
++++ b/tests/test_pinocchio_numeric.py	2026-10-22 12:57:03.937338946 +0000
+@@ -5,6 +5,7 @@
+ install()
+ from tests.fixtures import make_solver,context,root_target
+ from ha_arm_ik import solver_dls as dls
++from tests import dls_compat
+ 
+ 
+ class RealPinocchioNumericTests(unittest.TestCase):
+@@ -60,7 +61,7 @@
+         ref=self.physics(self.q)
+         q=self.q+np.linspace(-.03,.03,len(self.q))
+         def obj(q,deriv):
+-            return dls._compute_nullspace_gradient_and_cost(
++            return dls_compat._compute_nullspace_gradient_and_cost(
+                 self.s.pin_model,self.s.pin_data,
+                 dls.active_q_to_pinocchio_q(self.s.pin_model,self.s.pin_maps,q),
+                 q,self.q,self.s.lower,self.s.upper,np.full(len(q),.3),
+@@ -115,19 +116,19 @@
+ 
+     def test_no_implicit_reference_angle_windows(self):
+         lo,hi=dls._build_effective_bounds(np.array([-7.,-7.]),np.array([7.,7.]),
+-                                           np.array([0.,0.]),np.array([True,False]))
++                                           np.array([0.,0.]))
+         np.testing.assert_array_equal(lo,[-7.,-7.])
+         np.testing.assert_array_equal(hi,[7.,7.])
+ 
+     def test_explicit_search_window_is_separate(self):
+         lo,hi=dls._build_effective_bounds(np.array([-7.]),np.array([7.]),
+-                                           np.array([1.]),np.array([True]),np.array([.5]))
++                                           np.array([1.]),virtual_half_windows=np.array([.5]))
+         np.testing.assert_array_equal(lo,[.5])
+         np.testing.assert_array_equal(hi,[1.5])
+ 
+     def test_secondary_and_task_step_respect_bounds(self):
+         q=np.array([.99,0.])
+-        dq,_=dls._solve_sns_clamped_step(np.array([[1.,1.]]),np.array([1.]),
++        dq,_=dls_compat._solve_sns_clamped_step(np.array([[1.,1.]]),np.array([1.]),
+             np.array([1.,-1.]),1.,np.eye(2),np.ones(2,dtype=bool),q,
+             np.array([-1.,-1.]),np.array([1.,1.]),1e-6,.5)
+         self.assertTrue(np.all(q+dq<=1.) and np.all(q+dq>=-1.))
+diff -ruN a/tests/test_v13_changes.py b/tests/test_v13_changes.py
+--- a/tests/test_v13_changes.py	2026-10-22 11:32:00.000000000 +0000
++++ b/tests/test_v13_changes.py	2026-10-22 13:12:25.476520849 +0000
+@@ -7,7 +7,8 @@
+   - 求解器默认行为：种子库种子排在 q_prev / 锁腰 / q_ready 之后；续算类求解不用种子库（跟踪基准里换到
+     远处分支的路点）；舒适阶段提前回退（COMFORT_PATIENCE）；锁腰种子可达性检查（locked_arm_reach_bound 是
+     严格上界）；跳变重搜（舒适阶段之后提前 / 常规阶段之后）；配置校验；
+-  - 四项全部关闭 = v12 逐值一致（tests/reference/solver_v12.py 是 v12 ha_arm_ik/solver.py 的原样副本）。
++  - 四项全部关闭 = v12 逐值一致（tests/reference/solver_v12.py 是 v12 ha_arm_ik/solver.py 的副本；v14 只把
++    它对 solver_dls 的调用改成新签名：_build_effective_bounds 用关键字参数、不再导入已删除的兼容常量，逻辑未改）。
+ """
+ import importlib.util
+ from pathlib import Path
+@@ -412,7 +413,7 @@
+                          (True, 4))
+         self.assertEqual((s.dls_jump_limit_rescue, s.dls_locked_reach_check), (True, True))
+         self.assertIs(s.dls_seed_library_continuation, False)
+-        self.assertEqual(s.last_load_diagnostics["version"], "merged-v13")
++        self.assertEqual(s.last_load_diagnostics["version"], S.SOLVER_VERSION)
+ 
+     def test_validation(self):
+         bad = {
+diff -ruN a/tests/test_v14_cleanup.py b/tests/test_v14_cleanup.py
+--- a/tests/test_v14_cleanup.py	1970-01-01 00:00:00.000000000 +0000
++++ b/tests/test_v14_cleanup.py	2026-10-22 13:19:41.364997633 +0000
+@@ -0,0 +1,186 @@
++"""merged-v14（基于 v13，只做清理）：公共接口保留、冗余项已删除、合并后的帮手与原实现等价。
++
++求解行为与 v13 逐值一致由离线回放验证（486 条记录：一次性 / 跟踪 / 跳变 / 失败路径 / 配置报错 / 7 轴 /
++direct-psi；除耗时、版本号与快照时间戳外 0 差异，见 README_v14.md）；本文件覆盖接口层面的约定。
++"""
++import inspect
++import unittest
++
++import numpy as np
++
++from tests.fixtures import make_solver, robot_xml, root_target
++from tests import dls_compat
++from ha_arm_ik import solver as S
++import ha_arm_ik.ik_candidate as K
++import ha_arm_ik.ik_common as C
++import ha_arm_ik.solver_dls as D
++from ha_arm_ik.solver_dls import JointStateSnapshot
++
++
++class PublicApiTests(unittest.TestCase):
++    def test_constructor_and_solve_signatures(self):
++        self.assertEqual(
++            list(inspect.signature(S.HAArmIKSolver.__init__).parameters),
++            ["self", "urdf", "side", "use_ssik", "use_pinocchio_ik", "use_torque_cost",
++             "use_direct_psi", "include_waist", "verbose", "config"],
++        )
++        sig = inspect.signature(S.HAArmIKSolver.solve)
++        self.assertEqual(
++            list(sig.parameters),
++            ["self", "T_target", "frame", "q_prev", "update_prev", "verbose", "allow_approximate",
++             "orientation_mode", "tool_axis", "tool_cone_half_angle", "joint_state"],
++        )
++        self.assertIs(sig.parameters["joint_state"].kind, inspect.Parameter.KEYWORD_ONLY)
++
++    def test_reexports_are_the_defining_objects(self):
++        for name in S.__all__:
++            self.assertTrue(hasattr(S, name), name)
++        for name in ("IKResult", "Status", "FailureReason", "make_result"):
++            self.assertIs(getattr(S, name), getattr(K, name), name)
++        for name in ("JointStateSnapshot", "LoadPolicy"):
++            self.assertIs(getattr(S, name), getattr(D, name), name)
++        # 测试与调用方经 solver 模块访问 / patch 的其它名字仍在
++        for name in ("ARM_CONFIGS", "WAIST_JOINT_NAMES", "POS_TOL", "ORI_TOL", "score_candidate",
++                     "select_best_candidate", "pinocchio_ik_one_seed",
++                     "collect_pinocchio_candidates_and_seeds", "get_pinocchio_frame_id",
++                     "CONTINUATION_MAX_STEP", "LOCKED_SEED_SKIP_TOL"):
++            self.assertTrue(hasattr(S, name), name)
++
++    def test_version(self):
++        self.assertEqual(S.SOLVER_VERSION, "merged-v14")
++        s, _ = make_solver(config={"dls_seed_library_size": 0})
++        self.assertEqual(s.last_load_diagnostics["version"], "merged-v14")
++
++
++class RemovedNamesTests(unittest.TestCase):
++    def test_solver_dls_aliases_and_test_only_entries_removed(self):
++        for name in ("PIN_IK_STALL_DELTA_M", "PIN_IK_MAX_VALID_CANDIDATES", "WAIST_RETURN_TOL",
++                     "WAIST_POST_GAIN", "WAIST_POST_ITERS", "WAIST_POST_STEP", "WAIST_POST_TOL",
++                     "ARM_ROLL_VIRTUAL_LIM", "MAX_SNS_CLAMP_PASSES",
++                     "_compute_nullspace_gradient_and_cost", "_solve_sns_clamped_step"):
++            self.assertFalse(hasattr(D, name), name)
++
++    def test_branch_tools_are_ik_common_functions(self):
++        for name in ("joint_difference", "bounded_joint_difference", "select_closest_bounded_branch"):
++            self.assertIs(getattr(D, name), getattr(C, name), name)
++            self.assertIs(getattr(S, name), getattr(C, name), name)
++
++    def test_unused_solver_imports_removed(self):
++        for name in ("defaultdict", "Enum", "ET", "rotx", "T_origin", "joint_limit_barrier",
++                     "finalize_ik_result", "W_SMOOTH", "NULLSPACE_GAIN", "json_safe",
++                     "pinocchio_q_to_active_q"):
++            self.assertFalse(hasattr(S, name), name)
++
++
++class SignatureCleanupTests(unittest.TestCase):
++    def test_effective_bounds_windows_are_keyword_only(self):
++        lo, hi = D._build_effective_bounds(
++            np.array([-7.0]), np.array([7.0]), np.array([1.0]),
++            virtual_half_windows={"j": 0.5}, active_names=["j"],
++        )
++        np.testing.assert_array_equal(lo, [0.5])
++        np.testing.assert_array_equal(hi, [1.5])
++        with self.assertRaises(TypeError):  # 旧版第 4 个位置参数（不参与计算的腰部掩码）已删除
++            D._build_effective_bounds(np.array([-7.0]), np.array([7.0]), np.array([1.0]),
++                                      np.array([True]))
++
++    def test_removed_parameters(self):
++        self.assertNotIn("mass_points", inspect.signature(D.model_com_with_jacobian).parameters)
++        self.assertNotIn("orientation_weight", inspect.signature(D.select_library_seeds).parameters)
++
++    def test_mask_helpers_fallback_chain(self):
++        maps = {"active_continuous": np.array([True, False, False])}
++        np.testing.assert_array_equal(D.active_periodic_mask(maps), [True, False, False])
++        np.testing.assert_array_equal(D.active_multi_turn_mask(maps), [True, False, False])
++        maps["active_periodic"] = np.array([False, True, False])
++        np.testing.assert_array_equal(D.active_multi_turn_mask(maps), [False, True, False])
++        maps["active_multi_turn"] = np.array([False, True, True])
++        np.testing.assert_array_equal(D.active_multi_turn_mask(maps), [False, True, True])
++        np.testing.assert_array_equal(D.active_periodic_mask(maps), [False, True, False])
++
++    def test_solver_multi_turn_mask_matches_ik_common(self):
++        s, _ = make_solver(config={"dls_seed_library_size": 0})
++        expected = C.multi_turn_mask_from_chain(s.chain, s.lower, s.upper)
++        np.testing.assert_array_equal(s.multi_turn_mask, expected)
++        np.testing.assert_array_equal(s.multi_turn_mask, s.pin_maps["active_multi_turn"])
++        self.assertTrue(expected.any())  # 合成模型的 LHand_Link3 是 continuous
++
++
++class ConfigValidationTests(unittest.TestCase):
++    """合并后的配置校验帮手：报错消息与 v13 逐字相同。"""
++
++    CASES = {
++        "dls_continuation_local": ("yes", "dls_continuation_local must be True or False"),
++        "dls_continuation_max_step": (0.0, "dls_continuation_max_step must be a positive finite angle"),
++        "dls_seed_library_size": (-1, "dls_seed_library_size must be a nonnegative integer (0 = off)"),
++        "dls_seed_library_seeds": (2.0, "dls_seed_library_seeds must be a nonnegative integer"),
++        "dls_seed_library_min_separation": (
++            float("inf"), "dls_seed_library_min_separation must be a finite angle >= 0"),
++        "dls_waist_comfort_early_fallback": (1, "dls_waist_comfort_early_fallback must be True or False"),
++        "dls_waist_comfort_patience": (0, "dls_waist_comfort_patience must be an integer >= 1"),
++        "dls_jump_limit_rescue": (None, "dls_jump_limit_rescue must be True or False"),
++        "dls_locked_reach_check": ("no", "dls_locked_reach_check must be True or False"),
++        "dls_seed_library_continuation": (0, "dls_seed_library_continuation must be True or False"),
++    }
++
++    def test_messages(self):
++        for key, (value, message) in self.CASES.items():
++            with self.subTest(key=key), self.assertRaises(ValueError) as caught:
++                make_solver(config={key: value})
++            self.assertEqual(str(caught.exception), message)
++
++    def test_helpers(self):
++        self.assertEqual(S._finite_angle("0.25", "m", positive=True), 0.25)
++        self.assertEqual(S._finite_angle(0, "m", positive=False), 0.0)
++        for bad, positive in ((0, True), (True, False), ("x", False), (None, False),
++                              (float("nan"), False), (-1e-9, False)):
++            with self.subTest(bad=bad), self.assertRaises(ValueError):
++                S._finite_angle(bad, "m", positive=positive)
++        self.assertEqual(S._int_at_least(np.int64(3), 1, "m"), 3)
++        for bad in (True, np.bool_(True), 3.0, "3", 0):
++            with self.subTest(bad=bad), self.assertRaises(ValueError):
++                S._int_at_least(bad, 1, "m")
++        self.assertIs(S._config_flag({"k": np.bool_(True)}, "k", False), True)
++        self.assertIs(S._config_flag({}, "k", False), False)
++
++
++class LoadContextRestoreTests(unittest.TestCase):
++    def test_confirmed_efforts_only_during_strict_calls(self):
++        names = robot_xml()[1] + ["OtherJoint"]
++        s, state = make_solver(config={"dls_seed_library_size": 0,
++                                       "load_allowable_efforts": {n: 250.0 for n in names}})
++        T = root_target(s, state, s.q_ready + 0.05)
++        q, _, _ = s.solve(T, frame="world", joint_state=JointStateSnapshot(state))
++        self.assertIsNotNone(q)
++        s.evaluate_physics(s.q_ready, joint_state=JointStateSnapshot(state))
++        self.assertNotIn("q_template", s.pin_maps)
++        np.testing.assert_array_equal(s.pin_maps["effort_limits"], s.pin_maps["urdf_effort_limits"])
++        np.testing.assert_array_equal(s.joint_efforts_active, s.pin_maps["urdf_effort_limits"])
++        self.assertTrue(np.all(s.pin_maps["urdf_effort_limits"] == 300.0))
++        self.assertEqual(s.pin_maps["effort_basis"], "URDF reference, not confirmed continuous rating")
++        self.assertEqual(s.last_load_diagnostics["code"], "ACCEPTED")
++
++
++class DlsCompatTests(unittest.TestCase):
++    def test_sns_diagonal_metric_matches_matrix_path_bitwise(self):
++        rng = np.random.default_rng(4)
++        for _ in range(100):
++            n = 9
++            J = rng.normal(size=(6, n))
++            w = rng.uniform(0.2, 1.0, n)
++            lo, hi = -rng.uniform(0.05, 2, n), rng.uniform(0.05, 2, n)
++            q = rng.uniform(lo, hi)
++            e, z = rng.normal(size=6), rng.normal(size=n)
++            movable = np.ones(n, dtype=bool)
++            movable[rng.integers(0, n)] = False
++            args = (movable, q, lo, hi, 1e-6, 0.5)
++            vec = D._sns_clamped_core(J, e, z, 1.0, w.copy(), None, *args)
++            mat = D._sns_clamped_core(J, e, z, 1.0, None, np.diag(w), *args)
++            compat = dls_compat._solve_sns_clamped_step(J, e, z, 1.0, np.diag(w), *args, return_info=True)
++            for a, b, c in zip(vec, mat, compat):
++                np.testing.assert_array_equal(a, b)
++                np.testing.assert_array_equal(a, c)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff -ruN a/tests/test_v6_constraints.py b/tests/test_v6_constraints.py
+--- a/tests/test_v6_constraints.py	2026-10-22 10:00:56.000000000 +0000
++++ b/tests/test_v6_constraints.py	2026-10-22 12:57:03.937877087 +0000
+@@ -13,6 +13,7 @@
+ import tests.fixtures as F
+ from ha_arm_ik import solver as S
+ import ha_arm_ik.solver_dls as D
++from tests import dls_compat
+ from ha_arm_ik.solver_dls import JointStateSnapshot
+ 
+ 
+@@ -66,7 +67,7 @@
+             W = np.diag(rng.uniform(0.15, 1.0, size=n))
+             z = rng.normal(size=n)
+             lo, hi = -np.full(n, 10.0), np.full(n, 10.0)
+-            dq, dqn = D._solve_sns_clamped_step(J, rng.normal(size=6) * 0.1, z, 1.0, W,
++            dq, dqn = dls_compat._solve_sns_clamped_step(J, rng.normal(size=6) * 0.1, z, 1.0, W,
+                                                 np.ones(n, bool), np.zeros(n), lo, hi, 1e-6, 10.0)
+             self.assertGreaterEqual(float(z @ dqn), -1e-12)
+             # 零空间步不应扰动主任务（阻尼极小）
+@@ -79,7 +80,7 @@
+             J = rng.normal(size=(6, n))
+             lo, hi = -rng.uniform(0.05, 3, n), rng.uniform(0.05, 3, n)
+             q = np.clip(rng.uniform(lo, hi), lo, hi)
+-            dq, _ = D._solve_sns_clamped_step(J, rng.normal(size=6), rng.normal(size=n), 1.0,
++            dq, _ = dls_compat._solve_sns_clamped_step(J, rng.normal(size=6), rng.normal(size=n), 1.0,
+                                               np.eye(n), np.ones(n, bool), q, lo, hi, 1e-6, 0.5)
+             t = q + dq
+             self.assertLessEqual(max(np.max(lo - t), np.max(t - hi)), D.BOUND_SNAP_TOL)
+diff -ruN a/tests/test_v7_speed.py b/tests/test_v7_speed.py
+--- a/tests/test_v7_speed.py	2026-10-22 10:58:04.000000000 +0000
++++ b/tests/test_v7_speed.py	2026-10-22 12:57:03.938394569 +0000
+@@ -28,6 +28,7 @@
+ from tests.fixtures import context, make_solver, root_target
+ from ha_arm_ik import solver as S
+ import ha_arm_ik.solver_dls as D
++from tests import dls_compat
+ from ha_arm_ik.solver_dls import JointStateSnapshot
+ 
+ 
+@@ -209,20 +210,20 @@
+                 st["objective_load"] += 1
+             if comps is not None:
+                 kwargs["components"] = {}
+-            got = D._compute_nullspace_gradient_and_cost(*args, **kwargs)
++            got = dls_compat._compute_nullspace_gradient_and_cost(*args, **kwargs)
+             assert_same(t, got, out, f"objective[{st['objective']}]")
+             if comps is not None:
+                 assert_same(t, kwargs["components"], comps, f"objective[{st['objective']}] components")
+             st["objective"] += 1
+         for args, kwargs, out, _ in self.inner["sns"]:
+             with v6_numerics(constants=False):
+-                got = D._solve_sns_clamped_step(*args, **kwargs)
++                got = dls_compat._solve_sns_clamped_step(*args, **kwargs)
+             assert_same(t, got, out, f"sns[{st['sns']}]")
+             # LAPACK 直调（显式恢复 v7 实现；外层求解处于 scipy 补丁下）：与 scipy 封装差 1e-12 量级
+             with patch.object(D, "_chol_factor", LAPACK_CHOL[0]), patch.object(
+                 D, "_chol_solve", LAPACK_CHOL[1]
+             ):
+-                got = D._solve_sns_clamped_step(*args, **kwargs)
++                got = dls_compat._solve_sns_clamped_step(*args, **kwargs)
+             for x, y in zip(got[:2], out[:2]):
+                 st["lapack_worst"] = max(st["lapack_worst"], float(np.max(np.abs(x - y))))
+             st["sns"] += 1
+@@ -458,7 +459,6 @@
+         # v8：姿态整理恢复 v6 的 50 步 / 耐心 3（停滞检测仍为 v7 的 12 次 / 2.5%）
+         self.assertEqual((D.PIN_IK_STALL_ITERS, D.MAX_SETTLE_EXTRA_ITERS, D.SETTLE_PATIENCE), (12, 50, 3))
+         self.assertEqual(D.PIN_IK_STALL_RTOL, 0.025)
+-        self.assertEqual(D.WAIST_POST_ITERS, D.MAX_SETTLE_EXTRA_ITERS)
+ 
+ 
+ class SeedOrderTests(unittest.TestCase):
+--- a/run_validation.py	2026-10-22 11:32:16.000000000 +0000
++++ b/run_validation.py	2026-10-22 13:20:03.122315804 +0000
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Offline validation only. v13 (= v12 + seed library / early comfort fallback / jump-limit rescue / locked-seed reach check): the user-provided ik_common / ik_candidate / robot_model are tested (no test doubles)."""
++"""Offline validation only. v14 (= v13 behaviour, cleanup only: redundant aliases / imports / duplicated code removed, docs rewritten): the user-provided ik_common / ik_candidate / robot_model are tested (no test doubles)."""
+ import ast
+ import json
+ from pathlib import Path
+@@ -13,7 +13,7 @@
+ def main():
+     suffix="pin"+pin.__version__.replace(".","_")
+     counts={}
+-    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes","test_v13_changes"):
++    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes","test_v13_changes","test_v14_cleanup"):
+         counts[name]=unittest.defaultTestLoader.loadTestsFromName("tests."+name).countTestCases()
+     suite=unittest.defaultTestLoader.discover("tests",top_level_dir=".")
+     with open("validation_"+suffix+".txt","w",encoding="utf-8") as out:

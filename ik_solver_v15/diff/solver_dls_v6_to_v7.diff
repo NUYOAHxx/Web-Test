@@ -1,0 +1,1484 @@
+--- solver_dls_v6.py
++++ solver_dls.py
+@@ -1,7 +1,7 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+ 
+-"""Pinocchio 阻尼最小二乘 IK 核心（merged-v6）。
++"""Pinocchio 阻尼最小二乘 IK 核心（merged-v7）。
+ 
+ 约束分层（硬约束不满足 = 不是解；软目标只在硬约束内部比较）：
+   硬约束  H1 末端位姿误差 <= pos_tol / ori_tol（full / tool_dir / tool_cone 三种模式）
+@@ -11,6 +11,16 @@
+   软目标  S1 负荷峰值最小（带 peak_tie 容差带），S2 次任务代价最小：
+           q_ready 物理坐标回中 + 限位裕度 + 重力矩 + 整机质心水平偏移
+ 
++v7 相对 v6（提速；约束分层、择优规则与公共函数签名不变）：
++  1. 迭代参数：停滞检测窗口 25 -> 12 次迭代、下降阈值 5% -> 2.5%；位姿达标后的姿态整理上限 50 -> 15 步、
++     慢步耐心 3 -> 2
++  2. 低负荷早停阈值默认 0.60 -> min(0.70, soft_ratio)；显式配置 load_early_stop_ratio 时按配置
++  3. 热路径实现优化（算法与运算顺序不变，与 v6 逐位一致；唯一例外见第 4 条）：
++     每个种子预计算目标位姿/索引/质心投影/容许力矩向量；次任务直接复用主任务已算好的 Pinocchio q；
++     只要代价的调用不再算梯度；对角逆度量的 SNS 改为向量运算；迭代内只更新末端单帧位姿
++  4. SNS 的 Cholesky 直接调用 LAPACK dpotrf/dpotrs（与 scipy 1.18 cho_factor/cho_solve 相差 1e-12 量级）
++  5. make_scatter_seeds(max_count=...)：只对实际会用到的前缀去重（随机数消耗与种子顺序不变）
++
+ v6 相对 v5 的修正：
+   1. 整机质心计入 universe 惯量（URDF 根 link 及固定在根上的 link），nv=1 时雅可比形状正确
+   2. SNS Cholesky 主路径的零空间步与 SVD 回退一致：D z - D J^T A^-1 J D z（保证下降方向）
+@@ -28,7 +38,8 @@
+ import xml.etree.ElementTree as ET
+ 
+ import numpy as np
+-from scipy.linalg import cho_factor, cho_solve
++from scipy.linalg import cho_factor, cho_solve  # noqa: F401  （v6 兼容导出；v7 主路径直接用 LAPACK）
++from scipy.linalg import lapack as _lapack
+ 
+ try:
+     import pinocchio as pin
+@@ -56,8 +67,10 @@
+ PIN_IK_POS_TOL = 5e-4
+ PIN_IK_ORI_TOL = 5e-4
+ PIN_IK_MAX_STEP = 0.5             # 单次迭代关节步长 2-范数上限（弧度）
+-PIN_IK_STALL_ITERS = 25           # 停滞检测窗口：位姿未达标时每 25 次迭代检查一次进展
+-PIN_IK_STALL_RTOL = 0.05          # 窗口内主任务误差范数相对下降 < 5% -> 判定停滞，换下一个种子
++PIN_IK_STALL_ITERS = 12           # 停滞检测窗口：位姿未达标时每 12 次迭代检查一次进展（v6 为 25）
++PIN_IK_STALL_RTOL = 0.025         # 窗口内主任务误差范数相对下降 < 2.5% -> 判定停滞，换下一个种子
++                                  # （v6 为每 25 次迭代 5%；v7 窗口减半、阈值减半，判定速率与 v6 相当但检查更频繁。
++                                  #   窗口 12 + 5% 会误杀收敛较慢的锁腰种子，tool 模式少数目标丢掉腰部回中解）
+ PIN_IK_STALL_DELTA_M = 5e-5       # 兼容旧版导出的常量（v6 改用上面的相对窗口判据）
+ BOUND_SNAP_TOL = 1e-9             # 试探点越界不超过此值（浮点舍入）时吸附回边界，不整步拒绝
+ PIN_IK_MAX_VALID_CANDIDATES = 2
+@@ -75,10 +88,11 @@
+ WAIST_NULL_GAIN = 0.50            # 腰部关节拉向 q_ref（直立零位）的次任务增益
+ NULLSPACE_ERR_SCALE = 0.06        # 主任务误差小于此值时零空间整理全功率激活
+ POSTURE_SETTLE_TOL = 1e-4         # 末端收敛后，零空间步长小于此阈值(rad)才算稳态收敛
+-MAX_SETTLE_EXTRA_ITERS = 50       # 末端达标后允许继续在零空间整理姿态的最大步数
++MAX_SETTLE_EXTRA_ITERS = 15       # 末端达标后允许继续在零空间整理姿态的最大步数（v6 为 50）
+ SETTLE_COST_RTOL = 1e-3           # 姿态整理阶段：单步次任务代价相对下降 < 0.1% 记为“慢步”
+-SETTLE_PATIENCE = 3               # 连续 3 个慢步即视为已收敛（边际收益太小，不再耗时）
++SETTLE_PATIENCE = 2               # 连续 2 个慢步即视为已收敛（边际收益太小，不再耗时；v6 为 3）
+ POSE_PEAK_BAND_FRACTION = 0.25    # 单种子内择优的峰值容差带 = 0.25 * LoadPolicy.peak_tie（默认 0.005）
++LOAD_EARLY_STOP_RATIO = 0.70      # 低负荷早停阈值默认值，实际取 min(本值, soft_ratio)（v6 默认 0.60）
+ 
+ # 兼容旧版外部导入的别名常量
+ WAIST_POST_GAIN = 0.30
+@@ -119,6 +133,15 @@
+     return result.copy()
+ 
+ 
++def _vec_norm(x):
++    """1-D float 向量的 2-范数，返回 Python float。
++
++    与 float(np.linalg.norm(x)) 逐位一致（numpy 对 1-D 向量的实现就是 sqrt(x.dot(x))），
++    但省去了 norm 的参数分派开销；只用于内部热路径上已知为 1-D float64 的数组。
++    """
++    return math.sqrt(x.dot(x))
++
++
+ def validate_transform(value):
+     T = np.asarray(value, dtype=float)
+     if T.shape != (4, 4) or not np.all(np.isfinite(T)):
+@@ -287,7 +310,8 @@
+     excess_weight: float = 0.50
+     relative_weight: float = 0.0
+     soft_ratio: float = 0.70
+-    early_stop_ratio: float = 0.60
++    # 低负荷早停阈值；None（默认）= min(LOAD_EARLY_STOP_RATIO, soft_ratio)。v6 默认固定 0.60
++    early_stop_ratio: float | None = None
+     peak_tie: float = 0.02  # 峰值负荷率容差带：差距在此以内视为同档，再比较姿态/连续性代价
+ 
+     def __post_init__(self):
+@@ -312,6 +336,12 @@
+                 raise ValueError(f"{name} must be nonnegative and finite")
+         if not 0.0 < self.soft_ratio < 1.0:
+             raise ValueError("soft_ratio must lie strictly between 0 and 1")
++        if self.early_stop_ratio is None:
++            object.__setattr__(
++                self,
++                "early_stop_ratio",
++                min(LOAD_EARLY_STOP_RATIO, float(self.soft_ratio)),
++            )
+         if not 0.0 < self.early_stop_ratio <= self.soft_ratio:
+             raise ValueError(
+                 "early_stop_ratio must be positive and <= soft_ratio"
+@@ -348,35 +378,51 @@
+         self._vector_cache[key] = (caps, weights)
+         return caps, weights
+ 
+-    def cost_gradient(self, tau, d_tau_d_active, names, *, tau_reference=None):
+-        tau = finite_vector(tau, len(names), "gravity efforts")
+-        J = np.asarray(d_tau_d_active, dtype=float)
+-        if J.ndim != 2 or J.shape[0] != len(names) or not np.all(np.isfinite(J)):
+-            raise ValueError("invalid gravity effort derivative")
+-        caps, weights = self.vectors(names)
++    def _cost_terms(self, tau, caps, weights, tau_reference, with_gradient):
++        """cost_gradient 与单种子快速次任务共用的负荷代价运算（同一份代码，结果逐位一致）。
++
++        tau / tau_reference 须已校验为有限向量；with_gradient=False 时不计算 d cost / d tau。
++        返回 (absolute, excess, relative, dcost_dtau 或 None)。
++        """
+         r = tau / caps
+         excess = np.maximum(np.abs(r) - self.soft_ratio, 0.0)
+-        n = len(names)
++        n = len(tau)
+ 
+         abs_cost = 0.5 * self.absolute_weight * float(np.sum(weights * r * r)) / n
+         excess_cost = (
+             0.5 * self.excess_weight * float(np.sum(weights * excess * excess)) / n
+         )
+-        dcost_dtau = (
+-            self.absolute_weight * weights * r / caps
+-            + self.excess_weight * weights * excess * np.sign(r) / caps
+-        ) / n
++        dcost_dtau = None
++        if with_gradient:
++            dcost_dtau = (
++                self.absolute_weight * weights * r / caps
++                + self.excess_weight * weights * excess * np.sign(r) / caps
++            ) / n
+ 
+         rel_cost = 0.0
+         if self.relative_weight > 0.0:
+-            ref = finite_vector(
+-                tau_reference, len(names), "reference gravity efforts"
+-            )
+-            diff = (tau - ref) / caps
++            diff = (tau - tau_reference) / caps
+             rel_cost = (
+                 0.5 * self.relative_weight * float(np.sum(weights * diff * diff)) / n
+             )
+-            dcost_dtau += self.relative_weight * weights * diff / caps / n
++            if with_gradient:
++                dcost_dtau += self.relative_weight * weights * diff / caps / n
++        return abs_cost, excess_cost, rel_cost, dcost_dtau
++
++    def cost_gradient(self, tau, d_tau_d_active, names, *, tau_reference=None):
++        tau = finite_vector(tau, len(names), "gravity efforts")
++        J = np.asarray(d_tau_d_active, dtype=float)
++        if J.ndim != 2 or J.shape[0] != len(names) or not np.all(np.isfinite(J)):
++            raise ValueError("invalid gravity effort derivative")
++        caps, weights = self.vectors(names)
++        ref = None
++        if self.relative_weight > 0.0:
++            ref = finite_vector(
++                tau_reference, len(names), "reference gravity efforts"
++            )
++        abs_cost, excess_cost, rel_cost, dcost_dtau = self._cost_terms(
++            tau, caps, weights, ref, True
++        )
+ 
+         gradient = J.T @ dcost_dtau
+         cost = float(abs_cost + excess_cost + rel_cost)
+@@ -527,6 +573,40 @@
+     return q
+ 
+ 
++def _make_q_builder(model, pin_maps):
++    """单种子内复用的 active_q_to_pinocchio_q：模板与索引布局只取一次，结果与公共函数逐位一致。
++
++    种子求解期间 pin_maps["q_template"] 不变（求解入口设置、结束后移除），因此可以安全缓存。
++    """
++    n_active = len(pin_maps["active_names"])
++    template = pin_maps.get("q_template")
++    base = (
++        pin.neutral(model)
++        if template is None
++        else np.array(template, dtype=float, copy=True)
++    )
++    scalar_pos, scalar_idx, cont_pos, cont_idx = _active_q_layout(pin_maps)
++    cont_idx_sin = cont_idx + 1
++    has_cont = bool(cont_pos.size)
++    shape = (n_active,)
++
++    def build(q_active):
++        values = np.asarray(q_active, dtype=float)
++        if values.shape != shape or not np.isfinite(values).all():
++            raise ValueError(
++                f"active q: expected a finite 1-D vector of size {n_active}"
++            )
++        q = base.copy()
++        q[scalar_idx] = values[scalar_pos]
++        if has_cont:
++            angles = values[cont_pos]
++            q[cont_idx] = np.cos(angles)
++            q[cont_idx_sin] = np.sin(angles)
++        return q
++
++    return build
++
++
+ def pinocchio_q_to_active_q(pin_maps, q_full, reference=None):
+     """提取活跃关节标量角度；若提供 reference，则在合法限位内对齐至最接近 reference 的 2πk 分支。"""
+     values = []
+@@ -758,6 +838,283 @@
+     return lo, hi
+ 
+ 
++class _SecondaryObjective:
++    """零空间次任务 H(q) 与负梯度 z = -dH/dq 的求值器：每个种子构造一次，迭代内复用。
++
++    与 v6 的 _compute_nullspace_gradient_and_cost 逐项同序运算（该公共函数现在也经由本类求值，
++    两条路径是同一份代码）。提速只来自：
++      - 每次调用都相同的量提前算好：周期掩码、限位缓冲边界、质心水平投影 P、参考质心、
++        容许力矩/权重向量、雅可比索引、根 link 质量项；
++      - 直接复用主任务已算好的 Pinocchio q（单种子循环内两者来自同一组关节角，数值完全相同）；
++      - need_z=False（只比较代价的试探点）时不计算梯度与重力矩导数。
++    """
++
++    def __init__(
++        self,
++        pin_model,
++        pin_data,
++        pin_maps,
++        q_ref,
++        lower,
++        upper,
++        ns_gain,
++        active_v_indices,
++        effort_limits,
++        movable_mask,
++        include_waist,
++        tau_g_ref,
++        com_xy_ref,
++        gravity_gain,
++        com_gain,
++        limit_gain,
++        load_context=None,
++        relative_gravity_gain=0.0,
++        posture_use_equivalent_branch=False,
++    ):
++        self.model = pin_model
++        self.data = pin_data
++        self.nv = pin_model.nv
++        self.q_ref = q_ref
++        self.lower = lower
++        self.upper = upper
++        self.ns_gain = ns_gain
++        self.neg_ns_gain = -ns_gain
++        self.movable = movable_mask
++
++        # 姿态回中：默认真实编码器坐标差（仅无界 continuous 关节做周期折叠）
++        self.multi_turn = None
++        if (
++            posture_use_equivalent_branch
++            and pin_maps is not None
++            and "active_multi_turn" in pin_maps
++        ):
++            self.multi_turn = pin_maps["active_multi_turn"]
++        else:
++            periodic = (
++                (
++                    pin_maps.get("active_periodic", pin_maps["active_continuous"])
++                    if pin_maps is not None
++                    else np.zeros(len(q_ref), dtype=bool)
++                )
++                if load_context is None
++                else load_context["periodic"]
++            )
++            self.periodic = np.asarray(periodic, dtype=bool)
++            self.periodic_any = bool(np.any(self.periodic))
++
++        # 单侧安全裕度排斥项的缓冲边界
++        self.margin = max(float(SAFE_MARGIN), 0.02)
++        self.limit_gain = limit_gain
++        if limit_gain > 0.0:
++            self.b_low = np.minimum(q_ref, lower + self.margin)
++            self.b_high = np.maximum(q_ref, upper - self.margin)
++
++        # 静态重力矩与质心
++        self.context = load_context
++        self.com_gain = com_gain
++        self.use_com = bool(include_waist and com_gain > 0.0 and com_xy_ref is not None)
++        if load_context is not None:
++            self.policy = load_context["policy"]
++            self.guard_v = load_context["guard_v"]
++            self.caps, self.weights = self.policy.vectors(load_context["guard_names"])
++            self.com_cols = load_context["active_v"]
++            self.dtau_index = np.ix_(load_context["guard_v"], load_context["active_v"])
++            self.tau_ref = None
++            if self.policy.relative_weight > 0.0:
++                self.tau_ref = finite_vector(
++                    tau_g_ref,
++                    len(load_context["guard_names"]),
++                    "reference gravity efforts",
++                )
++        else:
++            valid_eff = (
++                effort_limits is not None
++                and np.all(np.isfinite(effort_limits))
++                and np.all(effort_limits > 0.0)
++            )
++            self.gravity_gain = gravity_gain
++            self.rel_gain = relative_gravity_gain
++            self.use_gravity = bool(
++                valid_eff and (gravity_gain > 0.0 or relative_gravity_gain > 0.0)
++            )
++            self.use_rel = relative_gravity_gain > 0.0 and tau_g_ref is not None
++            self.tau_ref = tau_g_ref
++            self.com_cols = active_v_indices
++            if self.use_gravity:
++                self.active_v = active_v_indices
++                self.inv_eff_sq = 1.0 / (effort_limits ** 2)
++                self.n_act = max(1, len(active_v_indices))
++                self.dtau_index = np.ix_(active_v_indices, active_v_indices)
++        if load_context is not None or self.use_com:
++            root_inertia = pin_model.inertias[0]
++            self.m_root = float(root_inertia.mass)
++            self.root_term = self.m_root * np.asarray(root_inertia.lever, dtype=float)
++        if self.use_com:
++            self.ref_com = finite_vector(com_xy_ref, 3, "reference COM")
++            ghat = np.asarray(pin_model.gravity.linear, dtype=float)
++            ghat = ghat / max(float(np.linalg.norm(ghat)), 1e-30)
++            self.P = np.eye(3) - np.outer(ghat, ghat)
++
++    def _com(self, q_full, derivatives):
++        """model_com_with_jacobian 的同序运算（根 link 质量项已预计算）。导数关闭时雅可比返回 None。"""
++        model, data = self.model, self.data
++        if derivatives:
++            J_mov = np.asarray(
++                pin.jacobianCenterOfMass(model, data, q_full, False), dtype=float
++            ).reshape(3, self.nv)
++        else:
++            pin.centerOfMass(model, data, q_full, False)
++            J_mov = None
++        m_mov = float(data.mass[0])
++        c_mov = np.asarray(data.com[0], dtype=float)
++        m_total = m_mov + self.m_root
++        if not math.isfinite(m_total) or m_total <= 0.0:
++            raise ValueError("model has no positive mass for COM")
++        com = (m_mov * c_mov + self.root_term) / m_total
++        if J_mov is None:
++            return com, None
++        J_cols = J_mov if self.com_cols is None else J_mov[:, self.com_cols]
++        return com, (m_mov / m_total) * J_cols
++
++    def __call__(self, q_active, q_full, derivatives=True, components=None, need_z=True):
++        """返回 (z * movable_mask, H)；need_z=False 且 derivatives=False 时返回 (None, H)。
++
++        q_full 必须是 q_active 对应的 Pinocchio q（active_q_to_pinocchio_q 的结果）。
++        """
++        need_z = need_z or derivatives
++        if self.multi_turn is not None:
++            diff = bounded_joint_difference(
++                q_active, self.q_ref, self.lower, self.upper, self.multi_turn
++            )
++        else:
++            diff = q_active - self.q_ref
++            if self.periodic_any:
++                mask = self.periodic
++                diff[mask] = (diff[mask] + np.pi) % (2.0 * np.pi) - np.pi
++
++        z = self.neg_ns_gain * diff if need_z else None
++        posture = 0.5 * float(np.dot(self.ns_gain * (diff ** 2), self.movable))
++        cost = posture
++        c_lim = 0.0
++        abs_load = excess_load = rel_load = 0.0
++        c_com = 0.0
++        peak = load_ok = None
++
++        # 1. 单侧安全裕度排斥项
++        if self.limit_gain > 0.0:
++            margin = self.margin
++            under = np.maximum(0.0, self.b_low - q_active) / margin
++            over = np.maximum(0.0, q_active - self.b_high) / margin
++            if need_z:
++                z += self.limit_gain * (under - over) / margin
++            c_lim = (
++                0.5
++                * self.limit_gain
++                * float(np.dot(under ** 2 + over ** 2, self.movable))
++            )
++            cost += c_lim
++
++        model, data = self.model, self.data
++        if self.context is not None:
++            # 2a. 严格负荷模式：与 load_physics + LoadPolicy.evaluate/cost_gradient 同序
++            tau = np.array(
++                pin.computeGeneralizedGravity(model, data, q_full), copy=True
++            )[self.guard_v]
++            if derivatives:
++                dtau = np.asarray(
++                    pin.computeGeneralizedGravityDerivatives(model, data, q_full)
++                ).reshape(self.nv, self.nv)[self.dtau_index]
++            com, Jcom = self._com(q_full, derivatives)
++            if not np.isfinite(com).all() or (
++                Jcom is not None and not np.isfinite(Jcom).all()
++            ):
++                raise ValueError("non-finite model COM")
++            if not np.isfinite(tau).all():
++                raise ValueError("gravity efforts: non-finite values")
++            ratios = np.abs(tau) / self.caps
++            if not np.isfinite(ratios).all():
++                raise ValueError("non-finite normalized load; check capacities/model")
++            peak = float(ratios.max())
++            load_ok = peak <= 1.0
++            if derivatives and not np.isfinite(dtau).all():
++                raise ValueError("invalid gravity effort derivative")
++            abs_load, excess_load, rel_load, dcost_dtau = self.policy._cost_terms(
++                tau, self.caps, self.weights, self.tau_ref, derivatives
++            )
++            c_load = float(abs_load + excess_load + rel_load)
++            if derivatives:
++                g_load = dtau.T @ dcost_dtau
++                if not np.isfinite(g_load).all() or not math.isfinite(c_load):
++                    raise ValueError("non-finite load objective")
++                z -= g_load
++            elif not math.isfinite(c_load):
++                raise ValueError("non-finite load objective")
++            cost += c_load
++            if self.use_com:
++                dcom = self.P @ (com - self.ref_com)
++                if derivatives:
++                    z -= self.com_gain * (Jcom.T @ dcom)
++                c_com = 0.5 * self.com_gain * float(dcom @ dcom)
++                cost += c_com
++        else:
++            # 2b. 未配置负荷上下文：可选的 URDF 力矩归一化项（与 v6 同序）
++            if self.use_gravity:
++                tau_cur = np.array(
++                    pin.computeGeneralizedGravity(model, data, q_full), copy=True
++                )[self.active_v]
++                inv_eff_sq, n_act = self.inv_eff_sq, self.n_act
++                dcost_dtau = np.zeros_like(tau_cur) if derivatives else None
++                if self.gravity_gain > 0.0:
++                    abs_load = (
++                        0.5
++                        * self.gravity_gain
++                        * float(np.sum((tau_cur ** 2) * inv_eff_sq))
++                        / n_act
++                    )
++                    cost += abs_load
++                    if derivatives:
++                        dcost_dtau += self.gravity_gain * (tau_cur * inv_eff_sq) / n_act
++                if self.use_rel:
++                    tau_diff = tau_cur - self.tau_ref
++                    rel_load = (
++                        0.5
++                        * self.rel_gain
++                        * float(np.sum((tau_diff ** 2) * inv_eff_sq))
++                        / n_act
++                    )
++                    cost += rel_load
++                    if derivatives:
++                        dcost_dtau += self.rel_gain * (tau_diff * inv_eff_sq) / n_act
++                if derivatives:
++                    dtau_act = np.asarray(
++                        pin.computeGeneralizedGravityDerivatives(model, data, q_full)
++                    ).reshape(self.nv, self.nv)[self.dtau_index]
++                    z -= dtau_act.T @ dcost_dtau
++            if self.use_com:
++                com_cur, J_com = self._com(q_full, derivatives)
++                dcom = self.P @ (com_cur - self.ref_com)
++                c_com = 0.5 * self.com_gain * float(dcom @ dcom)
++                cost += c_com
++                if derivatives:
++                    z -= self.com_gain * (J_com.T @ dcom)
++
++        if not math.isfinite(cost) or (need_z and not np.isfinite(z).all()):
++            raise ValueError("non-finite secondary objective")
++        if components is not None:
++            parts = {
++                "posture": posture,
++                "joint_limit": c_lim,
++                "absolute_load": abs_load,
++                "excess_load": excess_load,
++                "relative_load": rel_load,
++                "com": c_com,
++            }
++            if self.context is not None:
++                parts.update(peak_ratio=peak, load_ok=load_ok)
++            components.update(parts)
++        return (z * self.movable if need_z else None), cost
++
++
+ def _compute_nullspace_gradient_and_cost(
+     pin_model,
+     pin_data,
+@@ -790,171 +1147,34 @@
+         使用真实编码器坐标差 (q_active_cur - q_ref)，确保零空间始终将关节拉回真实的物理 q_ready（如 0°），
+         绝不会因为 200° 等价于 -160° 而把关节反向推向 +360°。
+       - 仅当显式设置 posture_use_equivalent_branch=True 时，才使用 2πk 等价角度差。
++    v7：与单种子迭代共用 _SecondaryObjective 的同一份实现；配置负荷上下文时仍按 v6 语义
++    由 q_active_cur 重算 Pinocchio q（不使用传入的 q_full），未配置时使用传入的 q_full。
+     """
+-    if (
+-        posture_use_equivalent_branch
+-        and pin_maps is not None
+-        and "active_multi_turn" in pin_maps
+-    ):
+-        diff = bounded_joint_difference(
+-            q_active_cur,
+-            q_ref,
+-            lower,
+-            upper,
+-            pin_maps["active_multi_turn"],
+-        )
+-    else:
+-        periodic = (
+-            (
+-                pin_maps.get("active_periodic", pin_maps["active_continuous"])
+-                if pin_maps is not None
+-                else np.zeros(len(q_ref), dtype=bool)
+-            )
+-            if load_context is None
+-            else load_context["periodic"]
+-        )
+-        diff = joint_difference(q_active_cur, q_ref, periodic)
+-
+-    z = -ns_gain * diff
+-    posture = 0.5 * float(np.dot(ns_gain * (diff ** 2), movable_mask))
+-    cost = posture
+-    parts = {
+-        "posture": posture,
+-        "joint_limit": 0.0,
+-        "absolute_load": 0.0,
+-        "excess_load": 0.0,
+-        "relative_load": 0.0,
+-        "com": 0.0,
+-    }
+-
+-    # 1. 单侧安全裕度排斥项
+-    margin = max(float(SAFE_MARGIN), 0.02)
+-    if limit_gain > 0.0:
+-        b_low = np.minimum(q_ref, lower + margin)
+-        b_high = np.maximum(q_ref, upper - margin)
+-        under = np.maximum(0.0, b_low - q_active_cur) / margin
+-        over = np.maximum(0.0, q_active_cur - b_high) / margin
+-        z += limit_gain * (under - over) / margin
+-        c_lim = (
+-            0.5
+-            * limit_gain
+-            * float(np.dot(under ** 2 + over ** 2, movable_mask))
+-        )
+-        cost += c_lim
+-        parts["joint_limit"] = c_lim
+-
+-    # 2. 静态重力矩与质心目标
++    objective = _SecondaryObjective(
++        pin_model,
++        pin_data,
++        pin_maps,
++        q_ref,
++        lower,
++        upper,
++        ns_gain,
++        active_v_indices,
++        effort_limits,
++        movable_mask,
++        include_waist,
++        tau_g_ref,
++        com_xy_ref,
++        gravity_gain,
++        com_gain,
++        limit_gain,
++        load_context=load_context,
++        relative_gravity_gain=relative_gravity_gain,
++        posture_use_equivalent_branch=posture_use_equivalent_branch,
++    )
++    q_active_cur = np.asarray(q_active_cur, dtype=float)
+     if load_context is not None:
+-        physics = load_physics(
+-            pin_model,
+-            pin_data,
+-            pin_maps,
+-            q_active_cur,
+-            load_context,
+-            derivatives,
+-        )
+-        c_load, g_load, load_parts = load_context["policy"].cost_gradient(
+-            physics["tau"],
+-            physics["d_tau_d_active"],
+-            load_context["guard_names"],
+-            tau_reference=tau_g_ref,
+-        )
+-        if derivatives:
+-            z -= g_load
+-        cost += c_load
+-        # peak_ratio / load_ok 随代价一并返回，调用方择优时无需再算一次重力矩
+-        parts.update(
+-            absolute_load=load_parts["absolute"],
+-            excess_load=load_parts["excess"],
+-            relative_load=load_parts["relative"],
+-            peak_ratio=physics["peak_ratio"],
+-            load_ok=physics["load_ok"],
+-        )
+-        if include_waist and com_gain > 0.0 and com_xy_ref is not None:
+-            ref_com = finite_vector(com_xy_ref, 3, "reference COM")
+-            ghat = np.asarray(pin_model.gravity.linear, dtype=float)
+-            ghat = ghat / max(float(np.linalg.norm(ghat)), 1e-30)
+-            P = np.eye(3) - np.outer(ghat, ghat)
+-            dcom = P @ (physics["com"] - ref_com)
+-            if derivatives:
+-                z -= com_gain * (physics["Jcom"].T @ dcom)
+-            parts["com"] = 0.5 * com_gain * float(dcom @ dcom)
+-            cost += parts["com"]
+-    else:
+-        valid_eff = (
+-            effort_limits is not None
+-            and np.all(np.isfinite(effort_limits))
+-            and np.all(effort_limits > 0.0)
+-        )
+-        if valid_eff and (gravity_gain > 0.0 or relative_gravity_gain > 0.0):
+-            tau_full = np.array(
+-                pin.computeGeneralizedGravity(pin_model, pin_data, q_full),
+-                copy=True,
+-            )
+-            tau_cur = tau_full[active_v_indices]
+-            inv_eff_sq = 1.0 / (effort_limits ** 2)
+-            n_act = max(1, len(active_v_indices))
+-
+-            dcost_dtau = np.zeros_like(tau_cur)
+-            if gravity_gain > 0.0:
+-                abs_c = (
+-                    0.5
+-                    * gravity_gain
+-                    * float(np.sum((tau_cur ** 2) * inv_eff_sq))
+-                    / n_act
+-                )
+-                cost += abs_c
+-                parts["absolute_load"] = abs_c
+-                dcost_dtau += gravity_gain * (tau_cur * inv_eff_sq) / n_act
+-
+-            if relative_gravity_gain > 0.0 and tau_g_ref is not None:
+-                tau_diff = tau_cur - tau_g_ref
+-                rel_c = (
+-                    0.5
+-                    * relative_gravity_gain
+-                    * float(np.sum((tau_diff ** 2) * inv_eff_sq))
+-                    / n_act
+-                )
+-                cost += rel_c
+-                parts["relative_load"] = rel_c
+-                dcost_dtau += (
+-                    relative_gravity_gain * (tau_diff * inv_eff_sq) / n_act
+-                )
+-
+-            if derivatives:
+-                dtau_dq_full = np.asarray(
+-                    pin.computeGeneralizedGravityDerivatives(
+-                        pin_model, pin_data, q_full
+-                    )
+-                ).reshape(pin_model.nv, pin_model.nv)
+-                dtau_act = dtau_dq_full[
+-                    np.ix_(active_v_indices, active_v_indices)
+-                ]
+-                z -= dtau_act.T @ dcost_dtau
+-
+-        if include_waist and com_gain > 0.0 and com_xy_ref is not None:
+-            com_cur, J_com = model_com_with_jacobian(
+-                pin_model,
+-                pin_data,
+-                q_full,
+-                active_v=active_v_indices,
+-                derivatives=derivatives,
+-            )
+-            ref_com = finite_vector(com_xy_ref, 3, "reference COM")
+-            ghat = np.asarray(pin_model.gravity.linear, dtype=float)
+-            ghat = ghat / max(float(np.linalg.norm(ghat)), 1e-30)
+-            P = np.eye(3) - np.outer(ghat, ghat)
+-            dcom = P @ (com_cur - ref_com)
+-            parts["com"] = 0.5 * com_gain * float(dcom @ dcom)
+-            cost += parts["com"]
+-            if derivatives:
+-                z -= com_gain * (J_com.T @ dcom)
+-
+-    if not np.isfinite(cost) or not np.all(np.isfinite(z)):
+-        raise ValueError("non-finite secondary objective")
+-    if components is not None:
+-        components.update(parts)
+-    return z * movable_mask, cost
++        q_full = active_q_to_pinocchio_q(pin_model, pin_maps, q_active_cur)
++    return objective(q_active_cur, q_full, derivatives, components, need_z=True)
+ 
+ 
+ def _metric_svd_step(J, error, z, D, damping, rank_rtol=1e-9):
+@@ -990,11 +1210,36 @@
+     return primary, secondary
+ 
+ 
+-def _solve_sns_clamped_step(
++def _chol_factor(A):
++    """上三角 Cholesky 分解 A = U^T U（LAPACK dpotrf，与 cho_factor(lower=False) 同一例程）。
++
++    非正定时抛 LinAlgError，由调用方转入 SVD 回退。v7 直接调用 LAPACK，绕过 scipy 封装
++    （约 25 µs/次）；scipy 1.18 的 cho_factor/cho_solve 与直接调用相差 1e-12 量级、不逐位一致。
++    """
++    c, info = _lapack.dpotrf(A, lower=0, clean=0, overwrite_a=0)
++    if info > 0:
++        raise np.linalg.LinAlgError(
++            f"{info}-th leading minor not positive definite"
++        )
++    if info < 0:
++        raise ValueError(f"illegal value in {-info}-th argument of internal potrf")
++    return c
++
++
++def _chol_solve(c, b):
++    """用 _chol_factor 的结果解 A x = b（LAPACK dpotrs）。"""
++    x, info = _lapack.dpotrs(c, b, lower=0, overwrite_b=0)
++    if info != 0:
++        raise ValueError(f"illegal value in {-info}-th argument of internal potrs")
++    return x
++
++
++def _sns_clamped_core(
+     J_active,
+     err,
+     z_grad,
+     null_weight,
++    d_inv,
+     W_inv,
+     movable_mask,
+     q_active_cur,
+@@ -1002,26 +1247,16 @@
+     eff_upper,
+     damping,
+     max_step,
+-    *,
+-    return_info=False,
+ ):
+-    """主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
++    """_solve_sns_clamped_step 的实现，返回 (dq_total, dq_null, clamped_converged)。
+ 
+-    记 D = W_inv（逆度量，关节权重越大 D 越小、该关节越“贵”），A = J_f D_f J_f^T + λI：
+-      任务步   dq_task = D_f J_f^T A^-1 e_rem
+-      零空间步 dq_null = w · (D_f z - D_f J_f^T A^-1 J_f D_f z)
+-    其中 e_rem = e - J dq_clamped 是扣除已钳制关节位移后的剩余误差，z = -∇H 为次任务负梯度。
+-    零空间投影 D - D J^T A^-1 J D 对称半正定，所以 z^T dq_null >= 0，次任务一定是下降方向
+-    （与 SVD 回退 _metric_svd_step 的 S Z Z^T S z 一致）。
+-
+-    循环：每轮把越界最严重的一个自由关节钳制到边界（位移 = 边界 - 当前值，此后不再缩放），
+-    其余自由关节按剩余信赖域半径 sqrt(max_step^2 - ||dq_clamped||^2) 缩放；
+-    被钳制关节的越界距离严格小于其本轮位移，故 ||dq_clamped|| < max_step 恒成立。
+-    至多 n_free + 1 轮；返回的 clamped_converged=False 表示轮数用尽仍有越界（调用方记诊断）。
++    d_inv 不为 None 时表示对角逆度量的对角元（单种子迭代的热路径，向量运算）；
++    否则使用一般矩阵 W_inv。对角情形下 J D J^T == (J * d) J^T、D v == d * v 逐位一致。
+     """
+     if damping < 0.0 or max_step <= 0.0:
+         raise ValueError("invalid damping/max_step")
+ 
++    diagonal = d_inv is not None
+     n_active = len(q_active_cur)
+     free_mask = np.asarray(movable_mask, dtype=bool).copy()
+     dq_clamped = np.zeros(n_active, dtype=float)
+@@ -1052,29 +1287,35 @@
+ 
+         err_rem = err - J_active @ dq_clamped
+         J_free = J_active[:, free_mask]
+-        W_inv_free = W_inv[np.ix_(free_mask, free_mask)]
+-
+-        A = J_free @ W_inv_free @ J_free.T
++        if diagonal:
++            d_free = d_inv[free_mask]
++            A = (J_free * d_free) @ J_free.T
++        else:
++            W_inv_free = W_inv[np.ix_(free_mask, free_mask)]
++            A = J_free @ W_inv_free @ J_free.T
+         A.flat[:: task_dim + 1] += eff_damping
+ 
+         try:
+-            chol_fac = cho_factor(A, check_finite=False)
+-            rhs = cho_solve(chol_fac, err_rem, check_finite=False)
+-            dq_task_free = W_inv_free @ (J_free.T @ rhs)
++            chol_fac = _chol_factor(A)
++            rhs = _chol_solve(chol_fac, err_rem)
++            JT_rhs = J_free.T @ rhs
++            dq_task_free = d_free * JT_rhs if diagonal else W_inv_free @ JT_rhs
+             dq_null_free = np.zeros_like(dq_task_free)
+             if z_grad is not None and null_weight > 0.0:
+                 # 度量一致的零空间下降步：w (D z - D J^T A^-1 J D z)
+-                Dz = W_inv_free @ z_grad[free_mask]
+-                invA_JDz = cho_solve(chol_fac, J_free @ Dz, check_finite=False)
++                z_free = z_grad[free_mask]
++                Dz = d_free * z_free if diagonal else W_inv_free @ z_free
++                invA_JDz = _chol_solve(chol_fac, J_free @ Dz)
++                JT_inv = J_free.T @ invA_JDz
+                 dq_null_free = null_weight * (
+-                    Dz - W_inv_free @ (J_free.T @ invA_JDz)
++                    Dz - (d_free * JT_inv if diagonal else W_inv_free @ JT_inv)
+                 )
+         except (np.linalg.LinAlgError, ValueError):
+             dq_task_free, sec_free = _metric_svd_step(
+                 J_free,
+                 err_rem,
+                 None if z_grad is None else z_grad[free_mask],
+-                W_inv_free,
++                np.diag(d_free) if diagonal else W_inv_free,
+                 eff_damping,
+             )
+             dq_null_free = null_weight * sec_free
+@@ -1104,7 +1345,7 @@
+         )
+         viol_amt = np.maximum(under_amt, over_amt)
+ 
+-        if np.max(viol_amt) <= 1e-12:
++        if viol_amt.max() <= 1e-12:
+             clamped_converged = True
+             break
+ 
+@@ -1121,6 +1362,59 @@
+             )
+         free_mask[worst_idx] = False
+ 
++    return dq_total, dq_null_out, clamped_converged
++
++
++def _solve_sns_clamped_step(
++    J_active,
++    err,
++    z_grad,
++    null_weight,
++    W_inv,
++    movable_mask,
++    q_active_cur,
++    eff_lower,
++    eff_upper,
++    damping,
++    max_step,
++    *,
++    return_info=False,
++):
++    """主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
++
++    记 D = W_inv（逆度量，关节权重越大 D 越小、该关节越“贵”），A = J_f D_f J_f^T + λI：
++      任务步   dq_task = D_f J_f^T A^-1 e_rem
++      零空间步 dq_null = w · (D_f z - D_f J_f^T A^-1 J_f D_f z)
++    其中 e_rem = e - J dq_clamped 是扣除已钳制关节位移后的剩余误差，z = -∇H 为次任务负梯度。
++    零空间投影 D - D J^T A^-1 J D 对称半正定，所以 z^T dq_null >= 0，次任务一定是下降方向
++    （与 SVD 回退 _metric_svd_step 的 S Z Z^T S z 一致）。
++
++    循环：每轮把越界最严重的一个自由关节钳制到边界（位移 = 边界 - 当前值，此后不再缩放），
++    其余自由关节按剩余信赖域半径 sqrt(max_step^2 - ||dq_clamped||^2) 缩放；
++    被钳制关节的越界距离严格小于其本轮位移，故 ||dq_clamped|| < max_step 恒成立。
++    至多 n_free + 1 轮；返回的 clamped_converged=False 表示轮数用尽仍有越界（调用方记诊断）。
++    v7：W_inv 为对角阵时自动走向量化实现（与矩阵实现逐位一致），非对角阵仍按一般矩阵计算。
++    """
++    W = np.asarray(W_inv, dtype=float)
++    d_inv = None
++    if W.ndim == 2 and W.shape[0] == W.shape[1]:
++        diagonal = np.diagonal(W)
++        if np.array_equal(W, np.diag(diagonal)):
++            d_inv = diagonal.copy()
++    dq_total, dq_null_out, clamped_converged = _sns_clamped_core(
++        J_active,
++        err,
++        z_grad,
++        null_weight,
++        d_inv,
++        None if d_inv is not None else W,
++        movable_mask,
++        q_active_cur,
++        eff_lower,
++        eff_upper,
++        damping,
++        max_step,
++    )
+     if return_info:
+         return dq_total, dq_null_out, clamped_converged
+     return dq_total, dq_null_out
+@@ -1147,98 +1441,156 @@
+     return t / np.linalg.norm(t)
+ 
+ 
+-def dls_task_terms(
++def _make_task_terms(
+     model,
+     data,
+     pin_maps,
+     fid,
+-    q_active,
+     target,
+     mode,
+     axis,
+     cone,
+     characteristic_length=0.5,
+-    jacobian=True,
+ ):
+-    """计算主任务残差与解析雅可比（含一致的 tool_dir 180° 对径点方向导数 -skew(a) @ J[3:]）。"""
+-    q_full = active_q_to_pinocchio_q(model, pin_maps, q_active)
+-    pin.forwardKinematics(model, data, q_full)
+-    pin.updateFramePlacements(model, data)
+-    current = data.oMf[fid].copy()
+-    pos_error = target[:3, 3] - np.asarray(current.translation)
+-    pos = float(np.linalg.norm(pos_error))
+-    v_idx = pin_maps["active_v_indices"]
+-
+-    if jacobian:
+-        J = np.asarray(
+-            pin.computeFrameJacobian(
+-                model,
+-                data,
+-                q_full,
+-                fid,
+-                pin.LOCAL if mode == "full" else pin.LOCAL_WORLD_ALIGNED,
+-            )
+-        ).reshape(6, model.nv)[:, v_idx]
+-    else:
+-        J = np.zeros((6, len(v_idx)), dtype=float)
++    """构造主任务求值器 terms(q_active, jacobian=True, all_frames=False, need_A=None)。
+ 
+-    antipodal = False
++    与 dls_task_terms 是同一份实现（公共函数即“构造 + 求值一次”）。每个种子构造一次时，
++    目标 SE3 / 目标工具轴 b = R_target @ axis / 索引 / q 模板只算一次；求值时：
++      - all_frames=False 只更新末端单帧位姿（迭代内其它帧不被读取），True 与 v6 一样更新全部帧；
++      - need_A=False（默认随 jacobian）不构造任务雅可比 A，返回的 "J" 为 None。
++    叉积、截断、拼接、范数改为与 numpy 原实现逐位一致的等价写法，以减少 Python 调用开销。
++    """
++    to_q = _make_q_builder(model, pin_maps)
++    v_idx = pin_maps["active_v_indices"]
++    n_v = len(v_idx)
++    nv = model.nv
++    cl = characteristic_length
++    target_p = np.array(target[:3, 3], dtype=float)
+     if mode == "full":
+-        delta = current.inverse() * pin.SE3(target[:3, :3], target[:3, 3])
+-        e = np.array(pin.log6(delta).vector, copy=True)
+-        angle = float(np.linalg.norm(e[3:]))
+-        A = (
+-            np.array(pin.Jlog6(delta.inverse()) @ J, copy=True)
+-            if jacobian
+-            else J.copy()
+-        )
+-        e[:3] /= characteristic_length
+-        A[:3] /= characteristic_length
+-        violation = angle
+-    else:
+-        a = np.asarray(current.rotation) @ axis
++        target_se3 = pin.SE3(target[:3, :3], target[:3, 3])
++        ref_frame = pin.LOCAL
++        b = None
++    elif mode in ("tool_dir", "tool_cone"):
++        target_se3 = None
++        ref_frame = pin.LOCAL_WORLD_ALIGNED
+         b = target[:3, :3] @ axis
+-        cross = np.cross(a, b)
+-        sine = float(np.linalg.norm(cross))
+-        cosine = float(np.clip(a @ b, -1.0, 1.0))
+-        angle = math.atan2(sine, cosine)
+-
+-        if mode == "tool_dir":
+-            edir = b - a
+-            Jdir = -skew(a) @ J[3:]          # 行：工具轴方向 a 的变化率 da/dq
+-            if cosine < -1.0 + 1e-8:
+-                tangent = _antipodal_tangent(a, Jdir if jacobian else None)
+-                edir = angle * tangent
+-                antipodal = True
+-            e = np.r_[pos_error / characteristic_length, edir]
+-            A = np.vstack([J[:3] / characteristic_length, Jdir])
++        b0, b1, b2 = b.tolist()
++    else:
++        raise ValueError("invalid orientation mode")
++
++    def terms(q_active, jacobian=True, all_frames=False, need_A=None):
++        build_A = jacobian if need_A is None else bool(need_A)
++        q_full = to_q(q_active)
++        pin.forwardKinematics(model, data, q_full)
++        if all_frames:
++            pin.updateFramePlacements(model, data)
++        else:
++            pin.updateFramePlacement(model, data, fid)
++        current = data.oMf[fid].copy()
++        pos_error = target_p - np.asarray(current.translation)
++        pos = _vec_norm(pos_error)
++
++        if jacobian:
++            J = np.asarray(
++                pin.computeFrameJacobian(model, data, q_full, fid, ref_frame)
++            ).reshape(6, nv)[:, v_idx]
++        elif build_A:
++            J = np.zeros((6, n_v), dtype=float)
++        else:
++            J = None
++
++        antipodal = False
++        A = None
++        if mode == "full":
++            delta = current.inverse() * target_se3
++            e = np.array(pin.log6(delta).vector, copy=True)
++            angle = _vec_norm(e[3:])
++            if build_A:
++                A = (
++                    np.array(pin.Jlog6(delta.inverse()) @ J, copy=True)
++                    if jacobian
++                    else J.copy()
++                )
++                A[:3] /= cl
++            e[:3] /= cl
+             violation = angle
+-        elif mode == "tool_cone":
+-            violation = max(0.0, angle - cone)
+-            row = np.zeros(len(v_idx), dtype=float)
+-            if violation > 0.0:
+-                if sine > 1e-9:
+-                    tangent = cross / sine       # 把 a 转向 b 的转轴
+-                else:
+-                    # 对径：任意垂直于 a 的转轴都能减小夹角，取雅可比上最容易转动的那一个
+-                    tangent = _antipodal_tangent(a, J[3:] if jacobian else None)
+-                    antipodal = True
+-                row = tangent @ J[3:]
+-            e = np.r_[pos_error / characteristic_length, violation]
+-            A = np.vstack([J[:3] / characteristic_length, row])
+         else:
+-            raise ValueError("invalid orientation mode")
++            a = np.asarray(current.rotation) @ axis
++            a0, a1, a2 = a.tolist()
++            # 与 np.cross 同序的标量公式（逐位一致）
++            cross = np.array(
++                (a1 * b2 - a2 * b1, a2 * b0 - a0 * b2, a0 * b1 - a1 * b0)
++            )
++            sine = _vec_norm(cross)
++            cosine = min(max(float(a @ b), -1.0), 1.0)
++            angle = math.atan2(sine, cosine)
++
++            if mode == "tool_dir":
++                edir = b - a
++                Jdir = -skew(a) @ J[3:] if build_A else None  # 行：工具轴方向 a 的变化率 da/dq
++                if cosine < -1.0 + 1e-8:
++                    tangent = _antipodal_tangent(a, Jdir if jacobian else None)
++                    edir = angle * tangent
++                    antipodal = True
++                e = np.concatenate((pos_error / cl, edir))
++                if build_A:
++                    A = np.vstack([J[:3] / cl, Jdir])
++                violation = angle
++            else:
++                violation = max(0.0, angle - cone)
++                row = np.zeros(n_v, dtype=float) if build_A else None
++                if violation > 0.0:
++                    if sine > 1e-9:
++                        tangent = cross / sine       # 把 a 转向 b 的转轴
++                    else:
++                        # 对径：任意垂直于 a 的转轴都能减小夹角，取雅可比上最容易转动的那一个
++                        tangent = (
++                            _antipodal_tangent(a, J[3:] if jacobian else None)
++                            if build_A
++                            else None
++                        )
++                        antipodal = True
++                    if build_A:
++                        row = tangent @ J[3:]
++                e = np.concatenate((pos_error / cl, (violation,)))
++                if build_A:
++                    A = np.vstack([J[:3] / cl, row])
+ 
+-    return {
+-        "error": e,
+-        "J": A,
+-        "pos_err": pos,
+-        "ori_err": angle,
+-        "ori_violation": violation,
+-        "merit": 0.5 * float(e @ e),
+-        "antipodal": antipodal,
+-        "q_full": q_full,
+-    }
++        return {
++            "error": e,
++            "J": A,
++            "pos_err": pos,
++            "ori_err": angle,
++            "ori_violation": violation,
++            "merit": 0.5 * float(e @ e),
++            "antipodal": antipodal,
++            "q_full": q_full,
++        }
++
++    return terms
++
++
++def dls_task_terms(
++    model,
++    data,
++    pin_maps,
++    fid,
++    q_active,
++    target,
++    mode,
++    axis,
++    cone,
++    characteristic_length=0.5,
++    jacobian=True,
++):
++    """计算主任务残差与解析雅可比（含一致的 tool_dir 180° 对径点方向导数 -skew(a) @ J[3:]）。
++
++    与 v6 行为一致：更新全部帧位姿；jacobian=False 时 "J" 为按零雅可比构造的同形状矩阵。
++    """
++    terms = _make_task_terms(
++        model, data, pin_maps, fid, target, mode, axis, cone, characteristic_length
++    )
++    return terms(q_active, jacobian=jacobian, all_frames=True, need_A=True)
+ 
+ 
+ def pinocchio_ik_one_seed(
+@@ -1281,13 +1633,15 @@
+     relative_gravity_gain=None,
+     posture_use_equivalent_branch=False,
+ ):
+-    """单种子 DLS IK（merged-v6）：主任务为末端位姿，零空间次任务为回中/限位裕度/负荷/质心。
++    """单种子 DLS IK（merged-v7）：主任务为末端位姿，零空间次任务为回中/限位裕度/负荷/质心。
+ 
+     返回 (q, diag)。q 优先取“位姿达标点”中按负荷峰值容差带 + 次任务代价择优的那个；
+     没有达标点时返回主任务误差最小的迭代点（diag["converged"] = False）。
+     迭代全程满足有效限位（URDF 限位 ∩ virtual_half_windows），由 SNS 钳制 + 边界吸附保证。
+     diag["stop_reason"]：SETTLED / SETTLE_LIMIT / SMALL_STEP / STALLED_NO_PROGRESS /
+     LINE_SEARCH_STALLED / TIME_BUDGET / ITERATION_LIMIT。
++    v7：迭代内使用每种子预计算的主任务/次任务求值器（_make_task_terms / _SecondaryObjective）
++    与对角逆度量向量，运算与 v6 逐位一致；Cholesky 走 LAPACK 直接调用。
+     """
+     mode = validate_orientation_mode(orientation_mode)
+     target = validate_transform(T_target)
+@@ -1431,15 +1785,11 @@
+     def release_fraction(distance):
+         if not release_enabled:
+             return 0.0
+-        t_val = np.clip(
+-            (distance - WAIST_RELEASE_START * waist_max_reach)
+-            / max(
+-                (WAIST_RELEASE_END - WAIST_RELEASE_START) * waist_max_reach,
+-                1e-6,
+-            ),
+-            0.0,
+-            1.0,
++        t_val = (distance - WAIST_RELEASE_START * waist_max_reach) / max(
++            (WAIST_RELEASE_END - WAIST_RELEASE_START) * waist_max_reach,
++            1e-6,
+         )
++        t_val = min(max(t_val, 0.0), 1.0)   # 标量截断，与 np.clip 结果相同
+         return float(t_val * t_val * (3.0 - 2.0 * t_val))
+ 
+     ref_release = (
+@@ -1466,61 +1816,57 @@
+ 
+     best_q, best_merit = q.copy(), math.inf
+     settle = 0
+-    periodic_unbounded = pin_maps.get(
+-        "active_periodic", pin_maps["active_continuous"]
++    periodic_unbounded = np.asarray(
++        pin_maps.get("active_periodic", pin_maps["active_continuous"]), dtype=bool
+     )
+-    D_base = np.diag(1.0 / weights)
++    periodic_any = bool(np.any(periodic_unbounded))
++    # 逆度量 D 为对角阵：只保存对角元向量（v6 为 np.diag(1.0 / weights)，SNS 结果逐位一致）
++    d_base = 1.0 / weights
+     waist_idx = np.nonzero(waist)[0]
+-    has_waist_dof = bool(np.any(waist & movable))
++    waist_movable = waist & movable
++    has_waist_dof = bool(np.any(waist_movable))
++    target_p = np.array(target[:3, 3], dtype=float)
+ 
+-    def objective(values, q_full_val, derivatives, parts=None):
+-        return _compute_nullspace_gradient_and_cost(
+-            pin_model,
+-            pin_data,
+-            q_full_val,
+-            values,
+-            ref,
+-            lo,
+-            hi,
+-            ns_gain,
+-            active_v_indices,
+-            pin_maps["effort_limits"],
+-            movable,
+-            include_waist,
+-            ref_tau,
+-            ref_com,
+-            grav_gain,
+-            com_gain,
+-            lim_gain,
+-            load_context=context,
+-            pin_maps=pin_maps,
+-            derivatives=derivatives,
+-            components=parts,
+-            relative_gravity_gain=rel_grav_gain,
+-            posture_use_equivalent_branch=posture_use_equivalent_branch,
+-        )
+-
+-    def terms(values, jac=True):
+-        return dls_task_terms(
+-            pin_model,
+-            pin_data,
+-            pin_maps,
+-            ee_frame_id,
+-            values,
+-            target,
+-            mode,
+-            axis,
+-            cone,
+-            characteristic_length,
+-            jac,
+-        )
++    # 每种子构造一次的求值器（与 dls_task_terms / _compute_nullspace_gradient_and_cost 同一实现）
++    objective = _SecondaryObjective(
++        pin_model,
++        pin_data,
++        pin_maps,
++        ref,
++        lo,
++        hi,
++        ns_gain,
++        active_v_indices,
++        pin_maps["effort_limits"],
++        movable,
++        include_waist,
++        ref_tau,
++        ref_com,
++        grav_gain,
++        com_gain,
++        lim_gain,
++        load_context=context,
++        relative_gravity_gain=rel_grav_gain,
++        posture_use_equivalent_branch=posture_use_equivalent_branch,
++    )
++    terms = _make_task_terms(
++        pin_model,
++        pin_data,
++        pin_maps,
++        ee_frame_id,
++        target,
++        mode,
++        axis,
++        cone,
++        characteristic_length,
++    )
+ 
+     def is_pose(t_dict):
+         return t_dict["pos_err"] <= pos_tol and t_dict["ori_violation"] <= ori_tol
+ 
+     def snap(trial):
+         """试探点只允许浮点舍入级越界（<= BOUND_SNAP_TOL），吸附回边界；真实越界返回 None。"""
+-        viol = max(float(np.max(lo - trial)), float(np.max(trial - hi)))
++        viol = max(float((lo - trial).max()), float((trial - hi).max()))
+         if viol <= 0.0:
+             return trial
+         if viol > BOUND_SNAP_TOL:
+@@ -1576,7 +1922,7 @@
+             diag["stop_reason"] = "TIME_BUDGET"
+             break
+ 
+-        t = terms(q, jac=True)
++        t = terms(q, jacobian=True)
+         shoulder_cur = (
+             np.array(pin_data.oMi[shoulder_id].translation, copy=True)
+             if release_enabled
+@@ -1629,28 +1975,26 @@
+                     break
+                 stall_ref, stall_it = err_norm, it
+ 
+-        # 逆度量 D：手臂 = 1；腰部在近距离目标时“贵”(1/near_weight)，远目标或回程时逐步释放
+-        D = D_base.copy()
++        # 逆度量 D（对角元向量）：手臂 = 1；腰部在近距离目标时“贵”(1/near_weight)，远目标或回程时逐步释放
++        d_inv = d_base.copy()
+         if has_waist_dof:
+             alpha = 1.0 if waist_load_release else 0.0
+             if release_enabled and shoulder_cur is not None:
+-                current_distance = float(
+-                    np.linalg.norm(target[:3, 3] - shoulder_cur)
+-                )
+-                waist_diff = joint_difference(q, ref, periodic_unbounded)[
+-                    waist & movable
+-                ]
+-                ret = float(
+-                    np.linalg.norm(waist_diff)
+-                    / max(WAIST_RETURN_RELEASE_RAD, 1e-6)
+-                )
++                current_distance = _vec_norm(target_p - shoulder_cur)
++                waist_diff = q - ref
++                if periodic_any:
++                    waist_diff[periodic_unbounded] = (
++                        waist_diff[periodic_unbounded] + np.pi
++                    ) % (2.0 * np.pi) - np.pi
++                waist_diff = waist_diff[waist_movable]
++                ret = _vec_norm(waist_diff) / max(WAIST_RETURN_RELEASE_RAD, 1e-6)
+                 alpha = max(
+                     alpha,
+                     ref_release,
+                     release_fraction(current_distance),
+-                    float(np.clip(ret, 0.0, 1.0)),
++                    min(max(ret, 0.0), 1.0),
+                 )
+-            D[waist_idx, waist_idx] = (
++            d_inv[waist_idx] = (
+                 1.0 - alpha
+             ) / near_weight + alpha / far_weight
+ 
+@@ -1658,48 +2002,51 @@
+         null_weight = (1.5 if pose_ok else 1.0) / (
+             1.0
+             + (
+-                float(np.linalg.norm(t["error"]))
++                _vec_norm(t["error"])
+                 / max(NULLSPACE_ERR_SCALE, 1e-6)
+             )
+             ** 2
+         )
+ 
+-        dq, dq_null, clamped_ok = _solve_sns_clamped_step(
++        dq, dq_null, clamped_ok = _sns_clamped_core(
+             t["J"],
+             t["error"],
+             z,
+             null_weight,
+-            D,
++            d_inv,
++            None,
+             movable,
+             q,
+             lo,
+             hi,
+             damping,
+             max_step,
+-            return_info=True,
+         )
+         diag["sns_clamp_incomplete"] |= not clamped_ok
++        dq_null_norm = _vec_norm(dq_null)
+ 
+         # 末端已达标且零空间步长收敛：最后试一次整步，仍达标且择优通过才采纳
+-        if pose_ok and float(np.linalg.norm(dq_null)) < POSTURE_SETTLE_TOL:
++        if pose_ok and dq_null_norm < POSTURE_SETTLE_TOL:
+             trial = snap(q + dq)
+             if trial is not None:
+-                tt = terms(trial, jac=False)
++                tt = terms(trial, jacobian=False)
+                 if is_pose(tt):
+                     tparts = {}
+-                    trial_cost = objective(trial, tt["q_full"], False, tparts)[1]
++                    trial_cost = objective(
++                        trial, tt["q_full"], False, tparts, need_z=False
++                    )[1]
+                     if offer_pose(trial, trial_cost, tparts):
+                         q = trial
+             diag["stop_reason"] = "SETTLED"
+             break
+ 
+-        if float(np.linalg.norm(dq)) < 1e-10:
++        if _vec_norm(dq) < 1e-10:
+             diag["stop_reason"] = "SMALL_STEP"
+             break
+ 
+         # 回溯线搜索（严格单调）：先试“主任务 + 零空间”合成步，失败再试纯主任务步（按需才求解）
+         directions = [dq]
+-        need_pure = (not pose_ok) and float(np.linalg.norm(dq_null)) > 1e-12
++        need_pure = (not pose_ok) and dq_null_norm > 1e-12
+         accepted = False
+         d_idx = 0
+         while d_idx < len(directions) and not accepted and not timed_out:
+@@ -1711,12 +2058,12 @@
+                 trial = snap(q + (0.5 ** backtrack) * direction)
+                 if trial is None:
+                     continue
+-                tt = terms(trial, jac=False)
++                tt = terms(trial, jacobian=False)
+                 if pose_ok:
+                     # 姿态整理阶段：必须保持位姿达标，且次任务代价严格下降
+                     progress = (
+                         is_pose(tt)
+-                        and objective(trial, tt["q_full"], False)[1]
++                        and objective(trial, tt["q_full"], False, need_z=False)[1]
+                         < cost - 1e-13
+                     )
+                 elif t["antipodal"]:
+@@ -1738,12 +2085,13 @@
+                     break
+             d_idx += 1
+             if d_idx == 1 and need_pure and not accepted and not timed_out:
+-                pure_dq, _ = _solve_sns_clamped_step(
++                pure_dq, _, _ = _sns_clamped_core(
+                     t["J"],
+                     t["error"],
+                     None,
+                     0.0,
+-                    D,
++                    d_inv,
++                    None,
+                     movable,
+                     q,
+                     lo,
+@@ -1763,10 +2111,12 @@
+                 diag["stop_reason"] = "LINE_SEARCH_STALLED"
+             break
+ 
+-    last = terms(q, jac=False)
++    last = terms(q, jacobian=False)
+     if is_pose(last):
+         lparts = {}
+-        offer_pose(q, objective(q, last["q_full"], False, lparts)[1], lparts)
++        offer_pose(
++            q, objective(q, last["q_full"], False, lparts, need_z=False)[1], lparts
++        )
+     elif last["merit"] < best_merit:
+         best_q = q.copy()
+ 
+@@ -1780,9 +2130,10 @@
+         result, seed, lo, hi, multi_turn_mask=multi_turn
+     )
+ 
+-    final = terms(result, jac=False)
++    # 最终评估与 v6 一样更新全部帧位姿（调用方之后读取 pin_data 时状态与 v6 相同）
++    final = terms(result, jacobian=False, all_frames=True)
+     parts = {}
+-    objective(result, final["q_full"], False, parts)
++    objective(result, final["q_full"], False, parts, need_z=False)
+     diag.update(
+         converged=is_pose(final),
+         final_pos_err=final["pos_err"],
+@@ -1798,17 +2149,21 @@
+     return result.copy(), diag
+ 
+ 
+-def make_scatter_seeds(q_prev, q_ready, lower, upper, rng):
+-    """生成种子序列：q_prev（就近、连续性最好）-> q_ready（标准姿态）-> 两者附近由小到大的扰动 -> 限位中点。
++def make_scatter_seeds(q_prev, q_ready, lower, upper, rng, *, max_count=None):
++    """生成种子序列：q_prev（就近、连续性最好）-> q_ready（标准姿态）-> 两者附近的扰动 -> 限位中点。
+ 
+     q_prev 放在第一位：从当前构型出发的 DLS 天然收敛到最近的解，最不容易“绕大圈”；
+-    q_ready 作为第二个基准种子提供“姿态合理”的另一族解。对无界 continuous 关节不产生 NaN 中点。
++    q_ready 作为第二个基准种子提供“姿态合理”的另一族解。扰动按 (轮次 -> 尺度由大到小 ->
++    q_prev / q_ready) 交错排列，保证前 max_seeds 个种子足够分散。对无界 continuous 关节不产生 NaN 中点。
++
++    max_count（v7）：调用方最多只用前 max_count 个种子时传入。仍生成全部原始种子（随机数消耗与
++    顺序不变），但只对足以凑够 max_count 个不重复种子的前缀去重（unique_seed_list 是保序、
++    保留首次出现的逐个去重，前缀去重结果 == 全量去重结果的前 max_count 个）；None 时与 v6 相同。
+     """
+     seeds = [
+         clip_to_bounds(q_prev, lower, upper),
+         clip_to_bounds(q_ready, lower, upper),
+     ]
+-    # 交错排列 (轮次 -> 尺度从大到小 -> q_prev / q_ready)，保证前 max_seeds 个种子足够分散
+     for _ in range(max(1, N_NOISE_PER_BASE // len(NOISE_SCALES))):
+         for scale in NOISE_SCALES:
+             for base in (q_prev, q_ready):
+@@ -1823,7 +2178,19 @@
+     finite = np.isfinite(lower) & np.isfinite(upper)
+     midpoint[finite] = 0.5 * (lower[finite] + upper[finite])
+     seeds.append(midpoint)
+-    return unique_seed_list(seeds)
++    if max_count is None:
++        return unique_seed_list(seeds)
++
++    want = int(max_count)
++    if want < 1:
++        raise ValueError("max_count must be >= 1")
++    n = min(len(seeds), want)
++    while True:
++        result = unique_seed_list(seeds[:n])
++        if len(result) >= want or n >= len(seeds):
++            return result[:want]
++        # 前缀里有重复：按缺口扩大前缀（至多扩到全部种子）
++        n = min(len(seeds), n + (want - len(result)))
+ 
+ 
+ def configure_model_metadata(
+@@ -2029,7 +2396,12 @@
+         excess_weight=float(config.get("load_excess_gain", 0.50)),
+         relative_weight=float(config.get("load_relative_gain", 0.0)),
+         soft_ratio=float(config.get("load_soft_ratio", 0.70)),
+-        early_stop_ratio=float(config.get("load_early_stop_ratio", 0.60)),
++        # v7：未配置时取 min(LOAD_EARLY_STOP_RATIO=0.70, soft_ratio)（v6 默认 0.60）
++        early_stop_ratio=(
++            None
++            if config.get("load_early_stop_ratio") is None
++            else float(config["load_early_stop_ratio"])
++        ),
+         peak_tie=float(config.get("load_peak_tie", 0.02)),
+     )
+     guards = list(policy.guard_joint_names or pin_maps["all_names"])

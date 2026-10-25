@@ -1,0 +1,8 @@
+== tracking
+  v8_jump0p25  succ 119/119  H 0.1059  Hip_Link1 mean 0.002 max 0.144 >0.8 0  Body_Link mean 0.002 max 0.144 >0.8 0  margin<0.1 0  peak 0.130  C 4.14 (Cw 0.71 Ct 1.21)  ms mean 8.5 p90 10.7  fallback 0  step max 0.198 p99 0.163 >0.3 0  nonlocal None
+  v9f_jump0p25 succ 119/119  H 0.1061  Hip_Link1 mean 0.000 max 0.000 >0.8 0  Body_Link mean 0.000 max 0.000 >0.8 0  margin<0.1 0  peak 0.130  C 3.47 (Cw 0.00 Ct 1.21)  ms mean 8.5 p90 9.7  fallback 0  step max 0.020 p99 0.020 >0.3 0  nonlocal 0
+    v9f_jump0p25 vs v8_jump0p25: dH +0.00016 (+0.15%)  worse 1  better 0  dC -0.672 (-16.24%)
+== tracking_waist
+  v8_jump0p25  succ 9/239  H 0.0541  Hip_Link1 mean 0.000 max 0.000 >0.8 0  Body_Link mean 0.000 max 0.000 >0.8 0  margin<0.1 0  peak 0.143  C 1.55 (Cw 0.00 Ct 1.45)  ms mean 156.9 p90 261.7  fallback 228  step max 0.215 p99 0.207 >0.3 0  nonlocal None
+  v9f_jump0p25 succ 239/239  H 0.4335  Hip_Link1 mean 0.507 max 1.536 >0.8 74  Body_Link mean 0.615 max 1.774 >0.8 85  margin<0.1 0  peak 0.123  C 2600.12 (Cw 2541.18 Ct 1.52)  ms mean 5.9 p90 9.1  fallback 0  step max 0.150 p99 0.150 >0.3 0  nonlocal 0
+    v9f_jump0p25 vs v8_jump0p25: dH -0.01332 (-24.65%)  worse 0  better 1  dC +3.739 (+241.01%)

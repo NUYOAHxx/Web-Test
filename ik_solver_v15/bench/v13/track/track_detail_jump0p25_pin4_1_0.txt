@@ -1,0 +1,9 @@
+{"max_joint_jump_rad": 0.25, "first_divergence": 37, "mirror_of_left": 104, "dev_gt_0p1": 0, "left": {"solved": 120, "max_step": 0.15, "steps_gt_0p3": 0, "local_used": 110, "regimes": {"continuation": 120}, "cost_mean": 982.758151684528}, "right": {"solved": 120, "max_step": 0.15, "steps_gt_0p3": 0, "local_used": 111, "regimes": {"continuation": 120}, "cost_mean": 982.6552866869587}}
+35 dev 0.0 | L step 0.0352 continuation True q_prev continuation | R step 0.0352 continuation True q_prev continuation
+36 dev 0.0 | L step 0.0324 continuation False q_prev full | R step 0.0324 continuation False q_prev full
+37 dev 0.0267 | L step 0.0497 continuation False scatter full | R step 0.032 continuation False q_prev full
+38 dev 0.01 | L step 0.0632 continuation False q_prev full | R step 0.08 continuation False scatter full
+39 dev 0.0063 | L step 0.059 continuation False q_prev continuation | R step 0.063 continuation False q_prev continuation
+40 dev 0.0036 | L step 0.0522 continuation False q_prev full | R step 0.0549 continuation False q_prev full
+41 dev 0.0029 | L step 0.0576 continuation True q_prev continuation | R step 0.0574 continuation True q_prev continuation
+42 dev 0.0019 | L step 0.0535 continuation False q_prev unboxed | R step 0.0534 continuation False q_prev unboxed

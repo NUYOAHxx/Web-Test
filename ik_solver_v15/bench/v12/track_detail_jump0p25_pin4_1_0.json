@@ -1,0 +1,2314 @@
+{
+ "summary": {
+  "max_joint_jump_rad": 0.25,
+  "first_divergence": 37,
+  "mirror_of_left": 104,
+  "dev_gt_0p1": 0,
+  "left": {
+   "solved": 120,
+   "max_step": 0.15,
+   "steps_gt_0p3": 0,
+   "local_used": 110,
+   "regimes": {
+    "continuation": 120
+   },
+   "cost_mean": 982.758151684528
+  },
+  "right": {
+   "solved": 120,
+   "max_step": 0.15,
+   "steps_gt_0p3": 0,
+   "local_used": 111,
+   "regimes": {
+    "continuation": 120
+   },
+   "cost_mean": 982.6552866869587
+  }
+ },
+ "dev": [
+  0.0,
+  0.0,
+  4.336808689942018e-19,
+  9.992007221626409e-16,
+  3.83026943495679e-15,
+  2.498001805406602e-16,
+  7.216449660063518e-16,
+  1.1657341758564144e-15,
+  2.7755575615628914e-15,
+  4.107825191113079e-15,
+  5.440092820663267e-15,
+  1.7208456881689926e-15,
+  1.7208456881689926e-15,
+  3.6637359812630166e-15,
+  4.996003610813204e-16,
+  4.163336342344337e-15,
+  4.773959005888173e-15,
+  3.3306690738754696e-15,
+  1.2212453270876722e-15,
+  4.052314039881821e-15,
+  5.88418203051333e-15,
+  2.886579864025407e-15,
+  1.1657341758564144e-15,
+  8.881784197001252e-16,
+  4.9960036108132044e-15,
+  2.886579864025407e-15,
+  3.885780586188048e-15,
+  9.992007221626409e-16,
+  7.771561172376096e-16,
+  1.6653345369377348e-15,
+  1.071365218763276e-14,
+  1.2212453270876722e-15,
+  6.161737786669619e-15,
+  2.4424906541753444e-15,
+  2.4980018054066022e-15,
+  1.304512053934559e-15,
+  2.831068712794149e-15,
+  0.026667019656551272,
+  0.00995680236003027,
+  0.006323553012160612,
+  0.0036251292773726157,
+  0.0028941049279195678,
+  0.0018638899976158403,
+  0.004558330871098856,
+  0.003167183298660243,
+  0.04252252396998195,
+  0.04114989671264468,
+  0.008407786724555305,
+  0.001522782724034652,
+  0.0002567180078787007,
+  5.057955635427713e-05,
+  1.1763500661565729e-05,
+  3.189239911216557e-06,
+  9.421404099652086e-07,
+  2.6062475433352716e-07,
+  5.3546091893785785e-08,
+  7.4014079864959115e-09,
+  3.3291942536095576e-09,
+  1.3749684724118083e-09,
+  6.420989850930425e-10,
+  2.7117763590212007e-10,
+  8.875150614429117e-11,
+  6.001421581913746e-12,
+  7.667755319573644e-13,
+  1.0325074129013956e-13,
+  1.509903313490213e-14,
+  2.1094237467877974e-15,
+  2.3869795029440866e-15,
+  1.3877787807814457e-15,
+  6.106226635438361e-16,
+  2.7755575615628914e-16,
+  2.3869795029440866e-15,
+  1.0547118733938987e-15,
+  2.636779683484747e-16,
+  4.996003610813204e-16,
+  1.7763568394002505e-15,
+  1.4432899320127035e-15,
+  9.992007221626409e-16,
+  1.1102230246251565e-15,
+  8.881784197001252e-16,
+  7.771561172376096e-16,
+  2.9976021664879227e-15,
+  7.771561172376096e-16,
+  4.440892098500626e-16,
+  2.220446049250313e-15,
+  4.440892098500626e-16,
+  6.661338147750939e-16,
+  4.440892098500626e-16,
+  9.992007221626409e-16,
+  2.7755575615628914e-15,
+  8.881784197001252e-16,
+  1.4432899320127035e-15,
+  3.774758283725532e-15,
+  2.220446049250313e-15,
+  5.551115123125783e-16,
+  3.3306690738754696e-16,
+  1.5543122344752192e-15,
+  7.771561172376096e-16,
+  5.551115123125783e-16,
+  1.2212453270876722e-15,
+  3.885780586188048e-15,
+  6.5503158452884236e-15,
+  3.3306690738754696e-16,
+  6.439293542825908e-15,
+  1.1102230246251565e-15,
+  2.220446049250313e-16,
+  2.1094237467877974e-15,
+  5.88418203051333e-15,
+  6.716849298982197e-15,
+  1.887379141862766e-15,
+  3.7192471324942744e-15,
+  2.3314683517128287e-15,
+  2.4424906541753444e-15,
+  9.325873406851315e-15,
+  4.773959005888173e-15,
+  1.7763568394002505e-15,
+  4.9960036108132044e-15,
+  1.5543122344752192e-15,
+  3.219646771412954e-15,
+  4.829470157119431e-15
+ ],
+ "left": [
+  {
+   "step": 0.05310857513159184,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 2.9938537085409695
+  },
+  {
+   "step": 0.05015903779832964,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 3.243032754429107
+  },
+  {
+   "step": 0.046422989084747845,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 3.6204515276774862
+  },
+  {
+   "step": 0.042040299007571,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 4.0949644029149495
+  },
+  {
+   "step": 0.03721496613466879,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 4.645917165408867
+  },
+  {
+   "step": 0.0322175634392623,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 5.258779882351627
+  },
+  {
+   "step": 0.029949921215346897,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 5.918529310102834
+  },
+  {
+   "step": 0.030745191217322887,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 6.609077309212237
+  },
+  {
+   "step": 0.03170684345252084,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 7.306917974234999
+  },
+  {
+   "step": 0.03288432805353647,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 7.954981944270353
+  },
+  {
+   "step": 0.03444533102529723,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.508871833384642
+  },
+  {
+   "step": 0.03630433159497093,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.883553204547898
+  },
+  {
+   "step": 0.0384373932427442,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.986811528670758
+  },
+  {
+   "step": 0.04705048785660515,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.725169620841523
+  },
+  {
+   "step": 0.06104769837991353,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.03126807518827
+  },
+  {
+   "step": 0.08079542791020122,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 6.908489401293493
+  },
+  {
+   "step": 0.10944444827971322,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 5.4947508948343575
+  },
+  {
+   "step": 0.10393036394375121,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 26.50605212428373
+  },
+  {
+   "step": 0.10903483249024448,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 87.51684593348084
+  },
+  {
+   "step": 0.14927310120207316,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 218.0054708234122
+  },
+  {
+   "step": 0.07306485763135884,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 301.662926794169
+  },
+  {
+   "step": 0.04367136438036681,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 372.5573913740832
+  },
+  {
+   "step": 0.046286843979361614,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 456.36823448974815
+  },
+  {
+   "step": 0.04912122651159467,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 555.1664989026954
+  },
+  {
+   "step": 0.0515248249152514,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 669.1927820722107
+  },
+  {
+   "step": 0.053357218267819195,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 798.044877028183
+  },
+  {
+   "step": 0.054548777351684286,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 940.8766629257422
+  },
+  {
+   "step": 0.05509952409954377,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1096.6788070885186
+  },
+  {
+   "step": 0.05519809094031625,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1264.7732247994184
+  },
+  {
+   "step": 0.053890657570798584,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1441.1455338033948
+  },
+  {
+   "step": 0.052049642110756245,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1623.876402276751
+  },
+  {
+   "step": 0.04953424507389936,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1810.530035411319
+  },
+  {
+   "step": 0.04641574561364481,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1998.530654216559
+  },
+  {
+   "step": 0.04285234452844189,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2185.5900037762544
+  },
+  {
+   "step": 0.039051496042181943,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2370.142151832501
+  },
+  {
+   "step": 0.035208341335512316,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2551.6641523298363
+  },
+  {
+   "step": 0.032375629925208704,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "full",
+   "cost": 2716.8382844269354
+  },
+  {
+   "step": 0.04966772738365899,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "scatter",
+   "stage": "full",
+   "cost": 2853.7753639115626
+  },
+  {
+   "step": 0.06323142950862448,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "full",
+   "cost": 3031.239453226977
+  },
+  {
+   "step": 0.05897940129229051,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3215.2955401224435
+  },
+  {
+   "step": 0.05215744627946994,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "full",
+   "cost": 3388.37870260984
+  },
+  {
+   "step": 0.057624115459710135,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3532.84904779851
+  },
+  {
+   "step": 0.053495051982173525,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "unboxed",
+   "cost": 3662.6447306940668
+  },
+  {
+   "step": 0.04456091033647236,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "scatter",
+   "stage": "unboxed",
+   "cost": 3750.681083009555
+  },
+  {
+   "step": 0.03677913662820209,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "unboxed",
+   "cost": 3785.933289773995
+  },
+  {
+   "step": 0.038948947250511234,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "scatter",
+   "stage": "unboxed",
+   "cost": 3790.706422984801
+  },
+  {
+   "step": 0.03451826093577437,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "scatter",
+   "stage": "full",
+   "cost": 3755.313007630393
+  },
+  {
+   "step": 0.06054624218329113,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3690.371560564487
+  },
+  {
+   "step": 0.045066462269613305,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3542.0325239246968
+  },
+  {
+   "step": 0.04901189085996027,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3344.4766800149278
+  },
+  {
+   "step": 0.05178022794666837,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3108.8862780555073
+  },
+  {
+   "step": 0.05366300055741591,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2846.7745150226497
+  },
+  {
+   "step": 0.05529969563882142,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2570.831473913667
+  },
+  {
+   "step": 0.058682663792341994,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2293.1591314314846
+  },
+  {
+   "step": 0.06737402328441788,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2020.887556060617
+  },
+  {
+   "step": 0.06263510990741838,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1754.1356195066703
+  },
+  {
+   "step": 0.06994156970404619,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1488.4138723799736
+  },
+  {
+   "step": 0.07676215427028277,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1219.7907048072884
+  },
+  {
+   "step": 0.07234737897721422,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 986.4198669733395
+  },
+  {
+   "step": 0.07341847781110211,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 790.5690813759487
+  },
+  {
+   "step": 0.0684919650468444,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 632.6265195929403
+  },
+  {
+   "step": 0.06214088012204122,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 506.020107237744
+  },
+  {
+   "step": 0.055331479724511745,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 404.3308861224403
+  },
+  {
+   "step": 0.05081193918056209,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 322.8073860112487
+  },
+  {
+   "step": 0.04691552128965737,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 255.59824742066652
+  },
+  {
+   "step": 0.04644049344594947,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 200.0213121597199
+  },
+  {
+   "step": 0.04496038937781199,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 154.52530481481546
+  },
+  {
+   "step": 0.04284499257200036,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 118.13653444372493
+  },
+  {
+   "step": 0.04027751245062544,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 90.05016876137697
+  },
+  {
+   "step": 0.0373873092046032,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 69.41756566355998
+  },
+  {
+   "step": 0.03400607098927649,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 55.13764497203528
+  },
+  {
+   "step": 0.03002637095167973,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 45.9575543591839
+  },
+  {
+   "step": 0.02701610624793907,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 40.84892989868975
+  },
+  {
+   "step": 0.022229209049819648,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 38.032504872285436
+  },
+  {
+   "step": 0.01672902586352769,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 37.17234521316195
+  },
+  {
+   "step": 0.1426811318552157,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 35.11877926997222
+  },
+  {
+   "step": 0.02088336842425896,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 34.25760563032321
+  },
+  {
+   "step": 0.01952613298846395,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 34.31330817413116
+  },
+  {
+   "step": 0.019156935026318433,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 34.67591930751447
+  },
+  {
+   "step": 0.018707773674102812,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 35.263988550444964
+  },
+  {
+   "step": 0.018122242572458758,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 35.99960569994358
+  },
+  {
+   "step": 0.15,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 47.863376287922044
+  },
+  {
+   "step": 0.04929633296921415,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 64.34999402842458
+  },
+  {
+   "step": 0.015126389944094987,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 69.09783002110865
+  },
+  {
+   "step": 0.015369344896622422,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 73.43036344503044
+  },
+  {
+   "step": 0.016890073110190196,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 77.39536649310747
+  },
+  {
+   "step": 0.01810368309911048,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 80.88062788383675
+  },
+  {
+   "step": 0.018987738644234392,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 83.75404280619011
+  },
+  {
+   "step": 0.019536723722174187,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 85.88605877292729
+  },
+  {
+   "step": 0.019749124275521085,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 87.15879449677503
+  },
+  {
+   "step": 0.019623659336985164,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 87.47687506620366
+  },
+  {
+   "step": 0.019157823629788212,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 86.78140908923307
+  },
+  {
+   "step": 0.019691142696173447,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 85.06737791860981
+  },
+  {
+   "step": 0.019430354733591226,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 82.40512526909244
+  },
+  {
+   "step": 0.01821157164905829,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 78.96776635593451
+  },
+  {
+   "step": 0.015870906384311656,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 75.06962870451379
+  },
+  {
+   "step": 0.017936665541020247,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 71.21422367638479
+  },
+  {
+   "step": 0.020892066903405893,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 68.18639068099176
+  },
+  {
+   "step": 0.02719113243715593,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 67.09011102121094
+  },
+  {
+   "step": 0.03410259594260148,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 69.70368361368945
+  },
+  {
+   "step": 0.04041187597018012,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 78.51988543544441
+  },
+  {
+   "step": 0.04459791151883982,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 96.69892271891204
+  },
+  {
+   "step": 0.04654167329930187,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 127.07341124021923
+  },
+  {
+   "step": 0.04912234625032405,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 172.01614142813617
+  },
+  {
+   "step": 0.05186865648333361,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 232.95829162711448
+  },
+  {
+   "step": 0.05568280552243962,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 312.27070885084044
+  },
+  {
+   "step": 0.056184860523485036,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 408.33921630339125
+  },
+  {
+   "step": 0.0572939930511287,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 523.2024163770502
+  },
+  {
+   "step": 0.06173593119201576,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 664.8640822151499
+  },
+  {
+   "step": 0.06401787715809532,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 830.0493472212714
+  },
+  {
+   "step": 0.06459170245914736,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1017.9257365399558
+  },
+  {
+   "step": 0.06650077392818066,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1235.3817945571388
+  },
+  {
+   "step": 0.06701493099498612,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1481.468815694116
+  },
+  {
+   "step": 0.06528227401750286,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1750.306643628688
+  },
+  {
+   "step": 0.061716210566364005,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2034.465829443505
+  },
+  {
+   "step": 0.05660615301043437,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2325.4347257756745
+  },
+  {
+   "step": 0.048711921147129855,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2602.9537048566945
+  },
+  {
+   "step": 0.043950293364484194,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2880.3113060395376
+  },
+  {
+   "step": 0.04379866868121418,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3141.8346678700073
+  },
+  {
+   "step": 0.042767066444705626,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3376.3933717526043
+  }
+ ],
+ "right": [
+  {
+   "step": 0.05310857513159184,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 2.9938537085409695
+  },
+  {
+   "step": 0.05015903779832964,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 3.243032754429103
+  },
+  {
+   "step": 0.046422989084747845,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 3.6204515276774853
+  },
+  {
+   "step": 0.04204029900757189,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 4.0949644029149646
+  },
+  {
+   "step": 0.037214966134665906,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 4.6459171654088625
+  },
+  {
+   "step": 0.032217563439264296,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 5.258779882351611
+  },
+  {
+   "step": 0.029949921215346564,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 5.918529310102834
+  },
+  {
+   "step": 0.030745191217322332,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 6.609077309212213
+  },
+  {
+   "step": 0.03170684345252328,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 7.306917974235001
+  },
+  {
+   "step": 0.03288432805353647,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 7.954981944270353
+  },
+  {
+   "step": 0.03444533102529834,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.50887183338458
+  },
+  {
+   "step": 0.03630433159496871,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.883553204547962
+  },
+  {
+   "step": 0.03843739324274442,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.986811528670758
+  },
+  {
+   "step": 0.047050487856604706,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.725169620841523
+  },
+  {
+   "step": 0.06104769837991464,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 8.031268075188299
+  },
+  {
+   "step": 0.08079542791020078,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 6.908489401293496
+  },
+  {
+   "step": 0.10944444827971411,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 5.494750894834313
+  },
+  {
+   "step": 0.10393036394375121,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 26.506052124283745
+  },
+  {
+   "step": 0.10903483249024615,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 87.51684593348166
+  },
+  {
+   "step": 0.14927310120207182,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 218.0054708234121
+  },
+  {
+   "step": 0.07306485763135928,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 301.6629267941712
+  },
+  {
+   "step": 0.04367136438036723,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 372.55739137408403
+  },
+  {
+   "step": 0.04628684397936256,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 456.36823448974764
+  },
+  {
+   "step": 0.04912122651159434,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 555.1664989026954
+  },
+  {
+   "step": 0.05152482491525068,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 669.1927820722128
+  },
+  {
+   "step": 0.05335721826781947,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 798.0448770281797
+  },
+  {
+   "step": 0.05454877735168501,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 940.8766629257465
+  },
+  {
+   "step": 0.05509952409954344,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1096.6788070885182
+  },
+  {
+   "step": 0.05519809094031647,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1264.7732247994202
+  },
+  {
+   "step": 0.05389065757079903,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1441.145533803398
+  },
+  {
+   "step": 0.05204964211075591,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1623.8764022767414
+  },
+  {
+   "step": 0.04953424507389881,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1810.5300354113158
+  },
+  {
+   "step": 0.04641574561364503,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1998.5306542165517
+  },
+  {
+   "step": 0.042852344528441,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2185.5900037762476
+  },
+  {
+   "step": 0.03905149604218283,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2370.142151832501
+  },
+  {
+   "step": 0.03520834133551198,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2551.664152329834
+  },
+  {
+   "step": 0.032375629925206595,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "full",
+   "cost": 2716.838284426934
+  },
+  {
+   "step": 0.03201033952173804,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "full",
+   "cost": 2867.38703489516
+  },
+  {
+   "step": 0.0800313767186428,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "scatter",
+   "stage": "full",
+   "cost": 3012.7895229934807
+  },
+  {
+   "step": 0.062977175001102,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3207.828270291347
+  },
+  {
+   "step": 0.05489315586379895,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "full",
+   "cost": 3388.625041609077
+  },
+  {
+   "step": 0.057357038606474564,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3532.743843735044
+  },
+  {
+   "step": 0.053402252378559445,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "unboxed",
+   "cost": 3662.266008323918
+  },
+  {
+   "step": 0.044478875513579874,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "scatter",
+   "stage": "full",
+   "cost": 3751.8933891300035
+  },
+  {
+   "step": 0.03677112951075756,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "unboxed",
+   "cost": 3786.828749043852
+  },
+  {
+   "step": 0.03780123759229681,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": false,
+   "seed_kind": "q_prev",
+   "stage": "unboxed",
+   "cost": 3791.5758793865766
+  },
+  {
+   "step": 0.03633244545769243,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3766.3943248766495
+  },
+  {
+   "step": 0.031593414487465665,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3677.317589540609
+  },
+  {
+   "step": 0.04642511393476323,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3541.381938662645
+  },
+  {
+   "step": 0.04902600010829061,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3344.3567145663737
+  },
+  {
+   "step": 0.05178342091345012,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3108.8607459846617
+  },
+  {
+   "step": 0.05366383049022849,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2846.7680794463054
+  },
+  {
+   "step": 0.05529995065127624,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2570.8295794249952
+  },
+  {
+   "step": 0.058684910891843245,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2293.1585237422432
+  },
+  {
+   "step": 0.06737470480007351,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2020.8873742511357
+  },
+  {
+   "step": 0.06263531698608082,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1754.1355794399262
+  },
+  {
+   "step": 0.06994156667566687,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1488.4138667353718
+  },
+  {
+   "step": 0.07676215464912017,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1219.7907027182912
+  },
+  {
+   "step": 0.0723473793829803,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 986.4198662730022
+  },
+  {
+   "step": 0.07341847760158526,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 790.5690811141035
+  },
+  {
+   "step": 0.06849196495855914,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 632.6265195103501
+  },
+  {
+   "step": 0.06214088008692742,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 506.0201072206017
+  },
+  {
+   "step": 0.05533147971474628,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 404.33088612245353
+  },
+  {
+   "step": 0.050811939180595456,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 322.8073860113036
+  },
+  {
+   "step": 0.046915521289535356,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 255.59824742067627
+  },
+  {
+   "step": 0.04644049344592732,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 200.0213121597212
+  },
+  {
+   "step": 0.04496038937780844,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 154.52530481481602
+  },
+  {
+   "step": 0.04284499257200125,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 118.13653444372571
+  },
+  {
+   "step": 0.04027751245062494,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 90.05016876137715
+  },
+  {
+   "step": 0.03738730920460265,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 69.41756566356021
+  },
+  {
+   "step": 0.03400607098927619,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 55.137644972035474
+  },
+  {
+   "step": 0.030026370951681175,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 45.95755435918373
+  },
+  {
+   "step": 0.0270161062479376,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 40.84892989868983
+  },
+  {
+   "step": 0.022229209049819967,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 38.032504872285436
+  },
+  {
+   "step": 0.016729025863527924,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 37.17234521316197
+  },
+  {
+   "step": 0.14268113185521594,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 35.118779269972514
+  },
+  {
+   "step": 0.020883368424258204,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 34.257605630323255
+  },
+  {
+   "step": 0.01952613298846151,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 34.313308174130974
+  },
+  {
+   "step": 0.019156935026320543,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 34.6759193075145
+  },
+  {
+   "step": 0.018707773674100814,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 35.26398855044493
+  },
+  {
+   "step": 0.01812224257245887,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "locked",
+   "stage": "continuation",
+   "cost": 35.999605699943615
+  },
+  {
+   "step": 0.15,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 47.86337628792249
+  },
+  {
+   "step": 0.04929633296921421,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 64.34999402842497
+  },
+  {
+   "step": 0.015126389944094987,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 69.0978300211089
+  },
+  {
+   "step": 0.015369344896622394,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 73.43036344503119
+  },
+  {
+   "step": 0.016890073110190473,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 77.39536649310764
+  },
+  {
+   "step": 0.018103683099110285,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 80.88062788383667
+  },
+  {
+   "step": 0.018987738644234392,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 83.75404280619021
+  },
+  {
+   "step": 0.01953672372217452,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 85.88605877292707
+  },
+  {
+   "step": 0.01974912427552064,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 87.15879449677418
+  },
+  {
+   "step": 0.019623659336985316,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 87.47687506620397
+  },
+  {
+   "step": 0.019157823629788295,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 86.78140908923267
+  },
+  {
+   "step": 0.019691142696173003,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 85.06737791861093
+  },
+  {
+   "step": 0.019430354733591226,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 82.40512526909325
+  },
+  {
+   "step": 0.01821157164905829,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 78.96776635593447
+  },
+  {
+   "step": 0.015870906384311656,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 75.06962870451399
+  },
+  {
+   "step": 0.01793666554101958,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 71.21422367638516
+  },
+  {
+   "step": 0.020892066903405018,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 68.18639068099179
+  },
+  {
+   "step": 0.027191132437156262,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 67.09011102121073
+  },
+  {
+   "step": 0.03410259594260087,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 69.70368361368931
+  },
+  {
+   "step": 0.04041187597017898,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 78.51988543544466
+  },
+  {
+   "step": 0.04459791151883863,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 96.69892271891263
+  },
+  {
+   "step": 0.04654167329930503,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 127.07341124021923
+  },
+  {
+   "step": 0.04912234625032712,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 172.0161414281381
+  },
+  {
+   "step": 0.05186865648333083,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 232.9582916271147
+  },
+  {
+   "step": 0.055682805522439205,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 312.27070885084004
+  },
+  {
+   "step": 0.0561848605234862,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 408.33921630339285
+  },
+  {
+   "step": 0.05729399305112365,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 523.2024163770441
+  },
+  {
+   "step": 0.06173593119202436,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 664.8640822151574
+  },
+  {
+   "step": 0.06401787715808971,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 830.0493472212689
+  },
+  {
+   "step": 0.06459170245914597,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1017.9257365399516
+  },
+  {
+   "step": 0.06650077392818077,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1235.381794557133
+  },
+  {
+   "step": 0.06701493099499056,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1481.468815694123
+  },
+  {
+   "step": 0.06528227401749409,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 1750.3066436286695
+  },
+  {
+   "step": 0.06171621056637311,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2034.4658294435123
+  },
+  {
+   "step": 0.05660615301043248,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2325.4347257756763
+  },
+  {
+   "step": 0.04871192114712497,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2602.9537048566754
+  },
+  {
+   "step": 0.04395029336448597,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 2880.311306039543
+  },
+  {
+   "step": 0.04379866868121329,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3141.834667869995
+  },
+  {
+   "step": 0.04276706644470696,
+   "code": "ACCEPTED",
+   "regime": "continuation",
+   "local_used": true,
+   "seed_kind": "q_prev",
+   "stage": "continuation",
+   "cost": 3376.393371752618
+  }
+ ]
+}

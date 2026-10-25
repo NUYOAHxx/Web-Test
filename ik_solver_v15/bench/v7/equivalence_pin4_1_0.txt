@@ -1,0 +1,9 @@
+near_full      solves   40 DLS-iters   1439 diffs 0 []
+far_full       solves   60 DLS-iters   3812 diffs 0 []
+far_tool_dir   solves   50 DLS-iters   4123 diffs 0 []
+far_tool_cone  solves   50 DLS-iters   4377 diffs 0 []
+antipodal      solves   16 DLS-iters   8554 diffs 0 []
+tracking       solves  119 DLS-iters   1468 diffs 0 []
+off_full       solves   30 DLS-iters   3212 diffs 0 []
+nowaist_full   solves   30 DLS-iters   2248 diffs 0 []
+TOTAL DIFFS 0

@@ -1,0 +1,133 @@
+--- dual-p2/ha_arm_ik/robot_model.py
++++ v15/ha_arm_ik/robot_model.py
+@@ -8,10 +8,14 @@
+ 
+ import numpy as np
+ 
++from scipy.spatial.transform import Rotation as R
++
+ from ha_arm_ik.ik_common import (
+     T_origin,
+     T_prismatic,
+     T_revolute,
++    make_T,
++    normalize,
+     sew_angle_from_points,
+ )
+ 
+@@ -230,33 +234,72 @@
+             )
+ 
+         T = np.eye(4)
+-        active_idx = 0
++        motions = self._joint_motions(q)
+ 
+         link_T = {self.base_link: T.copy()}
+         joint_origin_T = {}
+ 
+-        for joint in self.joints:
+-            Torigin = T_origin(joint["xyz"], joint["rpy"])
+-            Tj_origin = T @ Torigin
++        for joint, Tmotion in zip(self.joints, motions):
++            Tj_origin = T @ self._origin_T(joint)
+             joint_origin_T[joint["name"]] = Tj_origin.copy()
+ 
++            if Tmotion is None:  # fixed
++                Tmotion = np.eye(4)
++
++            T = Tj_origin @ Tmotion
++            link_T[joint["child"]] = T.copy()
++
++        return link_T, joint_origin_T
++
++    # v15 提速（结果逐位不变）：
++    #   - 关节原点变换只取决于 (xyz, rpy) 的数值，按其 float64 字节缓存，命中时与重算 T_origin 完全相同；
++    #   - 转动关节的旋转矩阵整链一次批量调用 scipy from_rotvec（逐行同一例程，与逐关节 rot_axis 逐位相同）。
++    def _origin_T(self, joint):
++        key = (
++            np.asarray(joint["xyz"], dtype=float).tobytes(),
++            np.asarray(joint["rpy"], dtype=float).tobytes(),
++        )
++        cache = self.__dict__.setdefault("_origin_cache", {})
++        T = cache.get(key)
++        if T is None:
++            T = T_origin(joint["xyz"], joint["rpy"])
++            T.flags.writeable = False
++            cache[key] = T
++        return T
++
++    def _unit_axis(self, axis):
++        key = np.asarray(axis, dtype=float).tobytes()
++        cache = self.__dict__.setdefault("_axis_cache", {})
++        unit = cache.get(key)
++        if unit is None:
++            unit = normalize(axis)
++            unit.flags.writeable = False
++            cache[key] = unit
++        return unit
++
++    def _joint_motions(self, q):
++        """与 self.joints 对齐的关节运动变换（fixed 为 None）；数值与逐个 T_revolute / T_prismatic 相同。"""
++        motions = [None] * len(self.joints)
++        rows, rotvecs = [], []
++        active_idx = 0
++        for k, joint in enumerate(self.joints):
+             if joint["type"] in ("revolute", "continuous"):
+-                Tmotion = T_revolute(joint["axis"], q[active_idx])
++                rotvecs.append(self._unit_axis(joint["axis"]) * q[active_idx])
++                rows.append(k)
+                 active_idx += 1
+             elif joint["type"] == "prismatic":
+-                Tmotion = T_prismatic(joint["axis"], q[active_idx])
++                motions[k] = T_prismatic(joint["axis"], q[active_idx])
+                 active_idx += 1
+-            elif joint["type"] == "fixed":
+-                Tmotion = np.eye(4)
+-            else:
++            elif joint["type"] != "fixed":
+                 raise NotImplementedError(
+                     f"Unsupported joint type: {joint['type']}"
+                 )
+-
+-            T = Tj_origin @ Tmotion
+-            link_T[joint["child"]] = T.copy()
+-
+-        return link_T, joint_origin_T
++        if rotvecs:
++            mats = R.from_rotvec(np.array(rotvecs)).as_matrix()
++            zero = np.zeros(3)
++            for k, Rm in zip(rows, mats):
++                motions[k] = make_T(Rm, zero)
++        return motions
+ 
+     def fk(self, q):
+         link_T, _ = self.fk_all(q)
+@@ -273,23 +316,15 @@
+         wanted = set(joint_names)
+         joint_T = {}
+         T = np.eye(4)
+-        active_idx = 0
++        motions = self._joint_motions(q)
+ 
+-        for joint in self.joints:
+-            T = T @ T_origin(joint["xyz"], joint["rpy"])
++        for joint, Tmotion in zip(self.joints, motions):
++            T = T @ self._origin_T(joint)
+             if joint["name"] in wanted:
+                 joint_T[joint["name"]] = T.copy()
+ 
+-            if joint["type"] in ("revolute", "continuous"):
+-                T = T @ T_revolute(joint["axis"], q[active_idx])
+-                active_idx += 1
+-            elif joint["type"] == "prismatic":
+-                T = T @ T_prismatic(joint["axis"], q[active_idx])
+-                active_idx += 1
+-            elif joint["type"] != "fixed":
+-                raise NotImplementedError(
+-                    f"Unsupported joint type: {joint['type']}"
+-                )
++            if Tmotion is not None:
++                T = T @ Tmotion
+ 
+         missing = wanted.difference(joint_T)
+         if missing:

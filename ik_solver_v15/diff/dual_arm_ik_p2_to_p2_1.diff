@@ -1,0 +1,62 @@
+--- dual-p2/ha_arm_ik/dual_arm_ik.py
++++ v15/ha_arm_ik/dual_arm_ik.py
+@@ -14,7 +14,8 @@
+ 
+ 一次 solve
+     1. 解析目标：每只手是 4×4 位姿（URDF 根坐标系）/ "hold"（保持 q_prev 处的世界位姿）/
+-       "keep"（该臂关节角保持 q_prev）/ None（不约束，只回中）。至少一只手有位姿或 hold 目标。
++       "keep"（该臂关节角保持 q_prev）/ "free"（不约束，只回中）/ None（= "hold"：只给一只手目标时
++       另一只手默认不动）。两只都是 None 报错；至少一只手有位姿或 hold 目标。
+     2. 可达性预检（证明，不搜索）：目标位置对所有腰角都超出臂展 -> X_UNREACHABLE；两目标间距超过
+        “两手臂根关节间距 + 两臂臂展”或没有同一个腰角让两手都在臂展内 -> NOT_JOINTLY_REACHABLE。
+        状态都是 OUTSIDE_WORKSPACE，耗时 < 1 ms。
+@@ -54,7 +55,7 @@
+ import numpy as np
+ import pinocchio as pin
+ 
+-DUAL_SOLVER_VERSION = "dual-p2"
++DUAL_SOLVER_VERSION = "dual-p2.1"
+ 
+ # =============================================================================
+ # 1. 判据与迭代常数：数值复制自单臂代码（不 import）
+@@ -796,7 +797,9 @@
+               *, joint_state=None, time_budget_s=None):
+         """左右手独立目标的 16 维联合求解。
+ 
+-        T_left / T_right：4×4 位姿（或 pin.SE3，URDF 根坐标系）/ "hold" / "keep" / None。
++        T_left / T_right：4×4 位姿（或 pin.SE3，URDF 根坐标系）/ "hold" / "keep" / "free" / None。
++        None = "hold"（该手保持 q_prev 处的世界位姿）；"free" = 不约束、只回中。两只都是 None 报错
++        （ValueError；要两手都不动请显式传 ("hold", "hold")）。
+         orientation_mode / tool_axis / tool_cone_half_angle：一个值（两手相同）或 (左, 右)。
+         q_prev：16 维；不给时取 joint_state 里的 16 个活动关节（齐全时），否则取上次成功的解（初始 q_ready）。
+         time_budget_s：本次的时间上限（不给时取 config["time_budget_s"]）。
+@@ -996,6 +999,9 @@
+         axes = _per_side(tool_axis, lambda v: isinstance(v, (tuple, list)) and len(v) == 2
+                          and all(x is None or np.size(x) == 3 for x in v))
+         cones = _per_side(cone, lambda v: isinstance(v, (tuple, list)) and len(v) == 2)
++        if T_left is None and T_right is None:
++            raise ValueError("T_left and T_right are both None: give at least one hand a target "
++                             "(None = 'hold'; pass ('hold', 'hold') to keep both hands where they are)")
+         hold_poses = None
+         hands, kinds = [], {}
+         for idx, (side, T) in enumerate((("left", T_left), ("right", T_right))):
+@@ -1003,15 +1009,14 @@
+             if mode not in ORIENTATION_MODES:
+                 raise ValueError(f"Unknown orientation_mode: {mode}. Expected one of {ORIENTATION_MODES}")
+             if T is None:
+-                kinds[side] = "free"
+-                continue
++                T = "hold"      # dual-p2.1：只给一只手目标时，另一只手默认保持 q_prev 处的世界位姿
+             if isinstance(T, str):
+                 key = T.lower()
+-                if key == "keep":
+-                    kinds[side] = "keep"
++                if key in ("keep", "free"):
++                    kinds[side] = key
+                     continue
+                 if key != "hold":
+-                    raise ValueError(f"T_{side} must be a 4x4 pose, 'hold', 'keep' or None")
++                    raise ValueError(f"T_{side} must be a 4x4 pose, 'hold', 'keep', 'free' or None")
+                 if hold_poses is None:
+                     hold_poses = self._m.fk(q_prev, template)
+                 M, kind = hold_poses[side], "hold"

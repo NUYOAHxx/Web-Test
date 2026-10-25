@@ -1,0 +1,847 @@
+{
+ "eval_root_objective": "strict nullspace cost of eval package",
+ "runs": [
+  "v8_real",
+  "v7_real",
+  "v9f",
+  "v9f_off"
+ ],
+ "cases": {
+  "near_full": {
+   "v8_real": {
+    "success": "40/40",
+    "H_mean": 0.17334,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.14,
+      "max": 0.427,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.152,
+      "max": 0.554,
+      "gt_0p8": 0
+     }
+    },
+    "waist_any_gt_0p8": 0,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.1242,
+    "C_mean": 210.921,
+    "Cw_mean": 181.146,
+    "Ct_mean": 1.323,
+    "ms_mean": 13.3,
+    "ms_median": 11.4,
+    "ms_p90": 19.8,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0
+   },
+   "v7_real": {
+    "success": "40/40",
+    "H_mean": 0.17179,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.153,
+      "max": 0.429,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.14,
+      "max": 0.556,
+      "gt_0p8": 0
+     }
+    },
+    "waist_any_gt_0p8": 0,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.1257,
+    "C_mean": 217.654,
+    "Cw_mean": 187.762,
+    "Ct_mean": 1.359,
+    "ms_mean": 12.2,
+    "ms_median": 10.1,
+    "ms_p90": 18.2,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": -0.001551,
+     "dH_rel_pct": -0.89,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 5,
+     "dC_mean": 6.7335,
+     "dC_rel_pct": 3.19
+    }
+   },
+   "v9f": {
+    "success": "40/40",
+    "H_mean": 0.17334,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.14,
+      "max": 0.427,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.152,
+      "max": 0.554,
+      "gt_0p8": 0
+     }
+    },
+    "waist_any_gt_0p8": 0,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.1242,
+    "C_mean": 210.921,
+    "Cw_mean": 181.146,
+    "Ct_mean": 1.323,
+    "ms_mean": 13.5,
+    "ms_median": 11.6,
+    "ms_p90": 20.4,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   },
+   "v9f_off": {
+    "success": "40/40",
+    "H_mean": 0.17334,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.14,
+      "max": 0.427,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.152,
+      "max": 0.554,
+      "gt_0p8": 0
+     }
+    },
+    "waist_any_gt_0p8": 0,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.1242,
+    "C_mean": 210.921,
+    "Cw_mean": 181.146,
+    "Ct_mean": 1.323,
+    "ms_mean": 13.1,
+    "ms_median": 11.2,
+    "ms_p90": 20.0,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   }
+  },
+  "far_full": {
+   "v8_real": {
+    "success": "60/60",
+    "H_mean": 1.6128,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.193,
+      "max": 0.71,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.227,
+      "max": 1.555,
+      "gt_0p8": 6
+     }
+    },
+    "waist_any_gt_0p8": 6,
+    "margin_lt_0p1": 5,
+    "peak_mean": 0.0749,
+    "C_mean": 800.373,
+    "Cw_mean": 647.607,
+    "Ct_mean": 0.546,
+    "ms_mean": 23.2,
+    "ms_median": 19.6,
+    "ms_p90": 37.7,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0
+   },
+   "v7_real": {
+    "success": "60/60",
+    "H_mean": 1.6128,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.271,
+      "max": 2.109,
+      "gt_0p8": 7
+     },
+     "Body_Link": {
+      "mean": 0.215,
+      "max": 1.546,
+      "gt_0p8": 7
+     }
+    },
+    "waist_any_gt_0p8": 13,
+    "margin_lt_0p1": 7,
+    "peak_mean": 0.082,
+    "C_mean": 1107.793,
+    "Cw_mean": 952.528,
+    "Ct_mean": 0.683,
+    "ms_mean": 21.5,
+    "ms_median": 17.4,
+    "ms_p90": 38.0,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": -2e-06,
+     "dH_rel_pct": -0.0,
+     "worse_gt_1e3": 6,
+     "better_gt_1e3": 11,
+     "dC_mean": 307.4202,
+     "dC_rel_pct": 38.41
+    }
+   },
+   "v9f": {
+    "success": "60/60",
+    "H_mean": 1.6128,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.193,
+      "max": 0.71,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.227,
+      "max": 1.555,
+      "gt_0p8": 6
+     }
+    },
+    "waist_any_gt_0p8": 6,
+    "margin_lt_0p1": 5,
+    "peak_mean": 0.0749,
+    "C_mean": 800.373,
+    "Cw_mean": 647.607,
+    "Ct_mean": 0.546,
+    "ms_mean": 23.8,
+    "ms_median": 19.7,
+    "ms_p90": 38.5,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   },
+   "v9f_off": {
+    "success": "60/60",
+    "H_mean": 1.6128,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.193,
+      "max": 0.71,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.227,
+      "max": 1.555,
+      "gt_0p8": 6
+     }
+    },
+    "waist_any_gt_0p8": 6,
+    "margin_lt_0p1": 5,
+    "peak_mean": 0.0749,
+    "C_mean": 800.373,
+    "Cw_mean": 647.607,
+    "Ct_mean": 0.546,
+    "ms_mean": 23.2,
+    "ms_median": 19.4,
+    "ms_p90": 37.5,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   }
+  },
+  "far_tool_dir": {
+   "v8_real": {
+    "success": "50/50",
+    "H_mean": 1.15493,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.146,
+      "max": 0.707,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.133,
+      "max": 0.972,
+      "gt_0p8": 1
+     }
+    },
+    "waist_any_gt_0p8": 1,
+    "margin_lt_0p1": 3,
+    "peak_mean": 0.0723,
+    "C_mean": 362.573,
+    "Cw_mean": 282.151,
+    "Ct_mean": 0.478,
+    "ms_mean": 28.6,
+    "ms_median": 21.5,
+    "ms_p90": 49.3,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0
+   },
+   "v7_real": {
+    "success": "50/50",
+    "H_mean": 1.15696,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.159,
+      "max": 0.919,
+      "gt_0p8": 3
+     },
+     "Body_Link": {
+      "mean": 0.123,
+      "max": 0.972,
+      "gt_0p8": 1
+     }
+    },
+    "waist_any_gt_0p8": 4,
+    "margin_lt_0p1": 3,
+    "peak_mean": 0.0741,
+    "C_mean": 382.358,
+    "Cw_mean": 296.966,
+    "Ct_mean": 0.512,
+    "ms_mean": 26.9,
+    "ms_median": 19.5,
+    "ms_p90": 51.9,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.002033,
+     "dH_rel_pct": 0.18,
+     "worse_gt_1e3": 11,
+     "better_gt_1e3": 4,
+     "dC_mean": 19.7858,
+     "dC_rel_pct": 5.46
+    }
+   },
+   "v9f": {
+    "success": "50/50",
+    "H_mean": 1.15493,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.146,
+      "max": 0.707,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.133,
+      "max": 0.972,
+      "gt_0p8": 1
+     }
+    },
+    "waist_any_gt_0p8": 1,
+    "margin_lt_0p1": 3,
+    "peak_mean": 0.0723,
+    "C_mean": 362.573,
+    "Cw_mean": 282.151,
+    "Ct_mean": 0.478,
+    "ms_mean": 29.3,
+    "ms_median": 22.0,
+    "ms_p90": 50.3,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   },
+   "v9f_off": {
+    "success": "50/50",
+    "H_mean": 1.15493,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.146,
+      "max": 0.707,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.133,
+      "max": 0.972,
+      "gt_0p8": 1
+     }
+    },
+    "waist_any_gt_0p8": 1,
+    "margin_lt_0p1": 3,
+    "peak_mean": 0.0723,
+    "C_mean": 362.573,
+    "Cw_mean": 282.151,
+    "Ct_mean": 0.478,
+    "ms_mean": 28.9,
+    "ms_median": 21.2,
+    "ms_p90": 50.5,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   }
+  },
+  "far_tool_cone": {
+   "v8_real": {
+    "success": "50/50",
+    "H_mean": 1.16193,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.09,
+      "max": 0.706,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.13,
+      "max": 1.571,
+      "gt_0p8": 4
+     }
+    },
+    "waist_any_gt_0p8": 4,
+    "margin_lt_0p1": 3,
+    "peak_mean": 0.0775,
+    "C_mean": 452.367,
+    "Cw_mean": 347.071,
+    "Ct_mean": 0.529,
+    "ms_mean": 30.7,
+    "ms_median": 25.3,
+    "ms_p90": 52.6,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0
+   },
+   "v7_real": {
+    "success": "50/50",
+    "H_mean": 1.14786,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.113,
+      "max": 1.514,
+      "gt_0p8": 2
+     },
+     "Body_Link": {
+      "mean": 0.118,
+      "max": 1.739,
+      "gt_0p8": 4
+     }
+    },
+    "waist_any_gt_0p8": 4,
+    "margin_lt_0p1": 2,
+    "peak_mean": 0.0808,
+    "C_mean": 569.942,
+    "Cw_mean": 457.547,
+    "Ct_mean": 0.602,
+    "ms_mean": 28.4,
+    "ms_median": 23.0,
+    "ms_p90": 50.3,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": -0.014078,
+     "dH_rel_pct": -1.21,
+     "worse_gt_1e3": 11,
+     "better_gt_1e3": 3,
+     "dC_mean": 117.575,
+     "dC_rel_pct": 25.99
+    }
+   },
+   "v9f": {
+    "success": "50/50",
+    "H_mean": 1.16193,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.09,
+      "max": 0.706,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.13,
+      "max": 1.571,
+      "gt_0p8": 4
+     }
+    },
+    "waist_any_gt_0p8": 4,
+    "margin_lt_0p1": 3,
+    "peak_mean": 0.0775,
+    "C_mean": 452.367,
+    "Cw_mean": 347.071,
+    "Ct_mean": 0.529,
+    "ms_mean": 31.9,
+    "ms_median": 27.1,
+    "ms_p90": 55.4,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   },
+   "v9f_off": {
+    "success": "50/50",
+    "H_mean": 1.16193,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.09,
+      "max": 0.706,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.13,
+      "max": 1.571,
+      "gt_0p8": 4
+     }
+    },
+    "waist_any_gt_0p8": 4,
+    "margin_lt_0p1": 3,
+    "peak_mean": 0.0775,
+    "C_mean": 452.367,
+    "Cw_mean": 347.071,
+    "Ct_mean": 0.529,
+    "ms_mean": 31.3,
+    "ms_median": 25.6,
+    "ms_p90": 53.3,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   }
+  },
+  "tracking": {
+   "v8_real": {
+    "success": "119/119",
+    "H_mean": 0.10593,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.002,
+      "max": 0.144,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.002,
+      "max": 0.144,
+      "gt_0p8": 0
+     }
+    },
+    "waist_any_gt_0p8": 0,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.13,
+    "C_mean": 4.138,
+    "Cw_mean": 0.715,
+    "Ct_mean": 1.206,
+    "ms_mean": 10.3,
+    "ms_median": 9.3,
+    "ms_p90": 14.1,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "step_max": 0.198,
+    "step_p99": 0.163,
+    "step_gt_0p3": 0,
+    "nonlocal_": null
+   },
+   "v7_real": {
+    "success": "119/119",
+    "H_mean": 0.10608,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.0,
+      "max": 0.018,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.0,
+      "max": 0.018,
+      "gt_0p8": 0
+     }
+    },
+    "waist_any_gt_0p8": 0,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.1302,
+    "C_mean": 3.485,
+    "Cw_mean": 0.02,
+    "Ct_mean": 1.208,
+    "ms_mean": 9.4,
+    "ms_median": 9.2,
+    "ms_p90": 12.4,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "step_max": 0.04,
+    "step_p99": 0.02,
+    "step_gt_0p3": 0,
+    "nonlocal_": null,
+    "vs_v8_real": {
+     "dH_mean": 0.000152,
+     "dH_rel_pct": 0.14,
+     "worse_gt_1e3": 1,
+     "better_gt_1e3": 0,
+     "dC_mean": -0.6532,
+     "dC_rel_pct": -15.78
+    }
+   },
+   "v9f": {
+    "success": "119/119",
+    "H_mean": 0.10608,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.0,
+      "max": 0.0,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.0,
+      "max": 0.0,
+      "gt_0p8": 0
+     }
+    },
+    "waist_any_gt_0p8": 0,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.1302,
+    "C_mean": 3.467,
+    "Cw_mean": 0.0,
+    "Ct_mean": 1.209,
+    "ms_mean": 8.6,
+    "ms_median": 8.4,
+    "ms_p90": 9.8,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "step_max": 0.02,
+    "step_p99": 0.02,
+    "step_gt_0p3": 0,
+    "nonlocal_": 0,
+    "vs_v8_real": {
+     "dH_mean": 0.000156,
+     "dH_rel_pct": 0.15,
+     "worse_gt_1e3": 1,
+     "better_gt_1e3": 0,
+     "dC_mean": -0.6719,
+     "dC_rel_pct": -16.24
+    }
+   },
+   "v9f_off": {
+    "success": "119/119",
+    "H_mean": 0.10593,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.002,
+      "max": 0.144,
+      "gt_0p8": 0
+     },
+     "Body_Link": {
+      "mean": 0.002,
+      "max": 0.144,
+      "gt_0p8": 0
+     }
+    },
+    "waist_any_gt_0p8": 0,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.13,
+    "C_mean": 4.138,
+    "Cw_mean": 0.715,
+    "Ct_mean": 1.206,
+    "ms_mean": 8.9,
+    "ms_median": 8.6,
+    "ms_p90": 11.0,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "step_max": 0.198,
+    "step_p99": 0.163,
+    "step_gt_0p3": 0,
+    "nonlocal_": 119,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   }
+  },
+  "tracking_waist": {
+   "v8_real": {
+    "success": "239/239",
+    "H_mean": 0.46903,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.493,
+      "max": 1.536,
+      "gt_0p8": 74
+     },
+     "Body_Link": {
+      "mean": 0.599,
+      "max": 1.774,
+      "gt_0p8": 85
+     }
+    },
+    "waist_any_gt_0p8": 86,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.122,
+    "C_mean": 2560.735,
+    "Cw_mean": 2505.692,
+    "Ct_mean": 1.515,
+    "ms_mean": 20.3,
+    "ms_median": 19.0,
+    "ms_p90": 34.7,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 82,
+    "step_max": 2.47,
+    "step_p99": 1.857,
+    "step_gt_0p3": 7,
+    "nonlocal_": null
+   },
+   "v7_real": {
+    "success": "239/239",
+    "H_mean": 0.46903,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.493,
+      "max": 1.536,
+      "gt_0p8": 74
+     },
+     "Body_Link": {
+      "mean": 0.599,
+      "max": 1.774,
+      "gt_0p8": 85
+     }
+    },
+    "waist_any_gt_0p8": 86,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.122,
+    "C_mean": 2560.682,
+    "Cw_mean": 2505.639,
+    "Ct_mean": 1.515,
+    "ms_mean": 14.3,
+    "ms_median": 14.7,
+    "ms_p90": 21.0,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 0,
+    "step_max": 2.468,
+    "step_p99": 1.857,
+    "step_gt_0p3": 7,
+    "nonlocal_": null,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": -0.053,
+     "dC_rel_pct": -0.0
+    }
+   },
+   "v9f": {
+    "success": "239/239",
+    "H_mean": 0.43346,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.507,
+      "max": 1.536,
+      "gt_0p8": 74
+     },
+     "Body_Link": {
+      "mean": 0.615,
+      "max": 1.774,
+      "gt_0p8": 85
+     }
+    },
+    "waist_any_gt_0p8": 86,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.1234,
+    "C_mean": 2600.118,
+    "Cw_mean": 2541.181,
+    "Ct_mean": 1.522,
+    "ms_mean": 5.9,
+    "ms_median": 4.7,
+    "ms_p90": 9.1,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 82,
+    "step_max": 0.15,
+    "step_p99": 0.15,
+    "step_gt_0p3": 0,
+    "nonlocal_": 0,
+    "vs_v8_real": {
+     "dH_mean": -0.035577,
+     "dH_rel_pct": -7.59,
+     "worse_gt_1e3": 13,
+     "better_gt_1e3": 23,
+     "dC_mean": 39.3837,
+     "dC_rel_pct": 1.54
+    }
+   },
+   "v9f_off": {
+    "success": "239/239",
+    "H_mean": 0.46903,
+    "waist": {
+     "Hip_Link1": {
+      "mean": 0.493,
+      "max": 1.536,
+      "gt_0p8": 74
+     },
+     "Body_Link": {
+      "mean": 0.599,
+      "max": 1.774,
+      "gt_0p8": 85
+     }
+    },
+    "waist_any_gt_0p8": 86,
+    "margin_lt_0p1": 0,
+    "peak_mean": 0.122,
+    "C_mean": 2560.735,
+    "Cw_mean": 2505.692,
+    "Ct_mean": 1.515,
+    "ms_mean": 14.3,
+    "ms_median": 14.2,
+    "ms_p90": 21.1,
+    "comfort_fallbacks": 0,
+    "selected_outside_comfort": 82,
+    "step_max": 2.47,
+    "step_p99": 1.857,
+    "step_gt_0p3": 7,
+    "nonlocal_": 239,
+    "vs_v8_real": {
+     "dH_mean": 0.0,
+     "dH_rel_pct": 0.0,
+     "worse_gt_1e3": 0,
+     "better_gt_1e3": 0,
+     "dC_mean": 0.0,
+     "dC_rel_pct": 0.0
+    }
+   }
+  }
+ }
+}

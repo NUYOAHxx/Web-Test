@@ -1,0 +1,48 @@
+== near_full
+  v8_real      succ 40/40  H 0.1733  Hip_Link1 mean 0.140 max 0.427 >0.8 0  Body_Link mean 0.152 max 0.554 >0.8 0  margin<0.1 0  peak 0.124  C 210.92 (Cw 181.15 Ct 1.32)  ms mean 13.3 p90 19.8  fallback 0
+  v7_real      succ 40/40  H 0.1718  Hip_Link1 mean 0.153 max 0.429 >0.8 0  Body_Link mean 0.140 max 0.556 >0.8 0  margin<0.1 0  peak 0.126  C 217.65 (Cw 187.76 Ct 1.36)  ms mean 12.2 p90 18.2  fallback 0
+  v9f          succ 40/40  H 0.1733  Hip_Link1 mean 0.140 max 0.427 >0.8 0  Body_Link mean 0.152 max 0.554 >0.8 0  margin<0.1 0  peak 0.124  C 210.92 (Cw 181.15 Ct 1.32)  ms mean 13.5 p90 20.4  fallback 0
+  v9f_off      succ 40/40  H 0.1733  Hip_Link1 mean 0.140 max 0.427 >0.8 0  Body_Link mean 0.152 max 0.554 >0.8 0  margin<0.1 0  peak 0.124  C 210.92 (Cw 181.15 Ct 1.32)  ms mean 13.1 p90 20.0  fallback 0
+    v7_real vs v8_real: dH -0.00155 (-0.89%)  worse 0  better 5  dC +6.733 (+3.19%)
+    v9f vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+    v9f_off vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+== far_full
+  v8_real      succ 60/60  H 1.6128  Hip_Link1 mean 0.193 max 0.710 >0.8 0  Body_Link mean 0.227 max 1.555 >0.8 6  margin<0.1 5  peak 0.075  C 800.37 (Cw 647.61 Ct 0.55)  ms mean 23.2 p90 37.7  fallback 0
+  v7_real      succ 60/60  H 1.6128  Hip_Link1 mean 0.271 max 2.109 >0.8 7  Body_Link mean 0.215 max 1.546 >0.8 7  margin<0.1 7  peak 0.082  C 1107.79 (Cw 952.53 Ct 0.68)  ms mean 21.5 p90 38.0  fallback 0
+  v9f          succ 60/60  H 1.6128  Hip_Link1 mean 0.193 max 0.710 >0.8 0  Body_Link mean 0.227 max 1.555 >0.8 6  margin<0.1 5  peak 0.075  C 800.37 (Cw 647.61 Ct 0.55)  ms mean 23.8 p90 38.5  fallback 0
+  v9f_off      succ 60/60  H 1.6128  Hip_Link1 mean 0.193 max 0.710 >0.8 0  Body_Link mean 0.227 max 1.555 >0.8 6  margin<0.1 5  peak 0.075  C 800.37 (Cw 647.61 Ct 0.55)  ms mean 23.2 p90 37.5  fallback 0
+    v7_real vs v8_real: dH -0.00000 (-0.00%)  worse 6  better 11  dC +307.420 (+38.41%)
+    v9f vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+    v9f_off vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+== far_tool_dir
+  v8_real      succ 50/50  H 1.1549  Hip_Link1 mean 0.146 max 0.707 >0.8 0  Body_Link mean 0.133 max 0.972 >0.8 1  margin<0.1 3  peak 0.072  C 362.57 (Cw 282.15 Ct 0.48)  ms mean 28.6 p90 49.3  fallback 0
+  v7_real      succ 50/50  H 1.1570  Hip_Link1 mean 0.159 max 0.919 >0.8 3  Body_Link mean 0.123 max 0.972 >0.8 1  margin<0.1 3  peak 0.074  C 382.36 (Cw 296.97 Ct 0.51)  ms mean 26.9 p90 51.9  fallback 0
+  v9f          succ 50/50  H 1.1549  Hip_Link1 mean 0.146 max 0.707 >0.8 0  Body_Link mean 0.133 max 0.972 >0.8 1  margin<0.1 3  peak 0.072  C 362.57 (Cw 282.15 Ct 0.48)  ms mean 29.3 p90 50.3  fallback 0
+  v9f_off      succ 50/50  H 1.1549  Hip_Link1 mean 0.146 max 0.707 >0.8 0  Body_Link mean 0.133 max 0.972 >0.8 1  margin<0.1 3  peak 0.072  C 362.57 (Cw 282.15 Ct 0.48)  ms mean 28.9 p90 50.5  fallback 0
+    v7_real vs v8_real: dH +0.00203 (+0.18%)  worse 11  better 4  dC +19.786 (+5.46%)
+    v9f vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+    v9f_off vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+== far_tool_cone
+  v8_real      succ 50/50  H 1.1619  Hip_Link1 mean 0.090 max 0.706 >0.8 0  Body_Link mean 0.130 max 1.571 >0.8 4  margin<0.1 3  peak 0.077  C 452.37 (Cw 347.07 Ct 0.53)  ms mean 30.7 p90 52.6  fallback 0
+  v7_real      succ 50/50  H 1.1479  Hip_Link1 mean 0.113 max 1.514 >0.8 2  Body_Link mean 0.118 max 1.739 >0.8 4  margin<0.1 2  peak 0.081  C 569.94 (Cw 457.55 Ct 0.60)  ms mean 28.4 p90 50.3  fallback 0
+  v9f          succ 50/50  H 1.1619  Hip_Link1 mean 0.090 max 0.706 >0.8 0  Body_Link mean 0.130 max 1.571 >0.8 4  margin<0.1 3  peak 0.077  C 452.37 (Cw 347.07 Ct 0.53)  ms mean 31.9 p90 55.4  fallback 0
+  v9f_off      succ 50/50  H 1.1619  Hip_Link1 mean 0.090 max 0.706 >0.8 0  Body_Link mean 0.130 max 1.571 >0.8 4  margin<0.1 3  peak 0.077  C 452.37 (Cw 347.07 Ct 0.53)  ms mean 31.3 p90 53.3  fallback 0
+    v7_real vs v8_real: dH -0.01408 (-1.21%)  worse 11  better 3  dC +117.575 (+25.99%)
+    v9f vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+    v9f_off vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+== tracking
+  v8_real      succ 119/119  H 0.1059  Hip_Link1 mean 0.002 max 0.144 >0.8 0  Body_Link mean 0.002 max 0.144 >0.8 0  margin<0.1 0  peak 0.130  C 4.14 (Cw 0.71 Ct 1.21)  ms mean 10.3 p90 14.1  fallback 0  step max 0.198 p99 0.163 >0.3 0  nonlocal None
+  v7_real      succ 119/119  H 0.1061  Hip_Link1 mean 0.000 max 0.018 >0.8 0  Body_Link mean 0.000 max 0.018 >0.8 0  margin<0.1 0  peak 0.130  C 3.48 (Cw 0.02 Ct 1.21)  ms mean 9.4 p90 12.4  fallback 0  step max 0.040 p99 0.020 >0.3 0  nonlocal None
+  v9f          succ 119/119  H 0.1061  Hip_Link1 mean 0.000 max 0.000 >0.8 0  Body_Link mean 0.000 max 0.000 >0.8 0  margin<0.1 0  peak 0.130  C 3.47 (Cw 0.00 Ct 1.21)  ms mean 8.6 p90 9.8  fallback 0  step max 0.020 p99 0.020 >0.3 0  nonlocal 0
+  v9f_off      succ 119/119  H 0.1059  Hip_Link1 mean 0.002 max 0.144 >0.8 0  Body_Link mean 0.002 max 0.144 >0.8 0  margin<0.1 0  peak 0.130  C 4.14 (Cw 0.71 Ct 1.21)  ms mean 8.9 p90 11.0  fallback 0  step max 0.198 p99 0.163 >0.3 0  nonlocal 119
+    v7_real vs v8_real: dH +0.00015 (+0.14%)  worse 1  better 0  dC -0.653 (-15.78%)
+    v9f vs v8_real: dH +0.00016 (+0.15%)  worse 1  better 0  dC -0.672 (-16.24%)
+    v9f_off vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)
+== tracking_waist
+  v8_real      succ 239/239  H 0.4690  Hip_Link1 mean 0.493 max 1.536 >0.8 74  Body_Link mean 0.599 max 1.774 >0.8 85  margin<0.1 0  peak 0.122  C 2560.74 (Cw 2505.69 Ct 1.51)  ms mean 20.3 p90 34.7  fallback 0  step max 2.470 p99 1.857 >0.3 7  nonlocal None
+  v7_real      succ 239/239  H 0.4690  Hip_Link1 mean 0.493 max 1.536 >0.8 74  Body_Link mean 0.599 max 1.774 >0.8 85  margin<0.1 0  peak 0.122  C 2560.68 (Cw 2505.64 Ct 1.51)  ms mean 14.3 p90 21.0  fallback 0  step max 2.468 p99 1.857 >0.3 7  nonlocal None
+  v9f          succ 239/239  H 0.4335  Hip_Link1 mean 0.507 max 1.536 >0.8 74  Body_Link mean 0.615 max 1.774 >0.8 85  margin<0.1 0  peak 0.123  C 2600.12 (Cw 2541.18 Ct 1.52)  ms mean 5.9 p90 9.1  fallback 0  step max 0.150 p99 0.150 >0.3 0  nonlocal 0
+  v9f_off      succ 239/239  H 0.4690  Hip_Link1 mean 0.493 max 1.536 >0.8 74  Body_Link mean 0.599 max 1.774 >0.8 85  margin<0.1 0  peak 0.122  C 2560.74 (Cw 2505.69 Ct 1.51)  ms mean 14.3 p90 21.1  fallback 0  step max 2.470 p99 1.857 >0.3 7  nonlocal 239
+    v7_real vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC -0.053 (-0.00%)
+    v9f vs v8_real: dH -0.03558 (-7.59%)  worse 13  better 23  dC +39.384 (+1.54%)
+    v9f_off vs v8_real: dH +0.00000 (+0.00%)  worse 0  better 0  dC +0.000 (+0.00%)

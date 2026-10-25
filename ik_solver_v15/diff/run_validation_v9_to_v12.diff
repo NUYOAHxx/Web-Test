@@ -1,0 +1,18 @@
+--- a/run_validation.py
++++ b/run_validation.py
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env python3
+-"""Offline validation only. v9: the user-provided ik_common / ik_candidate / robot_model are tested (no test doubles)."""
++"""Offline validation only. v12 (= v9 + right-arm q_ready values): the user-provided ik_common / ik_candidate / robot_model are tested (no test doubles)."""
+ import ast
+ import json
+ from pathlib import Path
+@@ -13,7 +13,7 @@
+ def main():
+     suffix="pin"+pin.__version__.replace(".","_")
+     counts={}
+-    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes"):
++    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes"):
+         counts[name]=unittest.defaultTestLoader.loadTestsFromName("tests."+name).countTestCases()
+     suite=unittest.defaultTestLoader.discover("tests",top_level_dir=".")
+     with open("validation_"+suffix+".txt","w",encoding="utf-8") as out:

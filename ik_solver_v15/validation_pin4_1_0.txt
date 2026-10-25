@@ -1,0 +1,271 @@
+test_close_refuses_inflight_solve (tests.test_contract_flow.LegacyContractTests.test_close_refuses_inflight_solve) ... ok
+test_complete_state_rechecked_during_evaluate_physics (tests.test_contract_flow.LegacyContractTests.test_complete_state_rechecked_during_evaluate_physics) ... ok
+test_context_change_rejects_result (tests.test_contract_flow.LegacyContractTests.test_context_change_rejects_result) ... ok
+test_context_restored_after_success (tests.test_contract_flow.LegacyContractTests.test_context_restored_after_success) ... ok
+test_current_inactive_waist_used_for_arm_only_local_frame (tests.test_contract_flow.LegacyContractTests.test_current_inactive_waist_used_for_arm_only_local_frame) ... ok
+test_explicit_off_mode_is_labelled_unprotected (tests.test_contract_flow.LegacyContractTests.test_explicit_off_mode_is_labelled_unprotected) ... ok
+test_explicit_root_gravity_configuration (tests.test_contract_flow.LegacyContractTests.test_explicit_root_gravity_configuration) ... ok
+test_final_recheck_catches_changed_physics (tests.test_contract_flow.LegacyContractTests.test_final_recheck_catches_changed_physics) ... ok
+test_legacy_result_factory_and_type_retained (tests.test_contract_flow.LegacyContractTests.test_legacy_result_factory_and_type_retained) ... ok
+test_legacy_selector_receives_only_safe_shortlist (tests.test_contract_flow.LegacyContractTests.test_legacy_selector_receives_only_safe_shortlist) ... ok
+test_missing_allowable_limits_fail_closed (tests.test_contract_flow.LegacyContractTests.test_missing_allowable_limits_fail_closed) ... ok
+test_missing_snapshot_fail_closed (tests.test_contract_flow.LegacyContractTests.test_missing_snapshot_fail_closed) ... ok
+test_nearby_full_goal_three_orientation_modes (tests.test_contract_flow.LegacyContractTests.test_nearby_full_goal_three_orientation_modes) ... ok
+test_new_gate_covers_other_engine_candidates (tests.test_contract_flow.LegacyContractTests.test_new_gate_covers_other_engine_candidates) ... ok
+test_no_silent_model_mass_fallback (tests.test_contract_flow.LegacyContractTests.test_no_silent_model_mass_fallback) ... ok
+test_observation_not_clipped (tests.test_contract_flow.LegacyContractTests.test_observation_not_clipped) ... ok
+test_old_snapshot_fail_closed (tests.test_contract_flow.LegacyContractTests.test_old_snapshot_fail_closed) ... ok
+test_only_original_solver_class_is_used (tests.test_contract_flow.LegacyContractTests.test_only_original_solver_class_is_used) ... ok
+test_optional_direct_psi_source_functions_not_replaced (tests.test_contract_flow.LegacyContractTests.test_optional_direct_psi_source_functions_not_replaced) ... ok
+test_original_constructor_signature (tests.test_contract_flow.LegacyContractTests.test_original_constructor_signature) ... ok
+test_original_functions_and_methods_retained (tests.test_contract_flow.LegacyContractTests.test_original_functions_and_methods_retained) ... ok
+test_original_solve_positionals_and_one_keyword_extension (tests.test_contract_flow.LegacyContractTests.test_original_solve_positionals_and_one_keyword_extension) ... ok
+test_original_status_helper_controls_valid_status (tests.test_contract_flow.LegacyContractTests.test_original_status_helper_controls_valid_status) ... ok
+test_overload_no_approximate_bypass (tests.test_contract_flow.LegacyContractTests.test_overload_no_approximate_bypass) ... ok
+test_partial_full_state_not_filled_neutral (tests.test_contract_flow.LegacyContractTests.test_partial_full_state_not_filled_neutral) ... ok
+test_qprev_not_clipped_in_strict_mode (tests.test_contract_flow.LegacyContractTests.test_qprev_not_clipped_in_strict_mode) ... ok
+test_single_worker_busy_keeps_factory_type (tests.test_contract_flow.LegacyContractTests.test_single_worker_busy_keeps_factory_type) ... ok
+test_source_age_can_be_required (tests.test_contract_flow.LegacyContractTests.test_source_age_can_be_required) ... ok
+test_unguarded_active_joint_rejected (tests.test_contract_flow.LegacyContractTests.test_unguarded_active_joint_rejected) ... ok
+test_unlock_comparison_before_low_load_early_stop (tests.test_contract_flow.LegacyContractTests.test_unlock_comparison_before_low_load_early_stop) ... ok
+test_update_joint_state_keeps_original_solve_call (tests.test_contract_flow.LegacyContractTests.test_update_joint_state_keeps_original_solve_call) ... ok
+test_default_layout_matches_robot_model (tests.test_dual_arm_ik.TestCriteriaMatchSingleArm.test_default_layout_matches_robot_model) ... ok
+test_dls_constants (tests.test_dual_arm_ik.TestCriteriaMatchSingleArm.test_dls_constants) ... ok
+test_tolerances_and_criteria (tests.test_dual_arm_ik.TestCriteriaMatchSingleArm.test_tolerances_and_criteria) ... ok
+test_loading_module_pulls_in_no_single_arm_code (tests.test_dual_arm_ik.TestIndependence.test_loading_module_pulls_in_no_single_arm_code) ... ok
+test_source_imports_only_numpy_and_pinocchio (tests.test_dual_arm_ik.TestIndependence.test_source_imports_only_numpy_and_pinocchio) ... ok
+test_continuous_joints_are_2pi_periodic (tests.test_dual_arm_ik.TestModel.test_continuous_joints_are_2pi_periodic) ... ok
+test_fk_matches_independent_pinocchio (tests.test_dual_arm_ik.TestModel.test_fk_matches_independent_pinocchio) ... ok
+test_jacobian_finite_difference_full_and_tool_dir (tests.test_dual_arm_ik.TestModel.test_jacobian_finite_difference_full_and_tool_dir) ... ok
+test_layout_order_and_limits (tests.test_dual_arm_ik.TestModel.test_layout_order_and_limits) ... ok
+test_layout_validation (tests.test_dual_arm_ik.TestModel.test_layout_validation) ... ok
+test_tool_cone_gradient_finite_difference (tests.test_dual_arm_ik.TestModel.test_tool_cone_gradient_finite_difference) ... ok
+test_allow_approximate (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_allow_approximate) ... ok
+test_busy_instance_reports_solver_busy (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_busy_instance_reports_solver_busy) ... ok
+test_jump_limit_per_joint_dict (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_jump_limit_per_joint_dict) ... ok
+test_jump_limited_target_is_classified_within_budget (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_jump_limited_target_is_classified_within_budget)
+解需要超过 max_joint_jump_rad 的转动：框内搜索 + 不加框探测 -> JOINT_JUMP_LIMIT（不报超时或不可达）。 ... ok
+test_jump_policy_prefer (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_jump_policy_prefer) ... ok
+test_jump_policy_reject (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_jump_policy_reject) ... ok
+test_library_seeds_respect_jump_box (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_library_seeds_respect_jump_box) ... ok
+test_near_limit_classification (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_near_limit_classification) ... ok
+test_not_jointly_reachable_by_diagnosis (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_not_jointly_reachable_by_diagnosis) ... ok
+test_not_jointly_reachable_precheck (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_not_jointly_reachable_precheck) ... ok
+test_outside_workspace_is_immediate (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_outside_workspace_is_immediate) ... ok
+test_pair_distance_bound_is_exact_and_waist_independent (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_pair_distance_bound_is_exact_and_waist_independent) ... ok
+test_threads_with_separate_instances (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_threads_with_separate_instances) ... ok
+test_time_budget_is_respected (tests.test_dual_arm_ik.TestPoliciesAndFailures.test_time_budget_is_respected) ... ok
+test_continuation_from_unsettled_posture (tests.test_dual_arm_ik.TestSolve.test_continuation_from_unsettled_posture)
+路点跟踪（单臂 v9 续算规则）：q_prev 远离 q_ready 时，小步目标也不让姿态漂走（不做达标后的整理）。 ... ok
+test_continuation_returns_solved_q_prev_unchanged (tests.test_dual_arm_ik.TestSolve.test_continuation_returns_solved_q_prev_unchanged) ... ok
+test_continuation_switch_and_regime (tests.test_dual_arm_ik.TestSolve.test_continuation_switch_and_regime) ... ok
+test_deterministic_across_instances (tests.test_dual_arm_ik.TestSolve.test_deterministic_across_instances) ... ok
+test_hold_keep_free (tests.test_dual_arm_ik.TestSolve.test_hold_keep_free) ... ok
+test_joint_state_supplies_q_prev (tests.test_dual_arm_ik.TestSolve.test_joint_state_supplies_q_prev) ... ok
+test_library_is_shared_between_instances (tests.test_dual_arm_ik.TestSolve.test_library_is_shared_between_instances) ... ok
+test_orientation_modes (tests.test_dual_arm_ik.TestSolve.test_orientation_modes) ... ok
+test_q_prev_slightly_outside_limits (tests.test_dual_arm_ik.TestSolve.test_q_prev_slightly_outside_limits) ... ok
+test_random_reachable_targets (tests.test_dual_arm_ik.TestSolve.test_random_reachable_targets) ... ok
+test_tracking_small_steps (tests.test_dual_arm_ik.TestSolve.test_tracking_small_steps) ... ok
+test_update_prev_flag (tests.test_dual_arm_ik.TestSolve.test_update_prev_flag) ... ok
+test_bad_config (tests.test_dual_arm_ik.TestValidation.test_bad_config) ... ok
+test_bad_inputs (tests.test_dual_arm_ik.TestValidation.test_bad_inputs) ... ok
+test_fk_and_reset_prev_validate (tests.test_dual_arm_ik.TestValidation.test_fk_and_reset_prev_validate) ... ok
+test_absolute_load_objective_improves_synthetic_redundant_arm (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_absolute_load_objective_improves_synthetic_redundant_arm)
+This is a synthetic regression, not a user-robot performance claim. ... ok
+test_antipodal_tool_direction_escape_one_dof (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_antipodal_tool_direction_escape_one_dof) ... ok
+test_com_jacobian (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_com_jacobian) ... ok
+test_continuous_mapping_and_roundtrip_branch (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_continuous_mapping_and_roundtrip_branch) ... ok
+test_continuous_scatter_midpoint_finite (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_continuous_scatter_midpoint_finite) ... ok
+test_entire_secondary_gradient (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_entire_secondary_gradient) ... ok
+test_explicit_search_window_is_separate (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_explicit_search_window_is_separate) ... ok
+test_final_seed_diagnostics_match_returned_configuration (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_final_seed_diagnostics_match_returned_configuration) ... ok
+test_gravity_derivative (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_gravity_derivative) ... ok
+test_metric_counterexample (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_metric_counterexample) ... ok
+test_metric_full_spd_nullspace_descent (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_metric_full_spd_nullspace_descent) ... ok
+test_no_implicit_reference_angle_windows (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_no_implicit_reference_angle_windows) ... ok
+test_nonactive_state_not_zero (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_nonactive_state_not_zero) ... ok
+test_one_dof_prismatic_mapping_gravity_and_solve (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_one_dof_prismatic_mapping_gravity_and_solve) ... ok
+test_potential_gradient_includes_root_and_fixed_link_mass (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_potential_gradient_includes_root_and_fixed_link_mass) ... ok
+test_raw_effort_no_one_fallback (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_raw_effort_no_one_fallback) ... ok
+test_secondary_and_task_step_respect_bounds (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_secondary_and_task_step_respect_bounds) ... ok
+test_task_jacobians_three_modes (tests.test_pinocchio_numeric.RealPinocchioNumericTests.test_task_jacobians_three_modes) ... ok
+test_absolute_gradient_finite_difference (tests.test_policy_state.TestPolicy.test_absolute_gradient_finite_difference) ... ok
+test_capacities_immutable (tests.test_policy_state.TestPolicy.test_capacities_immutable) ... ok
+test_exact_limit_accepted (tests.test_policy_state.TestPolicy.test_exact_limit_accepted) ... ok
+test_invalid_tau_never_zero_fallback (tests.test_policy_state.TestPolicy.test_invalid_tau_never_zero_fallback) ... ok
+test_missing_capacity (tests.test_policy_state.TestPolicy.test_missing_capacity) ... ok
+test_overload_is_per_joint_not_average (tests.test_policy_state.TestPolicy.test_overload_is_per_joint_not_average) ... ok
+test_peak_joint (tests.test_policy_state.TestPolicy.test_peak_joint) ... ok
+test_reject_empty_capacities (tests.test_policy_state.TestPolicy.test_reject_empty_capacities) ... ok
+test_reject_negative_capacity (tests.test_policy_state.TestPolicy.test_reject_negative_capacity) ... ok
+test_reject_nonfinite_capacity (tests.test_policy_state.TestPolicy.test_reject_nonfinite_capacity) ... ok
+test_reject_zero_capacity (tests.test_policy_state.TestPolicy.test_reject_zero_capacity) ... ok
+test_relative_gradient_finite_difference (tests.test_policy_state.TestPolicy.test_relative_gradient_finite_difference) ... ok
+test_soft_penalty_off_below_threshold (tests.test_policy_state.TestPolicy.test_soft_penalty_off_below_threshold) ... ok
+test_soft_penalty_on_above_threshold (tests.test_policy_state.TestPolicy.test_soft_penalty_on_above_threshold) ... ok
+test_duplicate_ros_joint_names_rejected (tests.test_policy_state.TestSnapshot.test_duplicate_ros_joint_names_rejected) ... ok
+test_future_source (tests.test_policy_state.TestSnapshot.test_future_source) ... ok
+test_json_nonfinite_is_explicit_null (tests.test_policy_state.TestSnapshot.test_json_nonfinite_is_explicit_null) ... ok
+test_old_receipt (tests.test_policy_state.TestSnapshot.test_old_receipt) ... ok
+test_old_source (tests.test_policy_state.TestSnapshot.test_old_source) ... ok
+test_reflection_rejected (tests.test_policy_state.TestSnapshot.test_reflection_rejected) ... ok
+test_ros_message_capture (tests.test_policy_state.TestSnapshot.test_ros_message_capture) ... ok
+test_snapshot_copies_input (tests.test_policy_state.TestSnapshot.test_snapshot_copies_input) ... ok
+test_snapshot_immutable (tests.test_policy_state.TestSnapshot.test_snapshot_immutable) ... ok
+test_source_verification_required (tests.test_policy_state.TestSnapshot.test_source_verification_required) ... ok
+test_transform_validation (tests.test_policy_state.TestSnapshot.test_transform_validation) ... ok
+test_q_ready_values (tests.test_v12_changes.ArmConfigValuesTest.test_q_ready_values) ... ok
+test_right_entry_has_same_keys_as_left (tests.test_v12_changes.ArmConfigValuesTest.test_right_entry_has_same_keys_as_left) ... ok
+test_near_one_shot_targets (tests.test_v12_changes.MirrorEquivarianceTest.test_near_one_shot_targets) ... ok
+test_tracking (tests.test_v12_changes.MirrorEquivarianceTest.test_tracking) ... ok
+test_fixture_fk_is_mirrored_for_any_q (tests.test_v12_changes.MirroredReadyPoseTest.test_fixture_fk_is_mirrored_for_any_q) ... ok
+test_left_values_for_right_arm_are_not_mirrored (tests.test_v12_changes.MirroredReadyPoseTest.test_left_values_for_right_arm_are_not_mirrored)
+v9 原写法（右臂取左臂数值）：q_ready 处右臂 TCP 不在左臂 TCP 的镜像位置。 ... ok
+test_ready_pose_is_mirrored (tests.test_v12_changes.MirroredReadyPoseTest.test_ready_pose_is_mirrored) ... ok
+test_waist_comfort_window_is_the_same (tests.test_v12_changes.MirroredReadyPoseTest.test_waist_comfort_window_is_the_same) ... ok
+test_defaults (tests.test_v13_changes.ConfigTests.test_defaults) ... ok
+test_library_seed_count_zero_queues_nothing (tests.test_v13_changes.ConfigTests.test_library_seed_count_zero_queues_nothing) ... ok
+test_validation (tests.test_v13_changes.ConfigTests.test_validation) ... ok
+test_continuation_skips_library (tests.test_v13_changes.ContinuationLibraryTests.test_continuation_skips_library) ... ok
+test_library_in_continuation_switches_branch (tests.test_v13_changes.ContinuationLibraryTests.test_library_in_continuation_switches_branch) ... ok
+test_reposition_still_uses_library (tests.test_v13_changes.ContinuationLibraryTests.test_reposition_still_uses_library) ... ok
+test_early_rescue (tests.test_v13_changes.JumpRescueTests.test_early_rescue) ... ok
+test_no_rescue_with_jump_box_or_prefer_policy (tests.test_v13_changes.JumpRescueTests.test_no_rescue_with_jump_box_or_prefer_policy)
+上限 < π 时 v9 的跳变框与不加框重搜照旧（不跑 jump_box）；prefer 策略不重搜。 ... ok
+test_rescue_after_regular_stages (tests.test_v13_changes.JumpRescueTests.test_rescue_after_regular_stages) ... ok
+test_bound_is_a_strict_upper_bound (tests.test_v13_changes.LockedReachTests.test_bound_is_a_strict_upper_bound) ... ok
+test_near_target_keeps_locked_seed (tests.test_v13_changes.LockedReachTests.test_near_target_keeps_locked_seed) ... ok
+test_unreachable_locked_seed_is_skipped (tests.test_v13_changes.LockedReachTests.test_unreachable_locked_seed_is_skipped) ... ok
+test_comfort_stage_falls_back_early (tests.test_v13_changes.SearchOrderTests.test_comfort_stage_falls_back_early)
+舒适窗内无解：种子库种子跑完即放开（v12 要在窗内跑满 max_seeds 个种子）。 ... ok
+test_library_seeds_follow_lead_seeds (tests.test_v13_changes.SearchOrderTests.test_library_seeds_follow_lead_seeds) ... ok
+test_patience_without_library (tests.test_v13_changes.SearchOrderTests.test_patience_without_library) ... ok
+test_instances_share_one_library (tests.test_v13_changes.SeedLibraryTests.test_instances_share_one_library) ... ok
+test_poses_match_forward_kinematics (tests.test_v13_changes.SeedLibraryTests.test_poses_match_forward_kinematics) ... ok
+test_reproducible_and_off (tests.test_v13_changes.SeedLibraryTests.test_reproducible_and_off) ... ok
+test_select_exact_match_first_and_separation (tests.test_v13_changes.SeedLibraryTests.test_select_exact_match_first_and_separation) ... ok
+test_select_only_inside_bounds (tests.test_v13_changes.SeedLibraryTests.test_select_only_inside_bounds) ... ok
+test_shape_bounds_and_read_only (tests.test_v13_changes.SeedLibraryTests.test_shape_bounds_and_read_only) ... ok
+test_tool_cone_ignores_angle_inside_cone (tests.test_v13_changes.SeedLibraryTests.test_tool_cone_ignores_angle_inside_cone)
+tool_cone：工具轴夹角在锥角以内的样本只按位置排序（姿态差 = 夹角超出锥角的部分）。 ... ok
+test_off_matches_v12 (tests.test_v13_changes.V12EquivalenceTests.test_off_matches_v12) ... ok
+test_helpers (tests.test_v14_cleanup.ConfigValidationTests.test_helpers) ... ok
+test_messages (tests.test_v14_cleanup.ConfigValidationTests.test_messages) ... ok
+test_sns_diagonal_metric_matches_matrix_path_bitwise (tests.test_v14_cleanup.DlsCompatTests.test_sns_diagonal_metric_matches_matrix_path_bitwise) ... ok
+test_confirmed_efforts_only_during_strict_calls (tests.test_v14_cleanup.LoadContextRestoreTests.test_confirmed_efforts_only_during_strict_calls) ... ok
+test_constructor_and_solve_signatures (tests.test_v14_cleanup.PublicApiTests.test_constructor_and_solve_signatures) ... ok
+test_reexports_are_the_defining_objects (tests.test_v14_cleanup.PublicApiTests.test_reexports_are_the_defining_objects) ... ok
+test_version (tests.test_v14_cleanup.PublicApiTests.test_version) ... ok
+test_branch_tools_are_ik_common_functions (tests.test_v14_cleanup.RemovedNamesTests.test_branch_tools_are_ik_common_functions) ... ok
+test_solver_dls_aliases_and_test_only_entries_removed (tests.test_v14_cleanup.RemovedNamesTests.test_solver_dls_aliases_and_test_only_entries_removed) ... ok
+test_unused_solver_imports_removed (tests.test_v14_cleanup.RemovedNamesTests.test_unused_solver_imports_removed) ... ok
+test_effective_bounds_windows_are_keyword_only (tests.test_v14_cleanup.SignatureCleanupTests.test_effective_bounds_windows_are_keyword_only) ... ok
+test_mask_helpers_fallback_chain (tests.test_v14_cleanup.SignatureCleanupTests.test_mask_helpers_fallback_chain) ... ok
+test_removed_parameters (tests.test_v14_cleanup.SignatureCleanupTests.test_removed_parameters) ... ok
+test_solver_multi_turn_mask_matches_ik_common (tests.test_v14_cleanup.SignatureCleanupTests.test_solver_multi_turn_mask_matches_ik_common) ... ok
+test_chain_fk_matches_per_joint_v14 (tests.test_v15_changes.BitwiseSpeedupTests.test_chain_fk_matches_per_joint_v14) ... ok
+test_contiguous_range_matches_v14 (tests.test_v15_changes.BitwiseSpeedupTests.test_contiguous_range_matches_v14) ... ok
+test_sns_core_matches_reference_on_captured_calls (tests.test_v15_changes.BitwiseSpeedupTests.test_sns_core_matches_reference_on_captured_calls)
+真实求解中捕获的 SNS 调用逐个与 v14 原实现对照（含钳制、固定关节、续算框）。 ... ok
+test_sns_core_matches_reference_on_random_problems (tests.test_v15_changes.BitwiseSpeedupTests.test_sns_core_matches_reference_on_random_problems) ... ok
+test_validate_transform_matches_v14 (tests.test_v15_changes.BitwiseSpeedupTests.test_validate_transform_matches_v14) ... ok
+test_default_is_no_settle (tests.test_v15_changes.ContinuationHoldTests.test_default_is_no_settle) ... ok
+test_small_motion_gives_proportional_steps (tests.test_v15_changes.ContinuationHoldTests.test_small_motion_gives_proportional_steps) ... ok
+test_static_target_returns_q_prev_unchanged (tests.test_v15_changes.ContinuationHoldTests.test_static_target_returns_q_prev_unchanged) ... ok
+test_v14_mode_drifts_on_static_target (tests.test_v15_changes.ContinuationHoldTests.test_v14_mode_drifts_on_static_target) ... ok
+test_v14_mode_small_motion_drifts (tests.test_v15_changes.ContinuationHoldTests.test_v14_mode_small_motion_drifts) ... ok
+test_margin_bounds_define_the_margin (tests.test_v15_changes.DlsPostureSettleTests.test_margin_bounds_define_the_margin) ... ok
+test_margin_bounds_validation (tests.test_v15_changes.DlsPostureSettleTests.test_margin_bounds_validation) ... ok
+test_near_limit_seed_keeps_settling (tests.test_v15_changes.DlsPostureSettleTests.test_near_limit_seed_keeps_settling) ... ok
+test_null_step_capped_before_pose_reached (tests.test_v15_changes.DlsPostureSettleTests.test_null_step_capped_before_pose_reached) ... ok
+test_seed_solution_returned_as_is (tests.test_v15_changes.DlsPostureSettleTests.test_seed_solution_returned_as_is) ... ok
+test_version (tests.test_v15_changes.VersionTests.test_version) ... ok
+test_com_includes_root_and_fixed_masses (tests.test_v6_constraints.ComTests.test_com_includes_root_and_fixed_masses) ... ok
+test_com_jacobian_matches_finite_difference (tests.test_v6_constraints.ComTests.test_com_jacobian_matches_finite_difference) ... ok
+test_default_jump_limit_reported_on_success (tests.test_v6_constraints.JointJumpAndFailureCodeTests.test_default_jump_limit_reported_on_success) ... ok
+test_per_joint_limits_and_validation (tests.test_v6_constraints.JointJumpAndFailureCodeTests.test_per_joint_limits_and_validation) ... ok
+test_prefer_policy_returns_flagged_solution (tests.test_v6_constraints.JointJumpAndFailureCodeTests.test_prefer_policy_returns_flagged_solution) ... ok
+test_reject_policy_fails_with_joint_jump_code (tests.test_v6_constraints.JointJumpAndFailureCodeTests.test_reject_policy_fails_with_joint_jump_code) ... ok
+test_seed_exceptions_are_reported_not_misread_as_load (tests.test_v6_constraints.JointJumpAndFailureCodeTests.test_seed_exceptions_are_reported_not_misread_as_load) ... ok
+test_unreachable_target_is_pose_failure_not_load_failure (tests.test_v6_constraints.JointJumpAndFailureCodeTests.test_unreachable_target_is_pose_failure_not_load_failure) ... ok
+test_vectors_cached_and_read_only (tests.test_v6_constraints.LoadPolicyCacheTests.test_vectors_cached_and_read_only) ... ok
+test_scatter_seeds_start_with_q_prev (tests.test_v6_constraints.NullspaceAndBoundsTests.test_scatter_seeds_start_with_q_prev) ... ok
+test_sns_nullspace_step_is_descent_with_nonuniform_metric (tests.test_v6_constraints.NullspaceAndBoundsTests.test_sns_nullspace_step_is_descent_with_nonuniform_metric) ... ok
+test_sns_rounding_stays_within_snap_tolerance (tests.test_v6_constraints.NullspaceAndBoundsTests.test_sns_rounding_stays_within_snap_tolerance) ... ok
+test_multi_turn_joint_recenters_physically_and_result_keeps_improvement (tests.test_v6_constraints.PostureAndBranchTests.test_multi_turn_joint_recenters_physically_and_result_keeps_improvement) ... ok
+test_converges_and_reports_peak (tests.test_v6_constraints.SeedLoopTests.test_converges_and_reports_peak) ... ok
+test_timeout_inside_line_search_is_time_budget (tests.test_v6_constraints.SeedLoopTests.test_timeout_inside_line_search_is_time_budget) ... ok
+test_unreachable_locked_waist_seed_stops_on_stall (tests.test_v6_constraints.SeedLoopTests.test_unreachable_locked_waist_seed_stops_on_stall) ... ok
+test_defaults_and_explicit (tests.test_v7_speed.EarlyStopDefaultTests.test_defaults_and_explicit) ... ok
+test_explicit_above_soft_ratio_rejected (tests.test_v7_speed.EarlyStopDefaultTests.test_explicit_above_soft_ratio_rejected) ... ok
+test_iteration_constants (tests.test_v7_speed.EarlyStopDefaultTests.test_iteration_constants) ... ok
+test_invalid_max_count (tests.test_v7_speed.ScatterSeedPrefixTests.test_invalid_max_count) ... ok
+test_prefix_matches_v6 (tests.test_v7_speed.ScatterSeedPrefixTests.test_prefix_matches_v6) ... ok
+test_equivalent_locked_seed_skipped (tests.test_v7_speed.SeedOrderTests.test_equivalent_locked_seed_skipped) ... ok
+test_invalid_tolerance_rejected (tests.test_v7_speed.SeedOrderTests.test_invalid_tolerance_rejected) ... ok
+test_locked_seed_runs_when_waist_moves (tests.test_v7_speed.SeedOrderTests.test_locked_seed_runs_when_waist_moves) ... ok
+test_no_waist_configuration_unchanged (tests.test_v7_speed.SeedOrderTests.test_no_waist_configuration_unchanged) ... ok
+test_release_reruns_q_prev_within_seed_limit (tests.test_v7_speed.SeedOrderTests.test_release_reruns_q_prev_within_seed_limit) ... ok
+test_skip_without_load_protection (tests.test_v7_speed.SeedOrderTests.test_skip_without_load_protection) ... ok
+test_v6_order_when_tolerance_none (tests.test_v7_speed.SeedOrderTests.test_v6_order_when_tolerance_none) ... ok
+test_lapack_cholesky_matches_scipy (tests.test_v7_speed.V6EquivalenceTests.test_lapack_cholesky_matches_scipy) ... ok
+test_q_builder_and_vector_norm (tests.test_v7_speed.V6EquivalenceTests.test_q_builder_and_vector_norm) ... ok
+test_seed_solver_matches_v6_exactly (tests.test_v7_speed.V6EquivalenceTests.test_seed_solver_matches_v6_exactly) ... ok
+test_task_evaluator_single_frame_matches_public (tests.test_v7_speed.V6EquivalenceTests.test_task_evaluator_single_frame_matches_public) ... ok
+test_reach_is_tight_upper_bound (tests.test_v8_changes.ArmReachTests.test_reach_is_tight_upper_bound) ... ok
+test_reach_sums_offsets_after_shoulder (tests.test_v8_changes.ArmReachTests.test_reach_sums_offsets_after_shoulder) ... ok
+test_continuation_tol_config (tests.test_v8_changes.ComfortSearchTests.test_continuation_tol_config) ... ok
+test_fallback_when_window_has_no_solution (tests.test_v8_changes.ComfortSearchTests.test_fallback_when_window_has_no_solution) ... ok
+test_large_waist_tracking_with_jump_limit_is_continuous (tests.test_v8_changes.ComfortSearchTests.test_large_waist_tracking_with_jump_limit_is_continuous)
+腰部大幅跟踪（超出舒适窗）+ max_joint_jump_rad：每个路点都按续算求解，无卡腰 / 放开瞬变。 ... ok
+test_near_target_stays_in_comfort_stage (tests.test_v8_changes.ComfortSearchTests.test_near_target_stays_in_comfort_stage) ... ok
+test_regime_follows_target_displacement (tests.test_v8_changes.ComfortSearchTests.test_regime_follows_target_displacement)
+目标相对 FK(q_prev) 的位移决定是否加窗：小位移 = 续算（不加窗，与关闭舒适窗逐值一致），大位移 = 重新定位。 ... ok
+test_without_waist_comfort_is_disabled (tests.test_v8_changes.ComfortSearchTests.test_without_waist_comfort_is_disabled) ... ok
+test_reference_com_matches_cost_and_no_drift (tests.test_v8_changes.OffModeReferenceComTests.test_reference_com_matches_cost_and_no_drift) ... ok
+test_frames_resolve_to_bodies (tests.test_v8_changes.SameNameUrdfTests.test_frames_resolve_to_bodies) ... ok
+test_solutions_identical_to_unique_names (tests.test_v8_changes.SameNameUrdfTests.test_solutions_identical_to_unique_names) ... ok
+test_dls_tolerance_not_looser_than_final_check (tests.test_v8_changes.ToleranceTests.test_dls_tolerance_not_looser_than_final_check) ... ok
+test_balanced_upright_window_is_balance_angle_pm_asin_s (tests.test_v8_changes.WaistComfortDeriveTests.test_balanced_upright_window_is_balance_angle_pm_asin_s) ... ok
+test_explicit_off_and_invalid_specs (tests.test_v8_changes.WaistComfortDeriveTests.test_explicit_off_and_invalid_specs) ... ok
+test_low_allowable_effort_narrows_load_side (tests.test_v8_changes.WaistComfortDeriveTests.test_low_allowable_effort_narrows_load_side) ... ok
+test_non_sinusoidal_torque_disables_window_for_that_joint (tests.test_v8_changes.WaistComfortDeriveTests.test_non_sinusoidal_torque_disables_window_for_that_joint) ... ok
+test_pitch_torque_is_exact_sinusoid (tests.test_v8_changes.WaistComfortDeriveTests.test_pitch_torque_is_exact_sinusoid) ... ok
+test_pitch_window_edges_are_where_a_criterion_binds (tests.test_v8_changes.WaistComfortDeriveTests.test_pitch_window_edges_are_where_a_criterion_binds) ... ok
+test_print_info_reports_windows (tests.test_v8_changes.WaistComfortDeriveTests.test_print_info_reports_windows) ... ok
+test_yaw_axis_is_gravity_free_pm_90deg (tests.test_v8_changes.WaistComfortDeriveTests.test_yaw_axis_is_gravity_free_pm_90deg) ... ok
+test_zero_gravity_makes_every_waist_joint_gravity_free (tests.test_v8_changes.WaistComfortDeriveTests.test_zero_gravity_makes_every_waist_joint_gravity_free) ... ok
+test_config_validation (tests.test_v9_changes.ContinuationLocalTests.test_config_validation) ... ok
+test_diagnostics_for_local_solution (tests.test_v9_changes.ContinuationLocalTests.test_diagnostics_for_local_solution) ... ok
+test_no_local_solution_falls_back_to_regular_search (tests.test_v9_changes.ContinuationLocalTests.test_no_local_solution_falls_back_to_regular_search)
+续算框太小、框内无可接受解：回到常规搜索并照常求解（续算候选留在池中）。 ... ok
+test_ordinary_tracking_keeps_waist_at_ready (tests.test_v9_changes.ContinuationLocalTests.test_ordinary_tracking_keeps_waist_at_ready)
+普通跟踪（腰部目标不动）：腰部留在 q_ready（v8 在负荷容差带边界来回切换，单步 0.198 rad）。 ... ok
+test_reposition_identical_to_local_off (tests.test_v9_changes.ContinuationLocalTests.test_reposition_identical_to_local_off) ... ok
+test_sine_waist_tracking_with_jump_limit_all_succeed (tests.test_v9_changes.ContinuationLocalTests.test_sine_waist_tracking_with_jump_limit_all_succeed)
+bench 的腰部大幅正弦跟踪（前 120 个路点）+ max_joint_jump_rad=0.25：全部成功，单步不超过续算框。 ... ok
+test_waist_ramp_has_no_branch_switch (tests.test_v9_changes.ContinuationLocalTests.test_waist_ramp_has_no_branch_switch)
+腰部大幅跟踪（无跳变限制）：v9 全程局部续算、单步 < 0.15；关闭续算局部即 v8，出现 > 0.5 rad 的分支切换。 ... ok
+test_chain_without_waist_has_zero_waist_cost (tests.test_v9_changes.IkCandidateTests.test_chain_without_waist_has_zero_waist_cost) ... ok
+test_evaluate_config_quality_handles_continuous_and_template (tests.test_v9_changes.IkCandidateTests.test_evaluate_config_quality_handles_continuous_and_template) ... ok
+test_finalize_without_per_seed (tests.test_v9_changes.IkCandidateTests.test_finalize_without_per_seed) ... ok
+test_status_vocabulary_matches_public_status (tests.test_v9_changes.IkCandidateTests.test_status_vocabulary_matches_public_status) ... ok
+test_waist_indices_follow_joint_names (tests.test_v9_changes.IkCandidateTests.test_waist_indices_follow_joint_names) ... ok
+test_clip_to_bounds_zero_span (tests.test_v9_changes.IkCommonTests.test_clip_to_bounds_zero_span) ... ok
+test_normalize_rejects_non_finite (tests.test_v9_changes.IkCommonTests.test_normalize_rejects_non_finite) ... ok
+test_target_frames_requires_transform (tests.test_v9_changes.IkCommonTests.test_target_frames_requires_transform) ... ok
+test_validate_transform_requires_rigid (tests.test_v9_changes.IkCommonTests.test_validate_transform_requires_rigid) ... ok
+test_box_not_used_for_prefer_policy (tests.test_v9_changes.JumpBoxTests.test_box_not_used_for_prefer_policy) ... ok
+test_only_over_limit_solutions_still_report_joint_jump_limit (tests.test_v9_changes.JumpBoxTests.test_only_over_limit_solutions_still_report_joint_jump_limit) ... ok
+test_nan_psi_ready_scores_stay_finite (tests.test_v9_changes.PsiReadyTests.test_nan_psi_ready_scores_stay_finite)
+psi_ready = NaN：臂角项记 0，其余代价照算（旧实现所有候选 cost = inf，择优失效）。 ... ok
+test_solver_warns_when_psi_ready_undefined (tests.test_v9_changes.PsiReadyTests.test_solver_warns_when_psi_ready_undefined) ... ok
+test_default_sew_joint_names_match_arm_config (tests.test_v9_changes.RobotModelTests.test_default_sew_joint_names_match_arm_config)
+S/E/W 兜底名与 ARM_CONFIGS 的 LHand_Link* 命名一致：链未给 s/e/w 时臂角仍有定义。 ... ok
+test_fk_pose_and_joints_missing_joint_raises (tests.test_v9_changes.RobotModelTests.test_fk_pose_and_joints_missing_joint_raises) ... ok
+
+----------------------------------------------------------------------
+Ran 250 tests in 21.544s
+
+OK
