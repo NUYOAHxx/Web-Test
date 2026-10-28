@@ -1,0 +1,3396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>机器人整机重力矩 3D 可视化系统</title>
+  
+  <style>
+    /* ========================================================
+       机器人整机重力矩 3D 可视化程序 - 样式表 (单文件内联)
+       ======================================================== */
+    :root {
+      --bg-primary: #0b0f19;
+      --bg-panel: rgba(17, 24, 39, 0.9);
+      --bg-card: rgba(30, 41, 59, 0.7);
+      --bg-input: #1e293b;
+      --border-color: rgba(255, 255, 255, 0.1);
+      --border-focus: #3b82f6;
+
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-highlight: #38bdf8;
+
+      --color-pivot: #0284c7;
+      --color-com: #f59e0b;
+      --color-r: #10b981;
+      --color-fg: #ef4444;
+      --color-arm: #06b6d4;
+      --color-torque: #a855f7;
+      --color-torquex: #ec4899;
+      --color-torquey: #8b5cf6;
+      --color-phi: #f97316;
+      --color-theta: #14b8a6;
+
+      --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.3);
+      --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.4);
+      --shadow-lg: 0 10px 25px rgba(0, 0, 0, 0.5);
+
+      --badge-bg-alpha: 0.25;
+      --badge-blur: 8px;
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: var(--bg-primary);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+    }
+
+    .app-container {
+      display: flex;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    /* ---------------- 左侧 3D 场景区域 ---------------- */
+    .viewport-area {
+      position: relative;
+      flex: 1;
+      height: 100%;
+      overflow: hidden;
+      background: radial-gradient(circle at 50% 50%, #151d2f 0%, #0b0f19 100%);
+    }
+
+    #webgl_container {
+      position: relative;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      outline: none;
+    }
+
+    .viewport-header {
+      position: absolute;
+      top: 16px;
+      left: 20px;
+      right: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      pointer-events: none;
+      z-index: 20;
+    }
+
+    .brand-title {
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--bg-panel);
+      backdrop-filter: blur(12px);
+      padding: 8px 18px;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      box-shadow: var(--shadow-md);
+    }
+
+    .brand-icon { font-size: 20px; }
+    .brand-title h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.5px; }
+    .brand-subtitle {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-left: 6px;
+      padding: 2px 6px;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 4px;
+    }
+
+    .camera-toolbar {
+      pointer-events: auto;
+      display: flex;
+      background: var(--bg-panel);
+      backdrop-filter: blur(12px);
+      padding: 4px;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      box-shadow: var(--shadow-md);
+      gap: 4px;
+    }
+
+    .btn-view {
+      background: transparent;
+      color: var(--text-muted);
+      border: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .btn-view:hover { color: var(--text-main); background: rgba(255, 255, 255, 0.08); }
+    .btn-view.active {
+      color: #fff;
+      background: #2563eb;
+      box-shadow: 0 0 10px rgba(37, 99, 235, 0.4);
+    }
+
+    .viewport-legend {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: var(--bg-panel);
+      backdrop-filter: blur(12px);
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      box-shadow: var(--shadow-md);
+      z-index: 20;
+      max-width: 480px;
+    }
+
+    .legend-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .legend-items {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      font-size: 12px;
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    .legend-line { width: 14px; height: 3px; display: inline-block; border-radius: 2px; }
+    .legend-line.dashed {
+      background: repeating-linear-gradient(90deg, #f43f5e 0, #f43f5e 3px, transparent 3px, transparent 6px);
+    }
+
+    .viewport-hint {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      background: var(--bg-panel);
+      backdrop-filter: blur(12px);
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-color);
+      font-size: 11px;
+      color: var(--text-muted);
+      pointer-events: none;
+      z-index: 20;
+    }
+
+    /* ---------------- 右侧控制与数据侧边栏 ---------------- */
+    .sidebar-area {
+      width: 440px;
+      height: 100%;
+      background: var(--bg-panel);
+      border-left: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      box-shadow: var(--shadow-lg);
+      z-index: 30;
+    }
+
+    .sidebar-scrollable {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .sidebar-scrollable::-webkit-scrollbar { width: 6px; }
+    .sidebar-scrollable::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 3px;
+    }
+
+    .panel-section {
+      background: var(--bg-card);
+      border-radius: 10px;
+      border: 1px solid var(--border-color);
+      padding: 12px 14px;
+    }
+
+    .section-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .badge {
+      font-size: 10px;
+      padding: 2px 6px;
+      background: rgba(59, 130, 246, 0.2);
+      color: #60a5fa;
+      border-radius: 4px;
+    }
+
+    .preset-select {
+      width: 100%;
+      padding: 7px 10px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-main);
+      font-size: 12px;
+      outline: none;
+      cursor: pointer;
+    }
+    .preset-select:focus { border-color: var(--border-focus); }
+
+    .case-desc-box {
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: rgba(0, 0, 0, 0.25);
+      border-left: 3px solid #3b82f6;
+      border-radius: 4px;
+      font-size: 12px;
+      line-height: 1.5;
+      color: #cbd5e1;
+    }
+
+    /* MoveIt 2 面板 */
+    .ros2-panel {
+      border-left: 3px solid #3b82f6;
+      background: rgba(30, 41, 59, 0.85);
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+      transition: all 0.3s ease;
+    }
+    .status-disconnected { background: #64748b; box-shadow: 0 0 0 2px rgba(100, 116, 139, 0.2); }
+    .status-connecting { background: #f59e0b; box-shadow: 0 0 6px #f59e0b; }
+    .status-connected { background: #10b981; box-shadow: 0 0 8px #10b981; }
+    .status-active { background: #06b6d4; box-shadow: 0 0 8px #06b6d4; }
+    
+    .status-text {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+      line-height: 1.4;
+    }
+    .btn-group-ros { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .btn-primary-action {
+      flex: 1; min-width: 100px; background: #2563eb; color: #fff;
+      border: none; padding: 6px 10px; border-radius: 6px; font-size: 12px;
+      font-weight: 500; cursor: pointer; transition: all 0.2s;
+    }
+    .btn-primary-action:hover { background: #1d4ed8; }
+    .btn-danger-action {
+      flex: 1; min-width: 100px; background: #dc2626; color: #fff;
+      border: none; padding: 6px 10px; border-radius: 6px; font-size: 12px;
+      font-weight: 500; cursor: pointer; transition: all 0.2s;
+    }
+    .btn-danger-action:hover { background: #b91c1c; }
+    .btn-secondary-action {
+      background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border-color);
+      color: #cbd5e1; padding: 6px 8px; border-radius: 6px; font-size: 11px;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .btn-secondary-action:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+    .btn-secondary-action.active { background: rgba(239, 68, 68, 0.2); border-color: #ef4444; color: #f87171; }
+    .model-info-box {
+      margin-top: 8px; padding: 6px 10px; background: rgba(15, 23, 42, 0.7);
+      border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 11px; color: #94a3b8; line-height: 1.4;
+    }
+    .model-info-box strong { color: #38bdf8; }
+
+    /* 控制行组件 */
+    .control-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .control-row:last-child { margin-bottom: 0; }
+    .control-label { width: 75px; font-size: 12px; color: var(--text-muted); display: flex; align-items: center; gap: 4px; }
+    .slider-wrapper { flex: 1; display: flex; align-items: center; }
+
+    input[type="range"] {
+      width: 100%; height: 5px; border-radius: 3px; background: #334155;
+      outline: none; -webkit-appearance: none; appearance: none; cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%;
+      background: #38bdf8; cursor: pointer; transition: transform 0.1s;
+    }
+    input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
+
+    .number-input-wrapper {
+      width: 80px; display: flex; align-items: center; background: var(--bg-input);
+      border: 1px solid var(--border-color); border-radius: 6px; padding: 4px 6px;
+    }
+    .number-input-wrapper:focus-within { border-color: var(--border-focus); }
+    .number-input-wrapper input {
+      width: 100%; background: transparent; border: none; color: var(--text-main);
+      font-size: 12px; font-family: var(--font-mono); outline: none; text-align: right;
+    }
+    .number-input-wrapper .unit { font-size: 11px; color: var(--text-muted); margin-left: 4px; }
+
+    .coords-grid { display: flex; flex-direction: column; gap: 6px; }
+    .toggles-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+    .toggle-item { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #cbd5e1; cursor: pointer; }
+    .toggle-item input[type="checkbox"] { accent-color: #3b82f6; width: 14px; height: 14px; cursor: pointer; }
+
+    /* 底部实时计算面板 */
+    .calc-results-section {
+      background: rgba(15, 23, 42, 0.95);
+      border-top: 1px solid var(--border-color);
+      padding: 14px 20px;
+    }
+    .calc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+    .calc-card {
+      background: rgba(30, 41, 59, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 8px;
+      padding: 7px 10px;
+    }
+    .calc-card.highlight {
+      background: rgba(168, 85, 247, 0.12);
+      border-color: rgba(168, 85, 247, 0.4);
+      grid-column: span 2;
+    }
+    .calc-title {
+      font-size: 11px; color: var(--text-muted); display: flex;
+      justify-content: space-between; align-items: center; margin-bottom: 3px;
+    }
+    .calc-value { font-size: 13px; font-weight: 600; font-family: var(--font-mono); color: #f1f5f9; }
+    .calc-card.highlight .calc-value { font-size: 16px; color: #c084fc; }
+
+    .calc-physics-insight {
+      grid-column: span 2; background: rgba(3, 105, 161, 0.15);
+      border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px;
+      padding: 8px 10px; margin-top: 4px;
+    }
+    .insight-header { font-size: 11px; font-weight: 600; color: #38bdf8; margin-bottom: 3px; }
+    .insight-text { font-size: 12px; line-height: 1.45; color: #e2e8f0; }
+
+    /* 底部实时计算面板与多 Tab 样式 */
+    .calc-tabs-bar {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 6px;
+    }
+    .calc-tab-btn {
+      background: transparent;
+      border: 1px solid transparent;
+      color: #94a3b8;
+      padding: 5px 9px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.2s ease;
+    }
+    .calc-tab-btn:hover {
+      background: rgba(255, 255, 255, 0.06);
+      color: #e2e8f0;
+    }
+    .calc-tab-btn.active {
+      background: rgba(59, 130, 246, 0.2);
+      border-color: rgba(59, 130, 246, 0.5);
+      color: #60a5fa;
+    }
+    .badge-tab-count {
+      background: rgba(255, 255, 255, 0.12);
+      color: #cbd5e1;
+      padding: 1px 5px;
+      border-radius: 10px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+    }
+    .calc-tab-btn.active .badge-tab-count {
+      background: rgba(59, 130, 246, 0.35);
+      color: #93c5fd;
+    }
+    .calc-tab-pane {
+      display: none;
+    }
+    .calc-tab-pane.active {
+      display: block;
+    }
+
+    /* 关节负荷谱专用样式 */
+    .joint-spectrum-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(30, 41, 59, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      padding: 6px 10px;
+      margin-bottom: 8px;
+      font-size: 11px;
+    }
+    .joint-controls-bar {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .joint-search-input {
+      flex: 1;
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: 5px;
+      color: var(--text-main);
+      padding: 4px 8px;
+      font-size: 11px;
+      outline: none;
+    }
+    .joint-search-input:focus { border-color: var(--border-focus); }
+    .joint-sort-select {
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: 5px;
+      color: var(--text-main);
+      padding: 4px 6px;
+      font-size: 11px;
+      outline: none;
+      cursor: pointer;
+    }
+    .joint-list-scroll {
+      max-height: 220px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding-right: 4px;
+    }
+    .joint-item-card {
+      background: rgba(30, 41, 59, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 6px;
+      padding: 6px 8px;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .joint-item-card:hover {
+      background: rgba(51, 65, 85, 0.6);
+      border-color: rgba(56, 189, 248, 0.4);
+    }
+    .joint-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+    .joint-name {
+      font-weight: 600;
+      color: #f1f5f9;
+      font-family: var(--font-mono);
+    }
+    .joint-bar-container {
+      height: 5px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 4px;
+      margin-bottom: 3px;
+    }
+    .joint-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+    .joint-metrics {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+    .status-pill {
+      font-size: 9px;
+      font-weight: 700;
+      padding: 1px 5px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+    .status-pill.safe {
+      background: rgba(16, 185, 129, 0.2);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.4);
+    }
+    .status-pill.warning {
+      background: rgba(245, 158, 11, 0.2);
+      color: #fbbf24;
+      border: 1px solid rgba(245, 158, 11, 0.4);
+    }
+    .status-pill.danger {
+      background: rgba(239, 68, 68, 0.2);
+      color: #f87171;
+      border: 1px solid rgba(239, 68, 68, 0.4);
+    }
+
+    .btn-secondary {
+      width: 100%; background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border-color);
+      color: var(--text-main); padding: 7px; border-radius: 6px; font-size: 12px;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.15); }
+
+    /* 3D 浮动标签与四象限防重叠隔离机制 (支持高透半透明磨砂) */
+    .scene-badge {
+      background: rgba(15, 23, 42, var(--badge-bg-alpha));
+      backdrop-filter: blur(var(--badge-blur));
+      -webkit-backdrop-filter: blur(var(--badge-blur));
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 6px;
+      padding: 5px 9px;
+      font-size: 11px;
+      color: #f8fafc;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+      pointer-events: none;
+      white-space: nowrap;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+      user-select: none;
+      line-height: 1.35;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .badge-pivot { border-left: 3px solid var(--color-pivot); }
+    .badge-com { border-left: 3px solid var(--color-com); }
+    .badge-r { border-left: 3px solid var(--color-r); }
+    .badge-fg { border-left: 3px solid var(--color-fg); }
+    .badge-line { border-left: 3px solid #cbd5e1; color: #cbd5e1; }
+    .badge-d { border-left: 3px solid var(--color-arm); }
+    .badge-torque {
+      border-left: 3px solid var(--color-torque);
+      background: rgba(88, 28, 135, var(--badge-bg-alpha));
+    }
+    .badge-sub { font-size: 10px; color: #cbd5e1; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8); }
+
+    /* 四象限隔离偏移 (确保近距离或原点聚集时标签互不遮挡) */
+    .badge-offset-tr { margin-left: 20px; margin-top: -34px; }     /* 象限 1: 东北 (重心 G) */
+    .badge-offset-tl { margin-left: -130px; margin-top: -34px; }   /* 象限 2: 西北 (水平力臂 d) */
+    .badge-offset-bl { margin-left: -130px; margin-top: 25px; }    /* 象限 3: 西南 (重力 Fg) */
+    .badge-offset-br { margin-left: 20px; margin-top: 25px; }     /* 象限 4: 东南 (重力矩 τ) */
+    .badge-offset-pivot { margin-left: 0; margin-top: -50px; }     /* 正上方 (支点 O) */
+    .badge-offset-r { margin-left: 10px; margin-top: -15px; }
+
+    .scene-mini-label {
+      background: rgba(15, 23, 42, var(--badge-bg-alpha));
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      padding: 2px 5px; border-radius: 4px;
+      font-size: 10px; font-family: var(--font-mono); color: #e2e8f0;
+      border: 1px solid rgba(255, 255, 255, 0.1); pointer-events: none;
+    }
+    .scene-angle-label {
+      background: rgba(15, 23, 42, var(--badge-bg-alpha));
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      padding: 2px 6px; border-radius: 4px;
+      font-size: 11px; font-weight: 600; pointer-events: none;
+      box-shadow: var(--shadow-sm);
+    }
+    .label-phi { color: var(--color-phi); border: 1px solid var(--color-phi); }
+    .label-theta { color: var(--color-theta); border: 1px solid var(--color-theta); }
+    .badge-success { color: #34d399; font-weight: bold; }
+    .badge-accent { color: #38bdf8; font-weight: bold; }
+
+    @media (max-width: 1080px) {
+      .app-container { flex-direction: column; }
+      .sidebar-area { width: 100%; height: 50vh; }
+      .viewport-area { height: 50vh; }
+    }
+  </style>
+
+  <!-- 优先尝试加载本地 libs/ 基础库与 3D STL/Collada 几何网格加载器；无本地文件时自动无缝降级走 CDN -->
+  <script src="./libs/three.min.js"></script>
+  <script src="./libs/OrbitControls.js"></script>
+  <script src="./libs/STLLoader.js"></script>
+  <script src="./libs/ColladaLoader.js"></script>
+  <script>
+    if (typeof THREE === 'undefined') {
+      document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>');
+      document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"><\/script>');
+    }
+    if (typeof THREE !== 'undefined' && typeof THREE.STLLoader === 'undefined') {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"><\/script>');
+    }
+    if (typeof THREE !== 'undefined' && typeof THREE.ColladaLoader === 'undefined') {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/ColladaLoader.js"><\/script>');
+    }
+  </script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- 左侧：3D 可交互场景区域 -->
+    <main class="viewport-area">
+      <div class="viewport-header">
+        <div class="brand-title">
+          <h1>整机重力矩</h1>
+          <span class="brand-subtitle">Z-Up 右手坐标系</span>
+        </div>
+
+        <div class="camera-toolbar">
+          <button id="btn_view_isometric" class="btn-view active" title="切换到 3D 默认透视视角">3D 视图</button>
+          <button id="btn_view_top" class="btn-view" title="俯视 XY 平面">俯视图</button>
+          <button id="btn_view_front" class="btn-view" title="正视 XZ 平面">正视图</button>
+          <button id="btn_view_side" class="btn-view" title="侧视 YZ 平面">侧视图</button>
+          <button id="btn_reset_view" class="btn-view" title="复位相机到初始位置">视角复位</button>
+        </div>
+      </div>
+
+      <div id="webgl_container"></div>
+
+      <!-- 底部左侧：颜色图例 -->
+      <div class="viewport-legend">
+        <div class="legend-title">三维元素图例说明</div>
+        <div class="legend-items">
+          <div class="legend-item"><span class="legend-dot" style="background:#64748b;"></span> 机器人机构</div>
+          <div class="legend-item"><span class="legend-dot" style="background:#0284c7;"></span> 支点 O</div>
+          <div class="legend-item"><span class="legend-dot" style="background:#fbbf24;"></span> 整机重心 G</div>
+          <div class="legend-item"><span class="legend-dot" style="background:#38bdf8;"></span> 连杆质心 (Link CoM)</div>
+          <div class="legend-item"><span class="legend-dot" style="background:#10b981;"></span> 关节热力 (Joint Heatmap)</div>
+          <div class="legend-item"><span class="legend-line" style="background:#10b981;"></span> 位矢 r</div>
+          <div class="legend-item"><span class="legend-line" style="background:#ef4444;"></span> 重力 Fg (mg)</div>
+          <div class="legend-item"><span class="legend-line dashed"></span> 重力作用线</div>
+          <div class="legend-item"><span class="legend-line" style="background:#06b6d4;"></span> 水平力臂 d</div>
+          <div class="legend-item"><span class="legend-line" style="background:#a855f7; height:4px;"></span> 重力矩 τ</div>
+          <div class="legend-item"><span class="legend-line" style="background:#f97316;"></span> 方位角 φ</div>
+          <div class="legend-item"><span class="legend-line" style="background:#14b8a6;"></span> 夹角 θ</div>
+        </div>
+      </div>
+
+      <div class="viewport-hint">
+        鼠标操作：左键旋转视角 | 滚轮缩放 | 右键平移画布
+      </div>
+    </main>
+
+    <!-- 右侧：参数控制与实时数据侧边栏 -->
+    <aside class="sidebar-area">
+      <div class="sidebar-scrollable">
+        <!-- 1. 典型力学用例预设 -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span class="section-title">典型场景预设 <span class="badge">快速观察</span></span>
+          </div>
+          <select id="select_preset_cases" class="preset-select"></select>
+          <div id="case_description" class="case-desc-box"></div>
+        </div>
+
+        <!-- 2. MoveIt 2 (demo.launch) 实时模型与数据接入 -->
+        <div class="panel-section ros2-panel">
+          <div class="section-header">
+            <span class="section-title">
+              <span class="status-dot status-disconnected" id="moveit_status_badge"></span>
+              MoveIt 2 模型与实时数据
+            </span>
+            <span class="badge" style="background:rgba(59,130,246,0.2); color:#60a5fa;">demo.launch 直连</span>
+          </div>
+          
+          <div class="ros2-connect-form">
+            <div class="control-row" style="margin-bottom: 6px;">
+              <span class="control-label" style="width: 75px;">WS 地址:</span>
+              <input type="text" id="input_moveit_ws" class="preset-select" style="font-family: var(--font-mono); font-size: 11px; padding: 4px 8px; flex: 1;" value="ws://127.0.0.1:9090">
+            </div>
+            <div class="control-row" style="margin-bottom: 8px;">
+              <span class="control-label" style="width: 75px;">话题名:</span>
+              <input type="text" id="input_moveit_topic" class="preset-select" style="font-family: var(--font-mono); font-size: 11px; padding: 4px 8px; flex: 1;" value="/moveit_gravity_data">
+            </div>
+
+            <div class="btn-group-ros">
+              <button id="btn_moveit_connect" class="btn-primary-action">连接 MoveIt 2</button>
+              <button id="btn_moveit_disconnect" class="btn-danger-action" style="display: none;">断开连接</button>
+            </div>
+
+            <div style="display: flex; gap: 6px; margin-top: 8px;">
+              <button id="btn_select_folder" class="btn-primary-action" style="flex: 1; font-size: 11px; padding: 6px 8px; font-weight: 600;" title="选择包含任意机器人 URDF 及其 meshes 文件夹的完整目录">选模型文件夹</button>
+              <button id="btn_select_files" class="btn-secondary-action" style="font-size: 11px; padding: 6px 10px; cursor: pointer; border-radius: 6px;" title="从本地电脑多选 URDF 文件及对应的 STL/DAE 几何文件">选 URDF+Mesh</button>
+              <input type="file" id="input_folder_model" webkitdirectory directory multiple style="display: none;">
+              <input type="file" id="input_files_model" multiple accept=".urdf,.xml,.stl,.STL,.dae,.DAE" style="display: none;">
+            </div>
+
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 8px; font-size: 11px; color: #cbd5e1; background: rgba(30, 41, 59, 0.5); padding: 5px 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.06);">
+              <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;" title="检测到人形/多足等模型下肢延伸低于原点时，自动将底面贴合于 Z=0 地面">
+                <input type="checkbox" id="chk_auto_ground" checked> 自动贴地站立 (对齐 Z=0)
+              </label>
+              <button id="btn_align_pivot_ground" style="font-size: 10px; padding: 2px 6px; background: rgba(2, 132, 199, 0.2); border: 1px solid rgba(2, 132, 199, 0.5); color: #38bdf8; border-radius: 4px; cursor: pointer;" title="将支点 O 快速置于地面接触面中心 (0, 0, 0)">支点对齐地面</button>
+            </div>
+
+            <div id="moveit_model_tag" class="model-info-box">
+              模型状态: <span>等待连接 MoveIt 2 或加载本地模型...</span>
+            </div>
+
+            <div id="moveit_status_text" class="status-text">支持连接已启动的 demo.launch.py 自动读取当前机器人，或点击上方加载任意 URDF 与 Mesh 模型</div>
+          </div>
+        </div>
+
+        <!-- 3. 机器人质量与重力参数 -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span class="section-title">质量与重力设置</span>
+          </div>
+          <div class="control-row">
+            <span class="control-label">总质量 m:</span>
+            <div class="slider-wrapper">
+              <input type="range" id="range_mass" min="0" max="100" step="0.5" value="25.0">
+            </div>
+            <div class="number-input-wrapper">
+              <input type="number" id="input_mass" min="0" max="1000" step="0.5" value="25.00">
+              <span class="unit">kg</span>
+            </div>
+          </div>
+          <div class="control-row">
+            <span class="control-label">重力常数 g:</span>
+            <select id="select_g" class="preset-select" style="padding: 4px 8px; font-size: 12px;">
+              <option value="9.80665">9.80665 m/s² (国际标准)</option>
+              <option value="9.81" selected>9.81 m/s² (工程常用)</option>
+              <option value="9.8">9.8 m/s² (教学估算)</option>
+              <option value="10.0">10.0 m/s² (理论参考)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 4. 支点 O 坐标设置 -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span class="section-title">支点 O 坐标 (Ox, Oy, Oz)</span>
+          </div>
+          <div class="coords-grid">
+            <div class="control-row">
+              <span class="control-label" style="color:#ef4444;">Ox 轴:</span>
+              <div class="slider-wrapper">
+                <input type="range" id="range_pivot_x" min="-2.0" max="2.0" step="0.05" value="0.0">
+              </div>
+              <div class="number-input-wrapper">
+                <input type="number" id="input_pivot_x" step="0.05" value="0.00"><span class="unit">m</span>
+              </div>
+            </div>
+            <div class="control-row">
+              <span class="control-label" style="color:#22c55e;">Oy 轴:</span>
+              <div class="slider-wrapper">
+                <input type="range" id="range_pivot_y" min="-2.0" max="2.0" step="0.05" value="0.0">
+              </div>
+              <div class="number-input-wrapper">
+                <input type="number" id="input_pivot_y" step="0.05" value="0.00"><span class="unit">m</span>
+              </div>
+            </div>
+            <div class="control-row">
+              <span class="control-label" style="color:#3b82f6;">Oz 轴:</span>
+              <div class="slider-wrapper">
+                <input type="range" id="range_pivot_z" min="-1.0" max="2.0" step="0.05" value="0.0">
+              </div>
+              <div class="number-input-wrapper">
+                <input type="number" id="input_pivot_z" step="0.05" value="0.00"><span class="unit">m</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. 重心 G 坐标设置 -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span class="section-title">重心 G 坐标 (Gx, Gy, Gz)</span>
+          </div>
+          <div class="coords-grid">
+            <div class="control-row">
+              <span class="control-label" style="color:#ef4444;">Gx 轴:</span>
+              <div class="slider-wrapper">
+                <input type="range" id="range_com_x" min="-2.0" max="2.0" step="0.05" value="0.8">
+              </div>
+              <div class="number-input-wrapper">
+                <input type="number" id="input_com_x" step="0.05" value="0.80"><span class="unit">m</span>
+              </div>
+            </div>
+            <div class="control-row">
+              <span class="control-label" style="color:#22c55e;">Gy 轴:</span>
+              <div class="slider-wrapper">
+                <input type="range" id="range_com_y" min="-2.0" max="2.0" step="0.05" value="0.6">
+              </div>
+              <div class="number-input-wrapper">
+                <input type="number" id="input_com_y" step="0.05" value="0.60"><span class="unit">m</span>
+              </div>
+            </div>
+            <div class="control-row">
+              <span class="control-label" style="color:#3b82f6;">Gz 轴:</span>
+              <div class="slider-wrapper">
+                <input type="range" id="range_com_z" min="-1.0" max="3.0" step="0.05" value="1.2">
+              </div>
+              <div class="number-input-wrapper">
+                <input type="number" id="input_com_z" step="0.05" value="1.20"><span class="unit">m</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 6. 视图与图层控制开关 -->
+        <div class="panel-section">
+          <div class="section-header">
+            <span class="section-title">显示图层与选项</span>
+          </div>
+          <div class="control-row" style="margin-bottom: 12px;">
+            <span class="control-label" style="width: 95px;">力矩绘制原点:</span>
+            <select id="select_torque_anchor" class="preset-select" style="padding: 4px 8px; font-size: 12px; flex: 1;">
+              <option value="pivot" selected>支点 O (经典力学 & 机器人关节，推荐)</option>
+              <option value="com">重心 G (质心力偶对比视图)</option>
+            </select>
+          </div>
+          <div class="toggles-grid">
+            <label class="toggle-item"><input type="checkbox" id="toggle_robot_model" checked><span>机器人机构 (MoveIt)</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_link_coms" checked><span>各连杆质心 (Link CoM)</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_joint_heatmap" checked><span>关节负荷 3D 热力</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_axes" checked><span>坐标轴 (+X,+Y,+Z)</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_grid" checked><span>水平网格地面</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_vector_r" checked><span>位矢 r (O→G)</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_gravity" checked><span>重力向量 Fg</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_gravity_line" checked><span>重力作用线 (虚线)</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_moment_arm" checked><span>水平力臂 d 及投影</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_torque" checked><span>重力矩向量 τ</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_torque_components"><span>力矩分量分解 (τx, τy)</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_angles" checked><span>角度标注 (φ, θ)</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_labels" checked><span>3D 空间文字标签</span></label>
+            <label class="toggle-item"><input type="checkbox" id="toggle_autoscale" checked><span>矢量长度自适应缩放</span></label>
+          </div>
+          <div class="control-row" style="margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06);">
+            <span class="control-label" style="font-size: 11px; width: 85px;">模型 Mesh 透明:</span>
+            <div class="slider-wrapper">
+              <input type="range" id="range_mesh_opacity" min="10" max="100" step="5" value="75" title="调节机器人 3D 几何网格外壳透明度 (10%~100%)，可透视内部连杆质心与关节负荷热力球">
+            </div>
+            <span id="mesh_opacity_val" style="font-size: 11px; font-family: var(--font-mono); color: #38bdf8; width: 40px; text-align: right;">75%</span>
+          </div>
+          <div class="control-row" style="margin-top: 4px;">
+            <span class="control-label" style="font-size: 11px; width: 85px;">指示球统一直径:</span>
+            <div class="slider-wrapper">
+              <input type="range" id="range_sphere_size" min="10" max="40" step="2" value="24" title="统一调节负荷球与质心球的统一尺寸 (直径 10mm~40mm)">
+            </div>
+            <span id="sphere_size_val" style="font-size: 11px; font-family: var(--font-mono); color: #38bdf8; width: 40px; text-align: right;">24mm</span>
+          </div>
+          <div class="control-row" style="margin-top: 4px;">
+            <span class="control-label" style="font-size: 11px; width: 85px;">浮标背景透明:</span>
+            <div class="slider-wrapper">
+              <input type="range" id="range_badge_opacity" min="0" max="100" step="5" value="25" title="调节 3D 浮动数据标签背景的半透明度 (0%为纯透明)">
+            </div>
+            <span id="badge_opacity_val" style="font-size: 11px; font-family: var(--font-mono); color: #38bdf8; width: 40px; text-align: right;">25%</span>
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <button id="btn_reset_params" class="btn-secondary">恢复默认参数</button>
+        </div>
+      </div>
+
+      <!-- 7. 底部固定：实时计算与动力学多 Tab 面板 -->
+      <div class="calc-results-section">
+        <div class="calc-tabs-bar">
+          <button class="calc-tab-btn active" data-tab="tab_spatial" id="btn_tab_spatial">
+            空间合力矩
+          </button>
+          <button class="calc-tab-btn" data-tab="tab_joints" id="btn_tab_joints">
+            关节负荷谱 <span class="badge-tab-count" id="badge_joint_count">0</span>
+          </button>
+          <button class="calc-tab-btn" data-tab="tab_wholebody" id="btn_tab_wholebody">
+            稳定与功耗
+          </button>
+        </div>
+
+        <!-- Tab 1: 空间合力矩与三维向量 -->
+        <div class="calc-tab-pane active" id="pane_spatial">
+          <div class="calc-grid">
+            <div class="calc-card">
+              <div class="calc-title">位矢 r (G - O)</div>
+              <div id="val_r_vec" class="calc-value">(0.80, 0.60, 1.20) m</div>
+              <div class="calc-title" style="margin-top:3px;">位矢模长 |r|</div>
+              <div id="val_r_len" class="calc-value">1.562 m</div>
+            </div>
+
+            <div class="calc-card">
+              <div class="calc-title">水平力臂 d = √(rx²+ry²)</div>
+              <div id="val_d" class="calc-value" style="color:#22d3ee;">1.000 m</div>
+              <div class="calc-title" style="margin-top:3px;">竖直落差 Δz = rz</div>
+              <div id="val_delta_z" class="calc-value">1.20 m</div>
+            </div>
+
+            <div class="calc-card">
+              <div class="calc-title">重力大小 Fg = mg</div>
+              <div id="val_fg" class="calc-value" style="color:#f87171;">245.25 N</div>
+            </div>
+
+            <div class="calc-card">
+              <div class="calc-title">方位角 φ (相对 +X)</div>
+              <div id="val_phi" class="calc-value" style="color:#fb923c;">36.9°</div>
+              <div class="calc-title" style="margin-top:3px;">极角 θ (与重力夹角)</div>
+              <div id="val_theta" class="calc-value" style="color:#2dd4bf;">140.2°</div>
+            </div>
+
+            <div class="calc-card highlight">
+              <div class="calc-title">
+                <span>重力矩 τ = r × Fg</span>
+                <span class="badge" style="background:#8b5cf6; color:#fff;">τz 恒为 0 N·m</span>
+              </div>
+              <div id="val_tau_mag" class="calc-value">245.25 N·m</div>
+              <div style="display:flex; justify-content:space-between; margin-top:3px; font-size:11px; font-family:var(--font-mono);">
+                <span style="color:#f472b6;">τx = -mg·ry = <span id="val_tau_x">-147.15 N·m</span></span>
+                <span style="color:#a78bfa;">τy = mg·rx = <span id="val_tau_y">+196.20 N·m</span></span>
+                <span style="color:#94a3b8;">τz = <span id="val_tau_z">0.00 N·m</span></span>
+              </div>
+            </div>
+
+            <div class="calc-card" style="grid-column: span 2; font-size: 11px;">
+              <div class="calc-title">力臂对比验证 (d 与 |r| 辨析)</div>
+              <div id="val_arm_vs_r">--</div>
+            </div>
+
+            <div class="calc-physics-insight">
+              <div class="insight-header">物理学力学分析结论</div>
+              <div id="val_physics_summary" class="insight-text">正在分析...</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: 各关节静载负荷谱 (Pinocchio 动力学监测) -->
+        <div class="calc-tab-pane" id="pane_joints">
+          <div class="joint-spectrum-summary">
+            <div>
+              <span id="dyn_engine_badge" class="badge" style="background:rgba(59,130,246,0.25); color:#60a5fa; font-weight:700;">Pinocchio 动力学</span>
+              <span id="peak_joint_info" style="margin-left:6px; color:#e2e8f0;">峰值关节: <strong>--</strong></span>
+            </div>
+            <div id="peak_load_status" style="font-family:var(--font-mono); font-weight:700; color:#34d399;">
+              安全 (--%)
+            </div>
+          </div>
+
+          <div class="joint-controls-bar">
+            <input type="text" id="input_joint_search" class="joint-search-input" placeholder="搜索关节名称 (如 waist, pitch)...">
+            <select id="select_joint_sort" class="joint-sort-select">
+              <option value="load_desc" selected>负荷率降序</option>
+              <option value="torque_desc">力矩绝对值降序</option>
+              <option value="name_asc">关节名称排序</option>
+            </select>
+          </div>
+
+          <div id="joint_list_container" class="joint-list-scroll">
+            <div style="text-align:center; padding:18px; color:var(--text-muted); font-size:11px;">
+              连接 MoveIt 2 或加载 URDF 模型后实时显示关节动力学负荷谱
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 3: 整机负荷与抗倾覆稳定分析 -->
+        <div class="calc-tab-pane" id="pane_wholebody">
+          <div class="calc-grid">
+            <div class="calc-card">
+              <div class="calc-title">基座静态反作用力 Fz</div>
+              <div id="val_base_fz" class="calc-value" style="color:#38bdf8;">-- N</div>
+              <div class="calc-title" style="margin-top:3px;">整机总质量 M</div>
+              <div id="val_total_mass_dyn" class="calc-value">-- kg</div>
+            </div>
+
+            <div class="calc-card">
+              <div class="calc-title">基座倾覆合力矩 |M_base|</div>
+              <div id="val_base_m_mag" class="calc-value" style="color:#c084fc;">-- N·m</div>
+              <div class="calc-title" style="margin-top:3px;">基座力矩分量</div>
+              <div id="val_base_m_comp" class="calc-value" style="font-size:11px;">Mx: --, My: --</div>
+            </div>
+
+            <div class="calc-card highlight">
+              <div class="calc-title">
+                <span>电机静态姿态维持发热功耗代理</span>
+                <span class="badge" style="background:rgba(234,179,8,0.2); color:#facc15;">∑τi²</span>
+              </div>
+              <div id="val_sum_tau_sq" class="calc-value" style="color:#fde047;">-- N²·m²</div>
+              <div style="display:flex; justify-content:space-between; margin-top:3px; font-size:11px; font-family:var(--font-mono); color:#94a3b8;">
+                <span>有效力矩 RMS: <strong id="val_tau_rms" style="color:#f1f5f9;">-- N·m</strong></span>
+                <span>监测关节: <strong id="val_monitored_joints" style="color:#f1f5f9;">-- 个</strong></span>
+              </div>
+            </div>
+
+            <div class="calc-card" style="grid-column: span 2;">
+              <div class="calc-title">
+                <span>抗翻倒倾覆静态稳定裕度</span>
+                <span id="badge_stability_level" class="status-pill safe">极稳</span>
+              </div>
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-top:3px;">
+                <span style="font-size:11px; color:#cbd5e1;">重心偏离原点投影距 d:</span>
+                <span id="val_dyn_margin" class="calc-value" style="font-size:14px; color:#22d3ee;">-- m</span>
+              </div>
+              <div id="desc_stability_margin" style="font-size:11px; color:#94a3b8; margin-top:4px; line-height:1.4;">
+                静止站立时，重心垂足投影偏离支点接触中心，值越小整机倾覆抗扰度越高。
+              </div>
+            </div>
+
+            <div class="calc-card" style="grid-column: span 2;">
+              <div class="calc-title">
+                <span>各连杆质心分布统计</span>
+                <span id="badge_link_com_count" class="badge">-- 节</span>
+              </div>
+              <div id="desc_link_com_info" style="font-size:11px; color:#94a3b8; margin-top:4px; line-height:1.4;">
+                直接读取 URDF 各连杆 &lt;inertial&gt; 定义的真实质量与质心偏置，在 3D 视图中以冰蓝色发光球呈现。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ========================================================
+       前端全部核心逻辑 (单文件内联实现，零分散)
+       ======================================================== -->
+  <script>
+    // ----------------------------------------------------
+    // 0. CSS2DRenderer 轻量嵌入实现 (无需额外引用 CSS2DRenderer.js)
+    // ----------------------------------------------------
+    (function () {
+      if (typeof THREE === 'undefined' || THREE.CSS2DRenderer) return;
+      class CSS2DObject extends THREE.Object3D {
+        constructor(element) {
+          super();
+          this.element = element || document.createElement('div');
+          this.element.style.position = 'absolute';
+          this.addEventListener('removed', () => {
+            if (this.element && this.element.parentNode) {
+              this.element.parentNode.removeChild(this.element);
+            }
+          });
+        }
+      }
+      class CSS2DRenderer {
+        constructor() {
+          const domElement = document.createElement('div');
+          domElement.style.overflow = 'hidden';
+          this.domElement = domElement;
+          this._width = 0;
+          this._height = 0;
+          this._widthHalf = 0;
+          this._heightHalf = 0;
+          this._vector = new THREE.Vector3();
+          this._viewMatrix = new THREE.Matrix4();
+          this._viewProjectionMatrix = new THREE.Matrix4();
+        }
+        setSize(width, height) {
+          this._width = width;
+          this._height = height;
+          this._widthHalf = width / 2;
+          this._heightHalf = height / 2;
+          this.domElement.style.width = width + 'px';
+          this.domElement.style.height = height + 'px';
+        }
+        render(scene, camera) {
+          camera.updateMatrixWorld();
+          this._viewMatrix.copy(camera.matrixWorldInverse);
+          this._viewProjectionMatrix.multiplyMatrices(camera.projectionMatrix, this._viewMatrix);
+          this.renderObject(scene, camera);
+        }
+        renderObject(object, camera) {
+          if (object instanceof CSS2DObject) {
+            this._vector.setFromMatrixPosition(object.matrixWorld);
+            this._vector.applyMatrix4(this._viewProjectionMatrix);
+            const element = object.element;
+            if (this._vector.z >= -1 && this._vector.z <= 1) {
+              element.style.display = '';
+              element.style.transform = `translate(-50%, -50%) translate(${this._vector.x * this._widthHalf + this._widthHalf}px, ${-this._vector.y * this._heightHalf + this._heightHalf}px)`;
+            } else {
+              element.style.display = 'none';
+            }
+            if (element.parentNode !== this.domElement) {
+              this.domElement.appendChild(element);
+            }
+          }
+          for (let i = 0, l = object.children.length; i < l; i++) {
+            this.renderObject(object.children[i], camera);
+          }
+        }
+      }
+      THREE.CSS2DObject = CSS2DObject;
+      THREE.CSS2DRenderer = CSS2DRenderer;
+    })();
+
+    // 安全防御: HTML 特殊字符转义 (防范 DOM XSS 漏洞)
+    function escapeHTML(str) {
+      if (str === null || str === undefined) return '';
+      return String(str).replace(/[&<>"']/g, m => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[m]);
+    }
+
+    // ----------------------------------------------------
+    // 1. 核心数学与物理计算模块 (Physics Engine)
+    // ----------------------------------------------------
+    class GravityTorquePhysics {
+      static DEFAULT_G = 9.80665;
+
+      static calculate(pivot, com, mass, g = GravityTorquePhysics.DEFAULT_G) {
+        const Ox = Number(pivot?.x) || 0;
+        const Oy = Number(pivot?.y) || 0;
+        const Oz = Number(pivot?.z) || 0;
+
+        const Gx = Number(com?.x) || 0;
+        const Gy = Number(com?.y) || 0;
+        const Gz = Number(com?.z) || 0;
+
+        const m = Math.max(0, Number(mass) || 0);
+        const gravity = Math.max(0, Number(g) || 0);
+
+        // 1. 位矢 r = G - O
+        const rx = Gx - Ox;
+        const ry = Gy - Oy;
+        const rz = Gz - Oz;
+        const rLen = Math.sqrt(rx * rx + ry * ry + rz * rz);
+
+        // 2. 重力向量 Fg = (0, 0, -mg)
+        const Fg_mag = m * gravity;
+        const Fg = { x: 0, y: 0, z: -Fg_mag };
+
+        // 3. 水平力臂 d = sqrt(rx^2 + ry^2)
+        const d = Math.sqrt(rx * rx + ry * ry);
+
+        // 4. 重力矩 τ = r × Fg
+        const tauX = -Fg_mag * ry;
+        const tauY = Fg_mag * rx;
+        const tauZ = 0;
+        const tauMag = Fg_mag * d;
+
+        // 5. 角度与奇异点判定
+        const EPSILON = 1e-9;
+        const isCoincident = rLen < EPSILON;
+        const isZeroArm = d < EPSILON;
+        const isZeroTorque = tauMag < EPSILON;
+
+        let phiRad = null, phiDeg = null;
+        if (!isZeroArm) {
+          phiRad = Math.atan2(ry, rx);
+          phiDeg = (phiRad * 180) / Math.PI;
+        }
+
+        let thetaRad = null, thetaDeg = null;
+        if (!isCoincident) {
+          const cosTheta = Math.max(-1, Math.min(1, -rz / rLen));
+          thetaRad = Math.acos(cosTheta);
+          thetaDeg = (thetaRad * 180) / Math.PI;
+        }
+
+        let tauUnit = null;
+        if (!isZeroTorque) {
+          tauUnit = { x: tauX / tauMag, y: tauY / tauMag, z: 0 };
+        }
+
+        const analysis = {
+          isCoincident,
+          isZeroArm,
+          isZeroTorque,
+          relativeHeight: Math.abs(rz) < EPSILON ? 'same_height' : (rz > 0 ? 'above' : 'below'),
+          stateDescription: GravityTorquePhysics.getStateDescription({
+            isCoincident, isZeroArm, isZeroTorque, rz, tauMag, tauX, tauY, d, rLen
+          })
+        };
+
+        return {
+          pivot: { x: Ox, y: Oy, z: Oz },
+          com: { x: Gx, y: Gy, z: Gz },
+          mass: m,
+          g: gravity,
+          r: { x: rx, y: ry, z: rz },
+          r_len: rLen,
+          Fg,
+          Fg_mag,
+          d,
+          tau: { x: tauX, y: tauY, z: tauZ },
+          tau_mag: tauMag,
+          tau_unit: tauUnit,
+          phi_rad: phiRad,
+          phi_deg: phiDeg,
+          theta_rad: thetaRad,
+          theta_deg: thetaDeg,
+          analysis
+        };
+      }
+
+      static getStateDescription(info) {
+        if (info.isCoincident) return '重心与支点重合，位矢长度与力臂均为 0，重力矩为 0。';
+        if (info.isZeroArm) {
+          return info.rz > 0
+            ? '重心位于支点正上方（倒立摆点），水平力臂为 0，重力矩为 0，处于不稳定平衡状态。'
+            : '重心位于支点正下方（悬挂摆点），水平力臂为 0，重力矩为 0，处于稳定平衡状态。';
+        }
+        let dir = '';
+        if (Math.abs(info.tauX) > 1e-4 && Math.abs(info.tauY) < 1e-4) {
+          dir = info.tauX > 0 ? '沿 +X 轴' : '沿 -X 轴';
+        } else if (Math.abs(info.tauY) > 1e-4 && Math.abs(info.tauX) < 1e-4) {
+          dir = info.tauY > 0 ? '沿 +Y 轴' : '沿 -Y 轴';
+        } else {
+          dir = `水平合成 (τx=${info.tauX.toFixed(2)}, τy=${info.tauY.toFixed(2)})`;
+        }
+        return `产生水平重力矩 ${info.tauMag.toFixed(2)} N·m，方向${dir}。重力矩与水平力臂严格正交垂直。`;
+      }
+    }
+
+    // ----------------------------------------------------
+    // 2. 机器人 3D Mesh 资源与通用几何管理器
+    // ----------------------------------------------------
+    class RobotMeshManager {
+      constructor() {
+        this.meshFiles = new Map();
+        this.geometryCache = new Map();
+        this.loadingKeys = new Set();
+        this.stlLoader = (typeof THREE !== 'undefined' && THREE.STLLoader) ? new THREE.STLLoader() : null;
+        this.colladaLoader = (typeof THREE !== 'undefined' && THREE.ColladaLoader) ? new THREE.ColladaLoader() : null;
+      }
+
+      registerFiles(files) {
+        this.meshFiles.clear();
+        this.geometryCache.clear();
+        this.loadingKeys.clear();
+        if (!this.stlLoader && typeof THREE !== 'undefined' && THREE.STLLoader) {
+          this.stlLoader = new THREE.STLLoader();
+        }
+        if (!this.colladaLoader && typeof THREE !== 'undefined' && THREE.ColladaLoader) {
+          this.colladaLoader = new THREE.ColladaLoader();
+        }
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const name = file.name.toLowerCase();
+          this.meshFiles.set(name, file);
+          if (file.webkitRelativePath) {
+            const rel = file.webkitRelativePath.toLowerCase().replace(/\\/g, '/');
+            this.meshFiles.set(rel, file);
+            const slashIdx = rel.indexOf('/');
+            if (slashIdx !== -1) {
+              this.meshFiles.set(rel.substring(slashIdx + 1), file);
+            }
+          }
+        }
+      }
+
+      isLoading(key) {
+        return key ? this.loadingKeys.has(key.toLowerCase()) : false;
+      }
+
+      setLoading(key, loading) {
+        if (!key) return;
+        const k = key.toLowerCase();
+        if (loading) this.loadingKeys.add(k);
+        else this.loadingKeys.delete(k);
+      }
+
+      count() {
+        return this.meshFiles.size;
+      }
+
+      getCachedGeometry(key) {
+        if (!key) return null;
+        return this.geometryCache.get(key.toLowerCase());
+      }
+
+      setCachedGeometry(key, geom) {
+        if (!key || !geom) return;
+        this.geometryCache.set(key.toLowerCase(), geom);
+      }
+
+      findFile(rawPath) {
+        if (!rawPath) return null;
+        let clean = rawPath.replace(/\\/g, '/');
+        clean = clean.replace(/^package:\/\/[^\/]+\//, '');
+        clean = clean.replace(/^file:\/\//, '');
+        const cleanLower = clean.toLowerCase();
+        if (this.meshFiles.has(cleanLower)) return this.meshFiles.get(cleanLower);
+        const base = cleanLower.split('/').pop();
+        if (this.meshFiles.has(base)) return this.meshFiles.get(base);
+        for (const [key, file] of this.meshFiles.entries()) {
+          if (key.endsWith('/' + base) || key === base) return file;
+        }
+        return null;
+      }
+    }
+
+    // ----------------------------------------------------
+    // 3. Three.js 3D 渲染与场景管理模块 (Visualizer)
+    // ----------------------------------------------------
+    class GravityTorqueVisualizer {
+      constructor(containerId) {
+        this.container = document.getElementById(containerId);
+        if (!this.container) throw new Error(`找不到容器: #${containerId}`);
+
+        this.meshManager = new RobotMeshManager();
+
+        this.options = {
+          showRobotModel: true,
+          showLinkCoMs: true,
+          showJointHeatmap: true,
+          autoGround: true,
+          meshOpacity: 0.75,
+          sphereRadius: 0.012,
+          showAxes: true, showGrid: true, showVectorR: true, showGravity: true,
+          showGravityLine: true, showMomentArm: true, showTorque: true,
+          showTorqueComponents: false, showAngles: true, showLabels: true,
+          torqueAnchor: 'pivot', vectorScale: 0.012, autoScale: true
+        };
+
+        this.colors = {
+          pivot: 0x0284c7, pivotPedestal: 0x334155, com: 0xf59e0b,
+          vectorR: 0x10b981, gravity: 0xef4444, gravityLine: 0xf43f5e,
+          momentArm: 0x06b6d4, torque: 0xa855f7, torqueX: 0xec4899,
+          torqueY: 0x8b5cf6, anglePhi: 0xf97316, angleTheta: 0x14b8a6, rightAngle: 0x64748b
+        };
+
+        this.objects = {
+          robotModelGroup: null,
+          pivotGroup: null, comGroup: null, arrowR: null, arrowFg: null,
+          gravityLine: null, momentArmGroup: null, torqueArrow: null,
+          torqueXArrow: null, torqueYArrow: null, anglePhiGroup: null,
+          angleThetaGroup: null, gridGroup: null, axesGroup: null
+        };
+
+        this.currentData = null;
+        this.init();
+      }
+
+      init() {
+        const width = this.container.clientWidth || window.innerWidth * 0.7;
+        const height = this.container.clientHeight || window.innerHeight;
+
+        this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(0x0b0f19);
+
+        // Z-Up 右手坐标系
+        this.camera = new THREE.PerspectiveCamera(45, width / height, 0.05, 100);
+        this.camera.up.set(0, 0, 1);
+        this.camera.position.set(3.4, -3.8, 2.6);
+
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        this.renderer.setSize(width, height);
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.renderer.shadowMap.enabled = true;
+        this.container.appendChild(this.renderer.domElement);
+
+        if (typeof THREE.CSS2DRenderer !== 'undefined') {
+          this.labelRenderer = new THREE.CSS2DRenderer();
+          this.labelRenderer.setSize(width, height);
+          this.labelRenderer.domElement.style.position = 'absolute';
+          this.labelRenderer.domElement.style.top = '0';
+          this.labelRenderer.domElement.style.left = '0';
+          this.labelRenderer.domElement.style.pointerEvents = 'none';
+          this.container.appendChild(this.labelRenderer.domElement);
+        }
+
+        if (typeof THREE.OrbitControls !== 'undefined') {
+          this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
+          this.controls.enableDamping = true;
+          this.controls.dampingFactor = 0.06;
+          this.controls.target.set(0.4, 0.3, 0.6);
+          this.controls.update();
+        }
+
+        this.setupLights();
+        this.setupAxesAndGrid();
+        this.objects.robotModelGroup = new THREE.Group();
+        this.scene.add(this.objects.robotModelGroup);
+
+        window.addEventListener('resize', () => this.onWindowResize());
+        this.animate = this.animate.bind(this);
+        requestAnimationFrame(this.animate);
+      }
+
+      setupLights() {
+        const amb = new THREE.AmbientLight(0xffffff, 0.65);
+        this.scene.add(amb);
+        const dir1 = new THREE.DirectionalLight(0xffffff, 0.85);
+        dir1.position.set(6, -6, 8);
+        this.scene.add(dir1);
+        const hemi = new THREE.HemisphereLight(0x38bdf8, 0x1e293b, 0.35);
+        this.scene.add(hemi);
+      }
+
+      setupAxesAndGrid() {
+        this.objects.gridGroup = new THREE.Group();
+        this.objects.axesGroup = new THREE.Group();
+
+        const grid = new THREE.GridHelper(6, 30, 0x334155, 0x1e293b);
+        grid.rotation.x = Math.PI / 2;
+        this.objects.gridGroup.add(grid);
+        this.scene.add(this.objects.gridGroup);
+
+        const axisLen = 1.6;
+        const arrX = this.createCylinderArrow(new THREE.Vector3(0,0,0), new THREE.Vector3(axisLen,0,0), 0xef4444, 0.005, 0.09, 0.016);
+        const arrY = this.createCylinderArrow(new THREE.Vector3(0,0,0), new THREE.Vector3(0,axisLen,0), 0x22c55e, 0.005, 0.09, 0.016);
+        const arrZ = this.createCylinderArrow(new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,axisLen), 0x3b82f6, 0.005, 0.09, 0.016);
+        this.objects.axesGroup.add(arrX, arrY, arrZ);
+
+        this.createAxisLabel('+X', new THREE.Vector3(axisLen + 0.15, 0, 0), '#ef4444');
+        this.createAxisLabel('+Y', new THREE.Vector3(0, axisLen + 0.15, 0), '#22c55e');
+        this.createAxisLabel('+Z (竖直向上)', new THREE.Vector3(0, 0, axisLen + 0.15), '#3b82f6');
+        this.scene.add(this.objects.axesGroup);
+      }
+
+      createAxisLabel(text, pos, color) {
+        if (!this.labelRenderer) return;
+        const div = document.createElement('div');
+        div.className = 'axis-label';
+        div.textContent = text;
+        div.style.color = color;
+        div.style.fontWeight = 'bold';
+        div.style.fontSize = '12px';
+        const label = new THREE.CSS2DObject(div);
+        label.position.copy(pos);
+        this.objects.axesGroup.add(label);
+      }
+
+      createCylinderArrow(start, end, colorHex, shaftRad = 0.015, headLen = 0.18, headRad = 0.045) {
+        const group = new THREE.Group();
+        const dir = new THREE.Vector3().subVectors(end, start);
+        const len = dir.length();
+        if (len < 1e-4) return group;
+
+        const actualHead = Math.min(headLen, len * 0.45);
+        const shaftLen = Math.max(0, len - actualHead);
+
+        if (shaftLen > 1e-4) {
+          const sGeo = new THREE.CylinderGeometry(shaftRad, shaftRad, shaftLen, 16);
+          const sMat = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.35, roughness: 0.35 });
+          const shaft = new THREE.Mesh(sGeo, sMat);
+          shaft.position.y = shaftLen / 2;
+          group.add(shaft);
+        }
+
+        const hGeo = new THREE.ConeGeometry(headRad, actualHead, 24);
+        const hMat = new THREE.MeshStandardMaterial({ color: colorHex, metalness: 0.45, roughness: 0.25 });
+        const head = new THREE.Mesh(hGeo, hMat);
+        head.position.y = shaftLen + actualHead / 2;
+        group.add(head);
+
+        group.position.copy(start);
+        const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+        group.quaternion.copy(quat);
+        return group;
+      }
+
+      update(data) {
+        this.currentData = data;
+        const { pivot, com, r, r_len, Fg_mag, d, tau, tau_mag, phi_deg, theta_deg } = data;
+        this.clearDynamicObjects();
+
+        const P = new THREE.Vector3(pivot.x, pivot.y, pivot.z);
+        const G = new THREE.Vector3(com.x, com.y, com.z);
+        const G_proj = new THREE.Vector3(com.x, com.y, pivot.z);
+
+        this.renderPivot(P);
+        this.renderCoM(G, data.mass);
+
+        if (this.options.showVectorR && r_len > 1e-4) {
+          this.renderVectorR(P, G, r_len);
+        }
+
+        let scale = this.options.vectorScale;
+        if (this.options.autoScale) {
+          const maxVal = Math.max(Fg_mag, tau_mag, 10);
+          scale = 1.35 / maxVal;
+        }
+
+        if (this.options.showGravity) this.renderGravityVector(G, Fg_mag, scale);
+        if (this.options.showGravityLine) this.renderGravityLine(G, P);
+        if (this.options.showMomentArm) this.renderMomentArm(P, G, G_proj, r, d);
+        if (this.options.showTorque) this.renderTorque(P, G, tau, tau_mag, scale);
+        if (this.options.showAngles) this.renderAngles(P, G, G_proj, r, d, r_len, phi_deg, theta_deg);
+      }
+
+      renderRobotModel(data) {
+        this.lastRobotModelData = data;
+        if (!this.objects.robotModelGroup) {
+          this.objects.robotModelGroup = new THREE.Group();
+          this.scene.add(this.objects.robotModelGroup);
+        }
+        if (!this.options.showRobotModel) {
+          this.objects.robotModelGroup.visible = false;
+          return;
+        }
+        this.objects.robotModelGroup.visible = true;
+
+        while (this.objects.robotModelGroup.children.length > 0) {
+          const child = this.objects.robotModelGroup.children[0];
+          this.objects.robotModelGroup.remove(child);
+          this.disposeObject(child);
+        }
+
+        if (!data || (!data.segments?.length && !data.visuals?.length)) return;
+
+        // 自动贴地站立高度偏移 (若开启 autoGround)
+        const groundShift = (this.options.autoGround && data.ground_offset) ? data.ground_offset : 0;
+        this.objects.robotModelGroup.position.set(0, 0, groundShift);
+
+        const visuals = data.visuals || [];
+        const segments = data.segments || [];
+
+        const curOpacity = (this.options.meshOpacity !== undefined) ? this.options.meshOpacity : 0.75;
+        const isTrans = curOpacity < 0.99;
+
+        // 高质感现代金属漆材质预设 (支持透明度通道)
+        const defaultMat = new THREE.MeshStandardMaterial({
+          color: 0x94a3b8,
+          metalness: 0.5,
+          roughness: 0.35,
+          transparent: isTrans,
+          opacity: curOpacity,
+          depthWrite: !isTrans
+        });
+
+        let loadedMeshCount = 0;
+
+        // 1. 优先加载 URDF Visuals (包含真实 STL / DAE 3D 几何网格)
+        if (visuals.length > 0) {
+          visuals.forEach((v) => {
+            let mat = defaultMat;
+            if (v.color && v.color.length >= 3) {
+              const hex = ((Math.round(v.color[0]*255) << 16) | (Math.round(v.color[1]*255) << 8) | Math.round(v.color[2]*255));
+              const baseAlpha = (v.color[3] !== undefined) ? v.color[3] : 1.0;
+              const effAlpha = baseAlpha * curOpacity;
+              mat = new THREE.MeshStandardMaterial({
+                color: hex,
+                metalness: 0.5,
+                roughness: 0.4,
+                transparent: effAlpha < 0.99,
+                opacity: effAlpha,
+                depthWrite: effAlpha >= 0.95
+              });
+            }
+
+            if (v.type === 'mesh' && v.filename) {
+              const scale = v.scale || [1, 1, 1];
+              const cacheKey = v.filename.toLowerCase();
+              const cachedGeom = this.meshManager ? this.meshManager.getCachedGeometry(cacheKey) : null;
+
+              if (cachedGeom) {
+                loadedMeshCount++;
+                const mesh = new THREE.Mesh(cachedGeom, mat.clone());
+                mesh.userData.isRobotMesh = true;
+                mesh.scale.set(scale[0], scale[1], scale[2]);
+                mesh.position.set(v.pos[0], v.pos[1], v.pos[2]);
+                mesh.quaternion.set(v.rot[0], v.rot[1], v.rot[2], v.rot[3]);
+                this.objects.robotModelGroup.add(mesh);
+              } else if (this.meshManager && !this.meshManager.isLoading(cacheKey)) {
+                const fileObj = this.meshManager.findFile(v.filename);
+
+                if (fileObj) {
+                  loadedMeshCount++;
+                  const isStl = v.filename.toLowerCase().endsWith('.stl');
+                  const isDae = v.filename.toLowerCase().endsWith('.dae');
+                  const blobUrl = URL.createObjectURL(fileObj);
+                  this.meshManager.setLoading(cacheKey, true);
+
+                  if (isStl && this.meshManager.stlLoader) {
+                    this.meshManager.stlLoader.load(blobUrl, (geom) => {
+                      this.meshManager.setLoading(cacheKey, false);
+                      geom.computeVertexNormals();
+                      this.meshManager.setCachedGeometry(cacheKey, geom);
+                      URL.revokeObjectURL(blobUrl);
+                      const mesh = new THREE.Mesh(geom, mat.clone());
+                      mesh.userData.isRobotMesh = true;
+                      mesh.scale.set(scale[0], scale[1], scale[2]);
+                      mesh.position.set(v.pos[0], v.pos[1], v.pos[2]);
+                      mesh.quaternion.set(v.rot[0], v.rot[1], v.rot[2], v.rot[3]);
+                      this.objects.robotModelGroup.add(mesh);
+                    }, undefined, () => {
+                      this.meshManager.setLoading(cacheKey, false);
+                      URL.revokeObjectURL(blobUrl);
+                    });
+                  } else if (isDae && this.meshManager.colladaLoader) {
+                    this.meshManager.colladaLoader.load(blobUrl, (collada) => {
+                      this.meshManager.setLoading(cacheKey, false);
+                      URL.revokeObjectURL(blobUrl);
+                      const dae = collada.scene;
+                      dae.scale.set(scale[0], scale[1], scale[2]);
+                      dae.position.set(v.pos[0], v.pos[1], v.pos[2]);
+                      dae.quaternion.set(v.rot[0], v.rot[1], v.rot[2], v.rot[3]);
+                      dae.traverse((child) => {
+                        if (child.isMesh) {
+                          child.userData.isRobotMesh = true;
+                          if (child.material) {
+                            const apply = (m) => {
+                              m.transparent = isTrans;
+                              m.opacity = curOpacity;
+                              m.depthWrite = !isTrans;
+                            };
+                            if (Array.isArray(child.material)) child.material.forEach(apply);
+                            else apply(child.material);
+                          }
+                        }
+                      });
+                      this.objects.robotModelGroup.add(dae);
+                    }, undefined, () => {
+                      this.meshManager.setLoading(cacheKey, false);
+                      URL.revokeObjectURL(blobUrl);
+                    });
+                  } else {
+                    this.meshManager.setLoading(cacheKey, false);
+                  }
+                } else {
+                  // 若前端未选本地文件，尝试从 moveit_bridge 的 HTTP mesh 接口加载 (支持 STL 与 DAE)
+                  loadedMeshCount++;
+                  const httpMeshUrl = `http://127.0.0.1:9091/mesh?file=${encodeURIComponent(v.filename)}`;
+                  this.meshManager.setLoading(cacheKey, true);
+                  if (v.filename.toLowerCase().endsWith('.stl') && this.meshManager.stlLoader) {
+                    this.meshManager.stlLoader.load(httpMeshUrl, (geom) => {
+                      this.meshManager.setLoading(cacheKey, false);
+                      geom.computeVertexNormals();
+                      this.meshManager.setCachedGeometry(cacheKey, geom);
+                      const mesh = new THREE.Mesh(geom, mat.clone());
+                      mesh.userData.isRobotMesh = true;
+                      mesh.scale.set(scale[0], scale[1], scale[2]);
+                      mesh.position.set(v.pos[0], v.pos[1], v.pos[2]);
+                      mesh.quaternion.set(v.rot[0], v.rot[1], v.rot[2], v.rot[3]);
+                      this.objects.robotModelGroup.add(mesh);
+                    }, undefined, () => this.meshManager.setLoading(cacheKey, false));
+                  } else if (v.filename.toLowerCase().endsWith('.dae') && this.meshManager.colladaLoader) {
+                    this.meshManager.colladaLoader.load(httpMeshUrl, (collada) => {
+                      this.meshManager.setLoading(cacheKey, false);
+                      const dae = collada.scene;
+                      dae.scale.set(scale[0], scale[1], scale[2]);
+                      dae.position.set(v.pos[0], v.pos[1], v.pos[2]);
+                      dae.quaternion.set(v.rot[0], v.rot[1], v.rot[2], v.rot[3]);
+                      dae.traverse((child) => {
+                        if (child.isMesh) {
+                          child.userData.isRobotMesh = true;
+                          if (child.material) {
+                            const apply = (m) => {
+                              m.transparent = isTrans;
+                              m.opacity = curOpacity;
+                              m.depthWrite = !isTrans;
+                            };
+                            if (Array.isArray(child.material)) child.material.forEach(apply);
+                            else apply(child.material);
+                          }
+                        }
+                      });
+                      this.objects.robotModelGroup.add(dae);
+                    }, undefined, () => this.meshManager.setLoading(cacheKey, false));
+                  } else {
+                    this.meshManager.setLoading(cacheKey, false);
+                  }
+                }
+              }
+            } else if (v.type === 'box' && v.size) {
+              const geo = new THREE.BoxGeometry(v.size[0], v.size[1], v.size[2]);
+              const mesh = new THREE.Mesh(geo, mat.clone());
+              mesh.userData.isRobotMesh = true;
+              mesh.position.set(v.pos[0], v.pos[1], v.pos[2]);
+              mesh.quaternion.set(v.rot[0], v.rot[1], v.rot[2], v.rot[3]);
+              this.objects.robotModelGroup.add(mesh);
+            } else if (v.type === 'cylinder' && v.radius && v.length) {
+              const geo = new THREE.CylinderGeometry(v.radius, v.radius, v.length, 24);
+              const mesh = new THREE.Mesh(geo, mat.clone());
+              mesh.userData.isRobotMesh = true;
+              mesh.position.set(v.pos[0], v.pos[1], v.pos[2]);
+              mesh.quaternion.set(v.rot[0], v.rot[1], v.rot[2], v.rot[3]);
+              this.objects.robotModelGroup.add(mesh);
+            } else if (v.type === 'sphere' && v.radius) {
+              const geo = new THREE.SphereGeometry(v.radius, 24, 24);
+              const mesh = new THREE.Mesh(geo, mat.clone());
+              mesh.userData.isRobotMesh = true;
+              mesh.position.set(v.pos[0], v.pos[1], v.pos[2]);
+              mesh.quaternion.set(v.rot[0], v.rot[1], v.rot[2], v.rot[3]);
+              this.objects.robotModelGroup.add(mesh);
+            }
+          });
+        }
+
+        const jointLoadsMap = new Map();
+        if (data && data.joint_loads) {
+          data.joint_loads.forEach(jl => jointLoadsMap.set(jl.name, jl));
+        }
+
+        // 2. 仅当没有任何 Mesh 被加载时，渲染干净清爽的连杆骨架 (杜绝同心圆环与假底座)
+        if (loadedMeshCount === 0 && segments.length > 0) {
+          const boneMatA = new THREE.MeshStandardMaterial({
+            color: 0x475569, metalness: 0.6, roughness: 0.35, transparent: isTrans, opacity: curOpacity, depthWrite: !isTrans
+          });
+          const boneMatB = new THREE.MeshStandardMaterial({
+            color: 0x334155, metalness: 0.65, roughness: 0.3, transparent: isTrans, opacity: curOpacity, depthWrite: !isTrans
+          });
+          const defaultNodeMat = new THREE.MeshStandardMaterial({
+            color: 0x0f172a, metalness: 0.8, roughness: 0.2
+          });
+
+          const renderedNodes = new Set();
+
+          segments.forEach((seg, idx) => {
+            const p1 = new THREE.Vector3(seg.from[0], seg.from[1], seg.from[2]);
+            const p2 = new THREE.Vector3(seg.to[0], seg.to[1], seg.to[2]);
+            const dir = new THREE.Vector3().subVectors(p2, p1);
+            const len = dir.length();
+
+            if (len > 0.02) {
+              const key1 = `${p1.x.toFixed(2)},${p1.y.toFixed(2)},${p1.z.toFixed(2)}`;
+              if (!renderedNodes.has(key1)) {
+                renderedNodes.add(key1);
+                let nodeMat = defaultNodeMat;
+                if (this.options.showJointHeatmap && jointLoadsMap.has(seg.joint)) {
+                  const jl = jointLoadsMap.get(seg.joint);
+                  const isDanger = jl.status === 'danger' || jl.load_pct >= 80;
+                  const isWarn = jl.status === 'warning' || jl.load_pct >= 50;
+                  const hex = isDanger ? 0xef4444 : (isWarn ? 0xf59e0b : 0x10b981);
+                  const emiss = isDanger ? 0xdc2626 : (isWarn ? 0xd97706 : 0x059669);
+                  nodeMat = new THREE.MeshStandardMaterial({
+                    color: hex, emissive: emiss, emissiveIntensity: isDanger ? 0.8 : 0.45,
+                    roughness: 0.2, metalness: 0.6
+                  });
+                }
+                const stdR = this.options.sphereRadius || 0.012;
+                const node = new THREE.Mesh(new THREE.SphereGeometry(0.012, 16, 16), nodeMat);
+                node.userData.isHeatmapNode = true;
+                const s = stdR / 0.012;
+                node.scale.set(s, s, s);
+                node.position.copy(p1);
+                this.objects.robotModelGroup.add(node);
+              }
+
+              const rad = Math.max(0.012, Math.min(0.032, len * 0.07));
+              const cylGeo = new THREE.CylinderGeometry(rad * 0.85, rad, len, 20);
+              const cyl = new THREE.Mesh(cylGeo, (idx % 2 === 0) ? boneMatA : boneMatB);
+              cyl.userData.isRobotMesh = true;
+              cyl.position.y = len / 2;
+
+              const linkGroup = new THREE.Group();
+              linkGroup.add(cyl);
+              linkGroup.position.copy(p1);
+              const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+              linkGroup.quaternion.copy(quat);
+
+              this.objects.robotModelGroup.add(linkGroup);
+            }
+          });
+        }
+
+        // 3. 当已加载真实 3D Mesh 时，在各关节枢轴叠加呈现 3D 热力光球 (精致统一直径指示球)
+        if (loadedMeshCount > 0 && segments.length > 0) {
+          const renderedJoints = new Set();
+          const stdR = this.options.sphereRadius || 0.012;
+          const s = stdR / 0.012;
+          segments.forEach(seg => {
+            const p1 = new THREE.Vector3(seg.from[0], seg.from[1], seg.from[2]);
+            const key = `${p1.x.toFixed(2)},${p1.y.toFixed(2)},${p1.z.toFixed(2)}`;
+            if (!renderedJoints.has(key)) {
+              renderedJoints.add(key);
+              let hex = 0x10b981, emiss = 0x059669;
+              if (jointLoadsMap.has(seg.joint)) {
+                const jl = jointLoadsMap.get(seg.joint);
+                if (jl.status === 'danger' || jl.load_pct >= 80) { hex = 0xef4444; emiss = 0xdc2626; }
+                else if (jl.status === 'warning' || jl.load_pct >= 50) { hex = 0xf59e0b; emiss = 0xd97706; }
+              }
+              const sphere = new THREE.Mesh(
+                new THREE.SphereGeometry(0.012, 16, 16),
+                new THREE.MeshStandardMaterial({
+                  color: hex,
+                  emissive: emiss,
+                  emissiveIntensity: 0.9,
+                  roughness: 0.2,
+                  metalness: 0.4
+                })
+              );
+              sphere.userData.isHeatmapNode = true;
+              sphere.visible = !!this.options.showJointHeatmap;
+              sphere.scale.set(s, s, s);
+              sphere.position.copy(p1);
+              this.objects.robotModelGroup.add(sphere);
+            }
+          });
+        }
+
+        // 4. 各连杆独立质心呈现 (Link Centers of Mass)
+        if (data.link_coms && data.link_coms.length > 0) {
+          const stdR = this.options.sphereRadius || 0.012;
+          const s = stdR / 0.012;
+          data.link_coms.forEach(lc => {
+            const sphereMat = new THREE.MeshStandardMaterial({
+              color: 0x38bdf8,
+              emissive: 0x0284c7,
+              emissiveIntensity: 0.75,
+              roughness: 0.25,
+              metalness: 0.45
+            });
+            const comMesh = new THREE.Mesh(new THREE.SphereGeometry(0.012, 16, 16), sphereMat);
+            comMesh.position.set(lc.pos[0], lc.pos[1], lc.pos[2]);
+            comMesh.userData.isLinkCoM = true;
+            comMesh.userData.linkName = lc.link;
+            comMesh.userData.linkMass = lc.mass;
+            comMesh.visible = !!this.options.showLinkCoMs;
+            comMesh.scale.set(s, s, s);
+
+            // 微型连杆质心十字信标 (Mini Coordinate Crosshair)
+            const crossLen = 0.012 * 1.5;
+            const crossMat = new THREE.LineBasicMaterial({ color: 0xbae6fd, transparent: true, opacity: 0.85 });
+            const pts = [
+              new THREE.Vector3(-crossLen, 0, 0), new THREE.Vector3(crossLen, 0, 0),
+              new THREE.Vector3(0, -crossLen, 0), new THREE.Vector3(0, crossLen, 0),
+              new THREE.Vector3(0, 0, -crossLen), new THREE.Vector3(0, 0, crossLen)
+            ];
+            const crossLines = new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(pts), crossMat);
+            comMesh.add(crossLines);
+
+            this.objects.robotModelGroup.add(comMesh);
+          });
+        }
+      }
+
+      renderPivot(P) {
+        const group = new THREE.Group();
+        const base = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.12, 0.16, 0.04, 32),
+          new THREE.MeshStandardMaterial({ color: this.colors.pivotPedestal, metalness: 0.6 })
+        );
+        base.position.set(P.x, P.y, P.z - 0.02);
+        base.rotation.x = Math.PI / 2;
+        group.add(base);
+
+        const sphere = new THREE.Mesh(
+          new THREE.SphereGeometry(0.045, 32, 32),
+          new THREE.MeshStandardMaterial({ color: this.colors.pivot, emissive: 0x0284c7, emissiveIntensity: 0.45 })
+        );
+        sphere.position.copy(P);
+        group.add(sphere);
+
+        if (this.options.showLabels && this.labelRenderer) {
+          const div = document.createElement('div');
+          div.className = 'scene-badge badge-pivot badge-offset-pivot';
+          div.innerHTML = `<strong>支点 O</strong> [${P.x.toFixed(2)}, ${P.y.toFixed(2)}, ${P.z.toFixed(2)}]m`;
+          const lbl = new THREE.CSS2DObject(div);
+          lbl.position.set(P.x, P.y, P.z + 0.12);
+          group.add(lbl);
+        }
+        this.objects.pivotGroup = group;
+        this.scene.add(group);
+      }
+
+      renderCoM(G, mass) {
+        const group = new THREE.Group();
+        const stdR = this.options.sphereRadius || 0.012;
+        const sphere = new THREE.Mesh(
+          new THREE.SphereGeometry(0.012, 32, 32),
+          new THREE.MeshStandardMaterial({
+            color: 0xfbbf24,
+            emissive: 0xd97706,
+            emissiveIntensity: 0.65,
+            roughness: 0.25,
+            metalness: 0.35
+          })
+        );
+        sphere.position.copy(G);
+        sphere.userData.isWholeBodyCoM = true;
+        const s = stdR / 0.012;
+        sphere.scale.set(s, s, s);
+        group.add(sphere);
+
+        if (this.options.showLabels && this.labelRenderer) {
+          const div = document.createElement('div');
+          div.className = 'scene-badge badge-com badge-offset-tr';
+          div.innerHTML = `<strong>整机重心 G (CoM)</strong><br>[${G.x.toFixed(2)}, ${G.y.toFixed(2)}, ${G.z.toFixed(2)}]m<br><span class="badge-sub">总质量 m = ${mass.toFixed(1)} kg</span>`;
+          const lbl = new THREE.CSS2DObject(div);
+          lbl.position.set(G.x, G.y, G.z + 0.08);
+          group.add(lbl);
+        }
+        this.objects.comGroup = group;
+        this.scene.add(group);
+      }
+
+      renderVectorR(P, G, rLen) {
+        const arrow = this.createCylinderArrow(P, G, this.colors.vectorR, 0.016, 0.16, 0.042);
+        if (this.options.showLabels && this.labelRenderer && rLen > 0.25) {
+          const mid = new THREE.Vector3().addVectors(P, G).multiplyScalar(0.5);
+          const div = document.createElement('div');
+          div.className = 'scene-badge badge-r badge-offset-r';
+          div.innerHTML = `位矢 r = ${rLen.toFixed(2)} m`;
+          const lbl = new THREE.CSS2DObject(div);
+          lbl.position.copy(mid);
+          arrow.add(lbl);
+        }
+        this.objects.arrowR = arrow;
+        this.scene.add(arrow);
+      }
+
+      renderGravityVector(G, FgMag, scale) {
+        const vLen = Math.max(0.3, Math.min(2.5, FgMag * scale));
+        const target = new THREE.Vector3(G.x, G.y, G.z - vLen);
+        const arrow = this.createCylinderArrow(G, target, this.colors.gravity, 0.02, 0.2, 0.05);
+
+        if (this.options.showLabels && this.labelRenderer) {
+          const div = document.createElement('div');
+          div.className = 'scene-badge badge-fg badge-offset-bl';
+          div.innerHTML = `<strong>重力 Fg</strong><br>${FgMag.toFixed(1)} N (沿 -Z)`;
+          const lbl = new THREE.CSS2DObject(div);
+          lbl.position.set(G.x, G.y, G.z - vLen / 2);
+          arrow.add(lbl);
+        }
+        this.objects.arrowFg = arrow;
+        this.scene.add(arrow);
+      }
+
+      renderGravityLine(G, P) {
+        const minZ = Math.min(0, P.z, G.z) - 0.8;
+        const maxZ = Math.max(G.z, P.z) + 0.8;
+        const pts = [new THREE.Vector3(G.x, G.y, maxZ), new THREE.Vector3(G.x, G.y, minZ)];
+        const geo = new THREE.BufferGeometry().setFromPoints(pts);
+        const mat = new THREE.LineDashedMaterial({ color: this.colors.gravityLine, dashSize: 0.08, gapSize: 0.05, opacity: 0.75, transparent: true });
+        const line = new THREE.Line(geo, mat);
+        line.computeLineDistances();
+        this.objects.gravityLine = line;
+        this.scene.add(line);
+      }
+
+      renderMomentArm(P, G, G_proj, r, d) {
+        const group = new THREE.Group();
+        if (d > 1e-4) {
+          const arm = this.createCylinderArrow(P, G_proj, this.colors.momentArm, 0.016, 0.14, 0.042);
+          group.add(arm);
+          if (this.options.showLabels && this.labelRenderer) {
+            const mid = new THREE.Vector3().addVectors(P, G_proj).multiplyScalar(0.5);
+            const div = document.createElement('div');
+            div.className = 'scene-badge badge-d badge-offset-tl';
+            div.innerHTML = `<strong>水平力臂 d</strong><br>${d.toFixed(3)} m`;
+            const lbl = new THREE.CSS2DObject(div);
+            lbl.position.copy(mid);
+            group.add(lbl);
+          }
+        }
+        if (Math.abs(r.z) > 1e-4) {
+          const dropGeo = new THREE.BufferGeometry().setFromPoints([G, G_proj]);
+          const dropMat = new THREE.LineDashedMaterial({ color: 0x38bdf8, dashSize: 0.05, gapSize: 0.03 });
+          const dropLine = new THREE.Line(dropGeo, dropMat);
+          dropLine.computeLineDistances();
+          group.add(dropLine);
+        }
+        this.objects.momentArmGroup = group;
+        this.scene.add(group);
+      }
+
+      renderTorque(P, G, tau, tauMag, scale) {
+        if (tauMag < 1e-4) return;
+        const origin = (this.options.torqueAnchor === 'com') ? G : P;
+        const vLen = Math.max(0.3, Math.min(2.5, tauMag * scale));
+        const tauDir = new THREE.Vector3(tau.x, tau.y, tau.z).normalize();
+        const target = new THREE.Vector3().copy(origin).addScaledVector(tauDir, vLen);
+
+        const arrow = this.createCylinderArrow(origin, target, this.colors.torque, 0.022, 0.22, 0.055);
+        if (this.options.showLabels && this.labelRenderer) {
+          const name = (this.options.torqueAnchor === 'com') ? '重心 G' : '支点 O';
+          const div = document.createElement('div');
+          div.className = 'scene-badge badge-torque badge-offset-br';
+          div.innerHTML = `<strong>重力矩 τ (基准: ${name})</strong><br>|τ| = ${tauMag.toFixed(2)} N·m<br><span class="badge-sub">τx=${tau.x.toFixed(1)}, τy=${tau.y.toFixed(1)} N·m</span>`;
+          const lbl = new THREE.CSS2DObject(div);
+          lbl.position.set(target.x, target.y, target.z + 0.12);
+          arrow.add(lbl);
+        }
+        this.objects.torqueArrow = arrow;
+        this.scene.add(arrow);
+
+        if (this.options.showTorqueComponents) {
+          if (Math.abs(tau.x) > 1e-3) {
+            const arrX = this.createCylinderArrow(origin, new THREE.Vector3(origin.x + Math.sign(tau.x) * Math.abs(tau.x) * scale, origin.y, origin.z), this.colors.torqueX, 0.012, 0.12, 0.03);
+            this.objects.torqueXArrow = arrX;
+            this.scene.add(arrX);
+          }
+          if (Math.abs(tau.y) > 1e-3) {
+            const arrY = this.createCylinderArrow(origin, new THREE.Vector3(origin.x, origin.y + Math.sign(tau.y) * Math.abs(tau.y) * scale, origin.z), this.colors.torqueY, 0.012, 0.12, 0.03);
+            this.objects.torqueYArrow = arrY;
+            this.scene.add(arrY);
+          }
+        }
+      }
+
+      renderAngles(P, G, G_proj, r, d, rLen, phiDeg, thetaDeg) {
+        if (d > 0.08 && phiDeg !== null) {
+          const phiGroup = new THREE.Group();
+          const radius = Math.max(0.15, Math.min(0.45, d * 0.55));
+          const arcPts = [];
+          const endA = (phiDeg * Math.PI) / 180;
+          for (let i = 0; i <= 24; i++) {
+            const a = (endA * i) / 24;
+            arcPts.push(new THREE.Vector3(P.x + radius * Math.cos(a), P.y + radius * Math.sin(a), P.z + 0.005));
+          }
+          const arcLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(arcPts), new THREE.LineBasicMaterial({ color: this.colors.anglePhi, linewidth: 2 }));
+          phiGroup.add(arcLine);
+
+          if (this.options.showLabels && this.labelRenderer) {
+            const midA = endA / 2;
+            const div = document.createElement('div');
+            div.className = 'scene-angle-label label-phi';
+            div.textContent = `φ = ${phiDeg.toFixed(1)}°`;
+            const lbl = new THREE.CSS2DObject(div);
+            lbl.position.set(P.x + (radius + 0.14) * Math.cos(midA), P.y + (radius + 0.14) * Math.sin(midA), P.z + 0.02);
+            phiGroup.add(lbl);
+          }
+          this.objects.anglePhiGroup = phiGroup;
+          this.scene.add(phiGroup);
+        }
+
+        if (rLen > 0.15 && thetaDeg !== null && Math.abs(thetaDeg) > 4 && Math.abs(thetaDeg - 180) > 4) {
+          const thetaGroup = new THREE.Group();
+          const radius = Math.max(0.15, Math.min(0.45, rLen * 0.45));
+          const vDown = new THREE.Vector3(0, 0, -1);
+          const vR = new THREE.Vector3(r.x, r.y, r.z).normalize();
+          const normal = new THREE.Vector3().crossVectors(vDown, vR);
+
+          if (normal.length() > 1e-4) {
+            normal.normalize();
+            const thetaRad = (thetaDeg * Math.PI) / 180;
+            const arcPts = [];
+            for (let i = 0; i <= 24; i++) {
+              const t = (thetaRad * i) / 24;
+              arcPts.push(vDown.clone().applyAxisAngle(normal, t).multiplyScalar(radius).add(P));
+            }
+            thetaGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(arcPts), new THREE.LineBasicMaterial({ color: this.colors.angleTheta, linewidth: 2 })));
+
+            if (this.options.showLabels && this.labelRenderer) {
+              const midPos = vDown.clone().applyAxisAngle(normal, thetaRad / 2).multiplyScalar(radius + 0.14).add(P);
+              const div = document.createElement('div');
+              div.className = 'scene-angle-label label-theta';
+              div.textContent = `θ = ${thetaDeg.toFixed(1)}°`;
+              const lbl = new THREE.CSS2DObject(div);
+              lbl.position.copy(midPos);
+              thetaGroup.add(lbl);
+            }
+          }
+          this.objects.angleThetaGroup = thetaGroup;
+          this.scene.add(thetaGroup);
+        }
+      }
+
+      clearDynamicObjects() {
+        const keys = ['pivotGroup', 'comGroup', 'arrowR', 'arrowFg', 'gravityLine', 'momentArmGroup', 'torqueArrow', 'torqueXArrow', 'torqueYArrow', 'anglePhiGroup', 'angleThetaGroup'];
+        for (const k of keys) {
+          if (this.objects[k]) {
+            this.scene.remove(this.objects[k]);
+            this.disposeObject(this.objects[k]);
+            this.objects[k] = null;
+          }
+        }
+      }
+
+      disposeObject(obj) {
+        if (!obj) return;
+        const cachedGeoms = this.meshManager ? new Set(this.meshManager.geometryCache.values()) : new Set();
+        obj.traverse((c) => {
+          if (c.geometry && !cachedGeoms.has(c.geometry)) c.geometry.dispose();
+          if (c.material) {
+            if (Array.isArray(c.material)) c.material.forEach(m => m.dispose());
+            else c.material.dispose();
+          }
+          if (c instanceof THREE.CSS2DObject && c.element && c.element.parentNode) {
+            c.element.parentNode.removeChild(c.element);
+          }
+        });
+      }
+
+      setCameraView(type) {
+        if (!this.controls) return;
+        const center = this.currentData ? new THREE.Vector3(
+          (this.currentData.pivot.x + this.currentData.com.x) / 2,
+          (this.currentData.pivot.y + this.currentData.com.y) / 2,
+          (this.currentData.pivot.z + this.currentData.com.z) / 2
+        ) : new THREE.Vector3(0.4, 0.3, 0.6);
+
+        const targetPos = new THREE.Vector3();
+        let targetUp = new THREE.Vector3(0, 0, 1);
+
+        switch (type) {
+          case 'top':
+            targetPos.set(center.x, center.y - 0.001, center.z + 5.5);
+            targetUp.set(0, 1, 0);
+            break;
+          case 'front':
+            targetPos.set(center.x, center.y - 5.5, center.z);
+            break;
+          case 'side':
+            targetPos.set(center.x + 5.5, center.y, center.z);
+            break;
+          case 'isometric':
+          default:
+            targetPos.set(center.x + 2.8, center.y - 3.4, center.z + 2.2);
+            break;
+        }
+
+        const startPos = this.camera.position.clone();
+        const startLook = this.controls.target.clone();
+        const startUp = this.camera.up.clone();
+        const startTime = performance.now();
+
+        const step = (now) => {
+          const p = Math.min(1, (now - startTime) / 600);
+          const ease = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+          this.camera.position.lerpVectors(startPos, targetPos, ease);
+          this.controls.target.lerpVectors(startLook, center, ease);
+          this.camera.up.lerpVectors(startUp, targetUp, ease).normalize();
+          this.camera.lookAt(this.controls.target);
+          this.controls.update();
+          if (p < 1) requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      }
+
+      resetView() { this.setCameraView('isometric'); }
+
+      setTorqueAnchor(anchor) {
+        if (anchor === 'pivot' || anchor === 'com') {
+          this.options.torqueAnchor = anchor;
+          if (this.currentData) this.update(this.currentData);
+        }
+      }
+
+      setLayerVisibility(key, val) {
+        if (this.options.hasOwnProperty(key)) {
+          this.options[key] = val;
+          if (key === 'showAxes' && this.objects.axesGroup) this.objects.axesGroup.visible = val;
+          else if (key === 'showGrid' && this.objects.gridGroup) this.objects.gridGroup.visible = val;
+          else if (key === 'showRobotModel' && this.objects.robotModelGroup) this.objects.robotModelGroup.visible = val;
+          else if (key === 'showJointHeatmap') {
+            let found = false;
+            if (this.objects.robotModelGroup) {
+              this.objects.robotModelGroup.traverse((child) => {
+                if (child.userData && child.userData.isHeatmapNode) {
+                  child.visible = val;
+                  found = true;
+                }
+              });
+            }
+            if (!found && this.lastRobotModelData) {
+              this.renderRobotModel(this.lastRobotModelData);
+            }
+          }
+          else if (key === 'showLinkCoMs') {
+            let found = false;
+            if (this.objects.robotModelGroup) {
+              this.objects.robotModelGroup.traverse((child) => {
+                if (child.userData && child.userData.isLinkCoM) {
+                  child.visible = val;
+                  found = true;
+                }
+              });
+            }
+            if (!found && this.lastRobotModelData) {
+              this.renderRobotModel(this.lastRobotModelData);
+            }
+          }
+          else if (this.currentData) this.update(this.currentData);
+        }
+      }
+
+      setMeshOpacity(opacity) {
+        this.options.meshOpacity = Math.max(0.05, Math.min(1.0, opacity));
+        if (this.objects.robotModelGroup) {
+          const isTrans = this.options.meshOpacity < 0.99;
+          this.objects.robotModelGroup.traverse((child) => {
+            if (child.isMesh && child.userData.isRobotMesh) {
+              const applyMat = (mat) => {
+                if (!mat) return;
+                mat.transparent = isTrans;
+                mat.opacity = this.options.meshOpacity;
+                mat.depthWrite = !isTrans;
+                mat.needsUpdate = true;
+              };
+              if (Array.isArray(child.material)) {
+                child.material.forEach(applyMat);
+              } else if (child.material) {
+                applyMat(child.material);
+              }
+            }
+          });
+        }
+      }
+
+      setSphereRadius(radius) {
+        this.options.sphereRadius = Math.max(0.003, Math.min(0.05, radius));
+        const s = this.options.sphereRadius / 0.012;
+        if (this.objects.robotModelGroup) {
+          this.objects.robotModelGroup.traverse((child) => {
+            if (child.isMesh && (child.userData.isHeatmapNode || child.userData.isLinkCoM)) {
+              child.scale.set(s, s, s);
+            }
+          });
+        }
+        if (this.objects.comGroup) {
+          this.objects.comGroup.traverse((child) => {
+            if (child.isMesh && child.userData.isWholeBodyCoM) {
+              child.scale.set(s, s, s);
+            }
+          });
+        }
+      }
+
+      onWindowResize() {
+        if (!this.container || !this.renderer || !this.camera) return;
+        const w = this.container.clientWidth, h = this.container.clientHeight;
+        this.camera.aspect = w / h;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(w, h);
+        if (this.labelRenderer) this.labelRenderer.setSize(w, h);
+      }
+
+      animate() {
+        requestAnimationFrame(this.animate);
+        if (this.controls) this.controls.update();
+        if (this.renderer && this.scene && this.camera) this.renderer.render(this.scene, this.camera);
+        if (this.labelRenderer && this.scene && this.camera) this.labelRenderer.render(this.scene, this.camera);
+      }
+    }
+
+    // ----------------------------------------------------
+    // 3. MoveIt 2 (demo.launch) WebSocket 客户端 (完全动态读取，无内置假模型)
+    // ----------------------------------------------------
+    class MoveItConnector {
+      constructor(ui) {
+        this.ui = ui;
+        this.ws = null;
+        this.isConnected = false;
+        this.wsUrl = 'ws://127.0.0.1:9090';
+        this.topicName = '/moveit_gravity_data';
+
+        this.robotInfo = { name: '未获取', mass: null, linksCount: 0 };
+        this.onStatusChange = null;
+        this.onModelLoaded = null;
+      }
+
+      connect(url = this.wsUrl, topic = this.topicName) {
+        this.wsUrl = url;
+        this.topicName = topic;
+        if (this.ws) this.disconnect();
+
+        this.notifyStatus('connecting', `正在连接 ${this.wsUrl}...`);
+        try {
+          this.ws = new WebSocket(this.wsUrl);
+          this.ws.onopen = () => {
+            this.isConnected = true;
+            this.notifyStatus('connected', `已成功连接到 MoveIt 2 (${this.wsUrl})`);
+            this.subscribeTopic(this.topicName);
+          };
+          this.ws.onmessage = (e) => this.handleMessage(e.data);
+          this.ws.onerror = () => this.notifyStatus('error', '连接出错，请确认 moveit_bridge.py 是否已在 MoveIt 环境中运行。');
+          this.ws.onclose = () => {
+            this.isConnected = false;
+            if (this.ui && this.ui.visualizer) {
+              this.ui.visualizer.renderRobotModel(null);
+            }
+            this.notifyStatus('disconnected', '已断开与 MoveIt 2 的连接');
+          };
+        } catch (e) {
+          this.notifyStatus('error', `连接异常: ${e.message}`);
+        }
+      }
+
+      disconnect() {
+        if (this.ws) {
+          try { this.ws.close(); } catch (_) {}
+          this.ws = null;
+        }
+        this.isConnected = false;
+        if (this.ui && this.ui.visualizer) {
+          this.ui.visualizer.renderRobotModel(null);
+        }
+        this.notifyStatus('disconnected', '未连接');
+      }
+
+      subscribeTopic(topic) {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        this.ws.send(JSON.stringify({ op: 'subscribe', topic, type: 'std_msgs/String' }));
+      }
+
+      handleMessage(raw) {
+        try {
+          const data = JSON.parse(raw);
+          let payload = data;
+          if (data.op === 'publish' && data.msg) {
+            payload = typeof data.msg.data === 'string' ? JSON.parse(data.msg.data) : data.msg;
+          }
+          this.applyDataPayload(payload);
+        } catch (_) {}
+      }
+
+      applyDataPayload(payload) {
+        if (!payload || typeof payload !== 'object') return;
+        if (this.ui) this.ui.lastPayload = payload;
+        let mass = payload.mass !== undefined ? parseFloat(payload.mass) : null;
+        let pivot = this.normalizePoint(payload.pivot);
+        let com = this.normalizePoint(payload.com);
+
+        // 自动贴地站立高度补偿：当 autoGround 开启且模型下肢延伸低于原点时，将重心提升对应高度
+        const groundShift = (this.ui && this.ui.visualizer && this.ui.visualizer.options.autoGround && payload.ground_offset) ? payload.ground_offset : 0;
+        if (com && groundShift) {
+          com = { x: com.x, y: com.y, z: Number((com.z + groundShift).toFixed(4)) };
+        }
+
+        if (payload.robot_name || payload.links_count) {
+          this.robotInfo.name = payload.robot_name || this.robotInfo.name;
+          this.robotInfo.mass = mass;
+          this.robotInfo.linksCount = payload.links_count || this.robotInfo.linksCount;
+          if (this.onModelLoaded) this.onModelLoaded(this.robotInfo);
+        }
+
+        // 加载与渲染 3D 机器人模型 (Mesh 或骨架)
+        if (this.ui && this.ui.visualizer) {
+          this.ui.visualizer.renderRobotModel(payload);
+        }
+
+        if (this.ui) this.ui.updateFromExternalSource({ mass, pivot, com });
+      }
+
+      normalizePoint(pt) {
+        if (!pt) return null;
+        if (Array.isArray(pt)) return { x: Number(pt[0])||0, y: Number(pt[1])||0, z: Number(pt[2])||0 };
+        return { x: Number(pt.x)||0, y: Number(pt.y)||0, z: Number(pt.z)||0 };
+      }
+
+      notifyStatus(state, msg) {
+        if (this.onStatusChange) this.onStatusChange(state, msg);
+      }
+    }
+
+    // ----------------------------------------------------
+    // 4. 前端通用 URDF 动态解析器 (支持任意机器人模型与 3D Mesh 网格)
+    // ----------------------------------------------------
+    class ClientURDFParser {
+      static parseURDF(xmlString) {
+        if (!xmlString) return null;
+        // 动态构建注释匹配正则表达式，避免 HTML 解析器将内联注释误识别为 HTML 块结束
+        const cleanXml = xmlString.replace(new RegExp('<' + '!--[\\s\\S]*?--' + '>', 'g'), '');
+
+        let xmlDoc = null;
+        if (typeof DOMParser !== 'undefined') {
+          const parser = new DOMParser();
+          xmlDoc = parser.parseFromString(cleanXml, "text/xml");
+        }
+
+        // 1. 全局材质库解析
+        const materials = {};
+        if (xmlDoc) {
+          const matNodes = xmlDoc.querySelectorAll('robot > material');
+          matNodes.forEach(m => {
+            const name = m.getAttribute('name');
+            const colorNode = m.querySelector('color');
+            if (name && colorNode) {
+              const rgbaStr = colorNode.getAttribute('rgba');
+              if (rgbaStr) {
+                materials[name] = rgbaStr.trim().split(/\s+/).map(Number);
+              }
+            }
+          });
+        }
+
+        // 2. 连杆惯性与视觉几何 (Mesh/Box/Cylinder/Sphere)
+        const links = {};
+        const linkNodes = xmlDoc ? xmlDoc.querySelectorAll('robot > link') : [];
+        linkNodes.forEach(l => {
+          const lname = l.getAttribute('name');
+          if (!lname) return;
+
+          let mass = 0;
+          let comXYZ = [0, 0, 0];
+          let comRPY = [0, 0, 0];
+          const inertial = l.querySelector('inertial');
+          if (inertial) {
+            const massEl = inertial.querySelector('mass');
+            if (massEl) mass = parseFloat(massEl.getAttribute('value')) || 0;
+            const origEl = inertial.querySelector('origin');
+            if (origEl) {
+              if (origEl.getAttribute('xyz')) comXYZ = origEl.getAttribute('xyz').trim().split(/\s+/).map(Number);
+              if (origEl.getAttribute('rpy')) comRPY = origEl.getAttribute('rpy').trim().split(/\s+/).map(Number);
+            }
+          }
+
+          const visuals = [];
+          const visNodes = l.querySelectorAll(':scope > visual');
+          visNodes.forEach(v => {
+            let vXYZ = [0, 0, 0];
+            let vRPY = [0, 0, 0];
+            const vOrig = v.querySelector('origin');
+            if (vOrig) {
+              if (vOrig.getAttribute('xyz')) vXYZ = vOrig.getAttribute('xyz').trim().split(/\s+/).map(Number);
+              if (vOrig.getAttribute('rpy')) vRPY = vOrig.getAttribute('rpy').trim().split(/\s+/).map(Number);
+            }
+
+            let matColor = null;
+            const vMat = v.querySelector('material');
+            if (vMat) {
+              const matName = vMat.getAttribute('name');
+              const colorEl = vMat.querySelector('color');
+              if (colorEl && colorEl.getAttribute('rgba')) {
+                matColor = colorEl.getAttribute('rgba').trim().split(/\s+/).map(Number);
+              } else if (matName && materials[matName]) {
+                matColor = materials[matName];
+              }
+            }
+
+            const geo = v.querySelector('geometry');
+            if (geo) {
+              const meshEl = geo.querySelector('mesh');
+              const boxEl = geo.querySelector('box');
+              const cylEl = geo.querySelector('cylinder');
+              const sphEl = geo.querySelector('sphere');
+
+              if (meshEl && meshEl.getAttribute('filename')) {
+                let scale = [1, 1, 1];
+                if (meshEl.getAttribute('scale')) {
+                  scale = meshEl.getAttribute('scale').trim().split(/\s+/).map(Number);
+                }
+                visuals.push({
+                  type: 'mesh',
+                  filename: meshEl.getAttribute('filename'),
+                  scale: scale,
+                  origin_xyz: vXYZ,
+                  origin_rpy: vRPY,
+                  color: matColor
+                });
+              } else if (boxEl && boxEl.getAttribute('size')) {
+                visuals.push({
+                  type: 'box',
+                  size: boxEl.getAttribute('size').trim().split(/\s+/).map(Number),
+                  origin_xyz: vXYZ,
+                  origin_rpy: vRPY,
+                  color: matColor
+                });
+              } else if (cylEl) {
+                visuals.push({
+                  type: 'cylinder',
+                  radius: parseFloat(cylEl.getAttribute('radius')) || 0.05,
+                  length: parseFloat(cylEl.getAttribute('length')) || 0.1,
+                  origin_xyz: vXYZ,
+                  origin_rpy: vRPY,
+                  color: matColor
+                });
+              } else if (sphEl) {
+                visuals.push({
+                  type: 'sphere',
+                  radius: parseFloat(sphEl.getAttribute('radius')) || 0.05,
+                  origin_xyz: vXYZ,
+                  origin_rpy: vRPY,
+                  color: matColor
+                });
+              }
+            }
+          });
+
+          links[lname] = { mass, com_local: comXYZ, com_rpy: comRPY, visuals };
+        });
+
+        // 3. 关节拓扑树解析
+        const joints = {};
+        const childLinks = new Set();
+        const jointNodes = xmlDoc ? xmlDoc.querySelectorAll('robot > joint') : [];
+        jointNodes.forEach(j => {
+          const jname = j.getAttribute('name');
+          const jtype = j.getAttribute('type') || 'revolute';
+          const pEl = j.querySelector('parent');
+          const cEl = j.querySelector('child');
+          if (!pEl || !cEl) return;
+          const pname = pEl.getAttribute('link');
+          const cname = cEl.getAttribute('link');
+          if (!pname || !cname) return;
+          childLinks.add(cname);
+
+          let origXYZ = [0, 0, 0];
+          let origRPY = [0, 0, 0];
+          const origEl = j.querySelector('origin');
+          if (origEl) {
+            if (origEl.getAttribute('xyz')) origXYZ = origEl.getAttribute('xyz').trim().split(/\s+/).map(Number);
+            if (origEl.getAttribute('rpy')) origRPY = origEl.getAttribute('rpy').trim().split(/\s+/).map(Number);
+          }
+
+          let axis = [0, 0, 1];
+          const axEl = j.querySelector('axis');
+          if (axEl && axEl.getAttribute('xyz')) {
+            axis = axEl.getAttribute('xyz').trim().split(/\s+/).map(Number);
+          }
+
+          let effortLimit = 0;
+          const limEl = j.querySelector('limit');
+          if (limEl && limEl.getAttribute('effort')) {
+            effortLimit = parseFloat(limEl.getAttribute('effort')) || 0;
+          }
+
+          joints[jname] = { parent: pname, child: cname, type: jtype, origin_xyz: origXYZ, origin_rpy: origRPY, axis, effort_limit: effortLimit };
+        });
+
+        const allLinks = Object.keys(links);
+        if (allLinks.length === 0) return null;
+        let rootLink = allLinks.find(l => !childLinks.has(l)) || allLinks[0] || 'base_link';
+
+        let totalMass = Object.values(links).reduce((s, l) => s + l.mass, 0);
+        if (totalMass <= 0.01) {
+          totalMass = 0;
+          allLinks.forEach(l => { links[l].mass = 1.0; totalMass += 1.0; });
+        }
+
+        // 正向运动学解算
+        const linkTransforms = {};
+        linkTransforms[rootLink] = { R: [[1,0,0],[0,1,0],[0,0,1]], p: [0,0,0] };
+        const queue = [rootLink];
+        const visited = new Set([rootLink]);
+
+        while (queue.length > 0) {
+          const curr = queue.shift();
+          const T_curr = linkTransforms[curr];
+
+          for (const [jname, j] of Object.entries(joints)) {
+            if (j.parent === curr && !visited.has(j.child)) {
+              const child = j.child;
+              const R_orig = ClientURDFParser.rpyToMat(j.origin_rpy[0], j.origin_rpy[1], j.origin_rpy[2]);
+              const T_orig = { R: R_orig, p: j.origin_xyz };
+              const T_child = ClientURDFParser.multTransforms(T_curr, T_orig);
+              linkTransforms[child] = T_child;
+              visited.add(child);
+              queue.push(child);
+            }
+          }
+        }
+
+        // 全机重心与空间包围盒解算
+        let weightedCom = [0, 0, 0];
+        let minZ = Infinity, maxZ = -Infinity;
+
+        for (const [lname, ldata] of Object.entries(links)) {
+          if (linkTransforms[lname]) {
+            const m = ldata.mass;
+            const T_l = linkTransforms[lname];
+            const gx = T_l.R[0][0]*ldata.com_local[0] + T_l.R[0][1]*ldata.com_local[1] + T_l.R[0][2]*ldata.com_local[2] + T_l.p[0];
+            const gy = T_l.R[1][0]*ldata.com_local[0] + T_l.R[1][1]*ldata.com_local[1] + T_l.R[1][2]*ldata.com_local[2] + T_l.p[1];
+            const gz = T_l.R[2][0]*ldata.com_local[0] + T_l.R[2][1]*ldata.com_local[1] + T_l.R[2][2]*ldata.com_local[2] + T_l.p[2];
+            weightedCom[0] += m * gx;
+            weightedCom[1] += m * gy;
+            weightedCom[2] += m * gz;
+
+            if (T_l.p[2] < minZ) minZ = T_l.p[2];
+            if (T_l.p[2] > maxZ) maxZ = T_l.p[2];
+          }
+        }
+
+        const com = totalMass > 0 ? [weightedCom[0]/totalMass, weightedCom[1]/totalMass, weightedCom[2]/totalMass] : [0,0,0];
+
+        // 解算所有 Visual 几何体的全局位姿
+        const worldVisuals = [];
+        for (const [lname, ldata] of Object.entries(links)) {
+          if (linkTransforms[lname]) {
+            const T_l = linkTransforms[lname];
+            ldata.visuals.forEach(v => {
+              const R_v = ClientURDFParser.rpyToMat(v.origin_rpy[0], v.origin_rpy[1], v.origin_rpy[2]);
+              const T_v = { R: R_v, p: v.origin_xyz };
+              const T_world_v = ClientURDFParser.multTransforms(T_l, T_v);
+              const quat = ClientURDFParser.matToQuat(T_world_v.R);
+
+              if (T_world_v.p[2] < minZ) minZ = T_world_v.p[2];
+              if (T_world_v.p[2] > maxZ) maxZ = T_world_v.p[2];
+
+              worldVisuals.push({
+                type: v.type,
+                filename: v.filename,
+                scale: v.scale,
+                size: v.size,
+                radius: v.radius,
+                length: v.length,
+                color: v.color,
+                link: lname,
+                pos: [Number(T_world_v.p[0].toFixed(4)), Number(T_world_v.p[1].toFixed(4)), Number(T_world_v.p[2].toFixed(4))],
+                rot: quat
+              });
+            });
+          }
+        }
+
+        // 仅保留长度 > 2cm 的有效肢体段 (过滤零位虚关节)
+        const segments = [];
+        for (const [jname, j] of Object.entries(joints)) {
+          if (linkTransforms[j.parent] && linkTransforms[j.child]) {
+            const p1 = linkTransforms[j.parent].p;
+            const p2 = linkTransforms[j.child].p;
+            const dx = p2[0] - p1[0], dy = p2[1] - p1[1], dz = p2[2] - p1[2];
+            const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            if (dist > 0.02) {
+              segments.push({
+                joint: jname,
+                parent: j.parent,
+                child: j.child,
+                from: [Number(p1[0].toFixed(4)), Number(p1[1].toFixed(4)), Number(p1[2].toFixed(4))],
+                to: [Number(p2[0].toFixed(4)), Number(p2[1].toFixed(4)), Number(p2[2].toFixed(4))],
+                length: Number(dist.toFixed(4))
+              });
+            }
+          }
+        }
+
+        const groundOffset = (minZ < -0.05) ? Number((-minZ).toFixed(4)) : 0.0;
+        const robotName = (xmlDoc && xmlDoc.querySelector('robot')?.getAttribute('name')) || "urdf_robot";
+
+        // 动力学解算 (各关节静载重力矩、额定利用率与整机功耗)
+        const gConst = 9.81;
+        const childrenMap = {};
+        for (const [jname, j] of Object.entries(joints)) {
+          if (!childrenMap[j.parent]) childrenMap[j.parent] = [];
+          childrenMap[j.parent].push({ jname, child: j.child });
+        }
+
+        const linkComGlobal = {};
+        const linkComsList = [];
+        for (const [lname, ldata] of Object.entries(links)) {
+          if (linkTransforms[lname]) {
+            const T_l = linkTransforms[lname];
+            const local = ldata.com_local;
+            const gx = T_l.R[0][0]*local[0] + T_l.R[0][1]*local[1] + T_l.R[0][2]*local[2] + T_l.p[0];
+            const gy = T_l.R[1][0]*local[0] + T_l.R[1][1]*local[1] + T_l.R[1][2]*local[2] + T_l.p[1];
+            const gz = T_l.R[2][0]*local[0] + T_l.R[2][1]*local[1] + T_l.R[2][2]*local[2] + T_l.p[2];
+            linkComGlobal[lname] = [gx, gy, gz];
+            if (ldata.mass > 1e-4) {
+              linkComsList.push({
+                link: lname,
+                mass: Number(ldata.mass.toFixed(4)),
+                pos: [Number(gx.toFixed(4)), Number(gy.toFixed(4)), Number(gz.toFixed(4))]
+              });
+            }
+          }
+        }
+
+        const jointLoads = [];
+        for (const [jname, j] of Object.entries(joints)) {
+          if (!['revolute', 'continuous', 'prismatic'].includes(j.type)) continue;
+          if (!linkTransforms[j.parent] || !linkTransforms[j.child]) continue;
+
+          // 子树递归连杆收集
+          const subtreeLinks = [];
+          const qLinks = [j.child];
+          const visitedLinks = new Set([j.child]);
+          while (qLinks.length > 0) {
+            const cur = qLinks.shift();
+            subtreeLinks.push(cur);
+            (childrenMap[cur] || []).forEach(edge => {
+              if (!visitedLinks.has(edge.child)) {
+                visitedLinks.add(edge.child);
+                qLinks.push(edge.child);
+              }
+            });
+          }
+
+          // 关节原点与旋转轴
+          const T_p = linkTransforms[j.parent];
+          const R_orig = ClientURDFParser.rpyToMat(j.origin_rpy[0], j.origin_rpy[1], j.origin_rpy[2]);
+          const T_orig = { R: R_orig, p: j.origin_xyz };
+          const T_j_world = ClientURDFParser.multTransforms(T_p, T_orig);
+          const p_joint = T_j_world.p;
+          const R_j = T_j_world.R;
+
+          const axisWorld = [
+            R_j[0][0]*j.axis[0] + R_j[0][1]*j.axis[1] + R_j[0][2]*j.axis[2],
+            R_j[1][0]*j.axis[0] + R_j[1][1]*j.axis[1] + R_j[1][2]*j.axis[2],
+            R_j[2][0]*j.axis[0] + R_j[2][1]*j.axis[1] + R_j[2][2]*j.axis[2]
+          ];
+          const axNorm = Math.sqrt(axisWorld[0]**2 + axisWorld[1]**2 + axisWorld[2]**2);
+          if (axNorm > 1e-6) {
+            axisWorld[0] /= axNorm; axisWorld[1] /= axNorm; axisWorld[2] /= axNorm;
+          }
+
+          let tauX = 0, tauY = 0;
+          subtreeLinks.forEach(l => {
+            if (links[l] && linkComGlobal[l]) {
+              const m = links[l].mass;
+              const gPos = linkComGlobal[l];
+              tauX += -gConst * m * (gPos[1] - p_joint[1]);
+              tauY += gConst * m * (gPos[0] - p_joint[0]);
+            }
+          });
+
+          const tauMotor = -(tauX * axisWorld[0] + tauY * axisWorld[1]);
+          const limit = j.effort_limit || 0;
+          const loadPct = limit > 0 ? (Math.abs(tauMotor) / limit) * 100 : 0;
+          const status = loadPct < 50 ? 'safe' : (loadPct < 80 ? 'warning' : 'danger');
+
+          jointLoads.push({
+            name: jname,
+            torque: Number(tauMotor.toFixed(3)),
+            limit: Number(limit.toFixed(1)),
+            load_pct: Number(loadPct.toFixed(1)),
+            status: status
+          });
+        }
+
+        const sumTauSq = jointLoads.reduce((s, jl) => s + jl.torque ** 2, 0);
+        const tauRms = jointLoads.length > 0 ? Math.sqrt(sumTauSq / jointLoads.length) : 0;
+        let peakJoint = null;
+        let peakTorque = null;
+        if (jointLoads.length > 0) {
+          peakJoint = jointLoads.reduce((max, jl) => jl.load_pct > max.load_pct ? jl : max, jointLoads[0]);
+          peakTorque = jointLoads.reduce((max, jl) => Math.abs(jl.torque) > Math.abs(max.torque) ? jl : max, jointLoads[0]);
+        }
+
+        const baseMx = -totalMass * gConst * com[1];
+        const baseMy = totalMass * gConst * com[0];
+        const baseMag = Math.sqrt(baseMx**2 + baseMy**2);
+
+        const dynamics = {
+          engine: "前端通用刚体动力学",
+          total_mass: Number(totalMass.toFixed(2)),
+          gravity_constant: gConst,
+          base_wrench: {
+            fz: Number((totalMass * gConst).toFixed(2)),
+            mx: Number(baseMx.toFixed(2)),
+            my: Number(baseMy.toFixed(2)),
+            mag: Number(baseMag.toFixed(2))
+          },
+          sum_tau_sq: Number(sumTauSq.toFixed(3)),
+          tau_rms: Number(tauRms.toFixed(3)),
+          peak_joint: peakJoint,
+          peak_torque: peakTorque,
+          stability_margin: Number(Math.sqrt(com[0]**2 + com[1]**2).toFixed(4))
+        };
+
+        return {
+          type: "moveit_robot_data",
+          robot_name: robotName,
+          mass: Number(totalMass.toFixed(2)),
+          links_count: allLinks.length,
+          pivot: { x: 0, y: 0, z: 0 },
+          com: { x: Number(com[0].toFixed(4)), y: Number(com[1].toFixed(4)), z: Number(com[2].toFixed(4)) },
+          link_coms: linkComsList,
+          min_z: Number(minZ.toFixed(4)),
+          max_z: Number(maxZ.toFixed(4)),
+          ground_offset: groundOffset,
+          segments: segments,
+          visuals: worldVisuals,
+          joint_loads: jointLoads,
+          dynamics: dynamics,
+          timestamp: Date.now() / 1000
+        };
+      }
+
+      static rpyToMat(r, p, y) {
+        const cr = Math.cos(r||0), sr = Math.sin(r||0);
+        const cp = Math.cos(p||0), sp = Math.sin(p||0);
+        const cy = Math.cos(y||0), sy = Math.sin(y||0);
+        return [
+          [cy*cp, cy*sp*sr - sy*cr, cy*sp*cr + sy*sr],
+          [sy*cp, sy*sp*sr + cy*cr, sy*sp*cr - cy*sr],
+          [-sp,   cp*sr,            cp*cr           ]
+        ];
+      }
+
+      static multTransforms(Ta, Tb) {
+        const Ra = Ta.R, pa = Ta.p;
+        const Rb = Tb.R, pb = Tb.p;
+        const R_new = [
+          [Ra[0][0]*Rb[0][0] + Ra[0][1]*Rb[1][0] + Ra[0][2]*Rb[2][0], Ra[0][0]*Rb[0][1] + Ra[0][1]*Rb[1][0] + Ra[0][2]*Rb[2][1], Ra[0][0]*Rb[0][2] + Ra[0][1]*Rb[1][2] + Ra[0][2]*Rb[2][2]],
+          [Ra[1][0]*Rb[0][0] + Ra[1][1]*Rb[1][0] + Ra[1][2]*Rb[2][0], Ra[1][0]*Rb[0][1] + Ra[1][1]*Rb[1][1] + Ra[1][2]*Rb[2][1], Ra[1][0]*Rb[0][2] + Ra[1][1]*Rb[1][2] + Ra[1][2]*Rb[2][2]],
+          [Ra[2][0]*Rb[0][0] + Ra[2][1]*Rb[1][0] + Ra[2][2]*Rb[2][0], Ra[2][0]*Rb[0][1] + Ra[2][1]*Rb[1][1] + Ra[2][2]*Rb[2][1], Ra[2][0]*Rb[0][2] + Ra[2][1]*Rb[1][2] + Ra[2][2]*Rb[2][2]]
+        ];
+        const p_new = [
+          Ra[0][0]*pb[0] + Ra[0][1]*pb[1] + Ra[0][2]*pb[2] + pa[0],
+          Ra[1][0]*pb[0] + Ra[1][1]*pb[1] + Ra[1][2]*pb[2] + pa[1],
+          Ra[2][0]*pb[0] + Ra[2][1]*pb[1] + Ra[2][2]*pb[2] + pa[2]
+        ];
+        return { R: R_new, p: p_new };
+      }
+
+      static matToQuat(m) {
+        const tr = m[0][0] + m[1][1] + m[2][2];
+        let qw, qx, qy, qz;
+        if (tr > 0) {
+          const s = Math.sqrt(Math.max(0, tr + 1.0)) * 2;
+          const safeS = Math.max(s, 1e-9);
+          qw = 0.25 * safeS;
+          qx = (m[2][1] - m[1][2]) / safeS;
+          qy = (m[0][2] - m[2][0]) / safeS;
+          qz = (m[1][0] - m[0][1]) / safeS;
+        } else if ((m[0][0] > m[1][1]) && (m[0][0] > m[2][2])) {
+          const s = Math.sqrt(Math.max(0, 1.0 + m[0][0] - m[1][1] - m[2][2])) * 2;
+          const safeS = Math.max(s, 1e-9);
+          qw = (m[2][1] - m[1][2]) / safeS;
+          qx = 0.25 * safeS;
+          qy = (m[0][1] + m[1][0]) / safeS;
+          qz = (m[0][2] + m[2][0]) / safeS;
+        } else if (m[1][1] > m[2][2]) {
+          const s = Math.sqrt(Math.max(0, 1.0 + m[1][1] - m[0][0] - m[2][2])) * 2;
+          const safeS = Math.max(s, 1e-9);
+          qw = (m[0][2] - m[2][0]) / safeS;
+          qx = (m[0][1] + m[1][0]) / safeS;
+          qy = 0.25 * safeS;
+          qz = (m[1][2] + m[2][1]) / safeS;
+        } else {
+          const s = Math.sqrt(Math.max(0, 1.0 + m[2][2] - m[0][0] - m[1][1])) * 2;
+          const safeS = Math.max(s, 1e-9);
+          qw = (m[1][0] - m[0][1]) / safeS;
+          qx = (m[0][2] + m[2][0]) / safeS;
+          qy = (m[1][2] + m[2][1]) / safeS;
+          qz = 0.25 * safeS;
+        }
+        return [Number(qx.toFixed(5)), Number(qy.toFixed(5)), Number(qz.toFixed(5)), Number(qw.toFixed(5))];
+      }
+    }
+
+    // ----------------------------------------------------
+    // 5. 用户交互控制与数据看板模块 (UI Controller)
+    // ----------------------------------------------------
+    class GravityTorqueUI {
+      constructor(visualizer) {
+        this.visualizer = visualizer;
+        this.defaultParams = {
+          mass: 25.0, g: 9.81,
+          pivot: { x: 0.0, y: 0.0, z: 0.0 },
+          com: { x: 0.8, y: 0.6, z: 1.2 }
+        };
+        this.params = JSON.parse(JSON.stringify(this.defaultParams));
+        this.moveItConnector = new MoveItConnector(this);
+        this.lastPayload = null;
+        this.activeTab = 'spatial';
+        this.jointSearchQuery = '';
+        this.jointSortMode = 'load_desc';
+
+        this.testCases = [
+          { id: 'case_default', name: '标准默认配置', desc: '重心斜上方偏移，产生标准空间力臂与力矩合成效果。', params: { mass: 25.0, pivot: {x:0, y:0, z:0}, com: {x:0.8, y:0.6, z:1.2} } },
+          { id: 'case_1', name: '用例 1: 重心在支点正上方 (力矩为零)', desc: '水平力臂 d = 0，重力作用线穿过支点，重力矩严格为 0。', params: { mass: 20.0, pivot: {x:0, y:0, z:0}, com: {x:0.0, y:0.0, z:1.5} } },
+          { id: 'case_2', name: '用例 2: 重心仅沿 +X 偏移 (τy 正, τx 零)', desc: 'rx > 0, ry = 0。重力产生绕 +Y 轴正向旋转力矩：τy = +mg·rx > 0，τx = 0。', params: { mass: 20.0, pivot: {x:0, y:0, z:0}, com: {x:1.0, y:0.0, z:1.0} } },
+          { id: 'case_3', name: '用例 3: 重心仅沿 +Y 偏移 (τx 负, τy 零)', desc: 'rx = 0, ry > 0。重力产生绕 -X 轴方向力矩：τx = -mg·ry < 0，τy = 0。', params: { mass: 20.0, pivot: {x:0, y:0, z:0}, com: {x:0.0, y:1.0, z:1.0} } },
+          { id: 'case_4', name: '用例 4: 重心沿 +X、+Y 复合偏移', desc: 'τ = (-mg·ry, mg·rx, 0)，力矩与水平力臂方向严格正交 (点积为 0)。', params: { mass: 20.0, pivot: {x:0, y:0, z:0}, com: {x:0.8, y:0.6, z:1.0} } },
+          { id: 'case_5', name: '用例 5: 仅变高度差 (力矩大小不变)', desc: '水平偏移不变，Gz 升至 2.0m。位矢 |r| 变长，但水平力臂 d 恒定，合力矩大小完全不变！', params: { mass: 20.0, pivot: {x:0, y:0, z:0}, com: {x:0.8, y:0.6, z:2.0} } },
+          { id: 'case_6', name: '用例 6: 重心偏移反转 (力矩完全反向)', desc: '偏移反转为 (-0.8, -0.6)，力矩分量变为 τx > 0, τy < 0，力矩方向反转 180°。', params: { mass: 20.0, pivot: {x:0, y:0, z:0}, com: {x:-0.8, y:-0.6, z:1.0} } },
+          { id: 'case_7', name: '用例 7: 质量翻倍增加 (力矩成正比)', desc: '总质量增至 60kg，重力与重力矩线性严格扩大 3 倍。', params: { mass: 60.0, pivot: {x:0, y:0, z:0}, com: {x:0.8, y:0.6, z:1.0} } }
+        ];
+
+        this.bindEvents();
+        this.populateTestCasesUI();
+        this.syncInputs();
+        this.recalculateAndUpdate();
+      }
+
+      bindEvents() {
+        this.bindDualControl('mass', 'input_mass', 'range_mass', (v) => this.params.mass = Math.max(0, parseFloat(v)||0));
+        ['x','y','z'].forEach(axis => {
+          this.bindDualControl(`pivot_${axis}`, `input_pivot_${axis}`, `range_pivot_${axis}`, (v) => this.params.pivot[axis] = parseFloat(v)||0);
+          this.bindDualControl(`com_${axis}`, `input_com_${axis}`, `range_com_${axis}`, (v) => this.params.com[axis] = parseFloat(v)||0);
+        });
+
+        document.getElementById('select_g')?.addEventListener('change', (e) => {
+          this.params.g = parseFloat(e.target.value) || 9.80665;
+          this.recalculateAndUpdate();
+        });
+
+        document.getElementById('select_torque_anchor')?.addEventListener('change', (e) => {
+          this.visualizer.setTorqueAnchor(e.target.value);
+        });
+
+        ['isometric', 'top', 'front', 'side'].forEach(view => {
+          document.getElementById(`btn_view_${view}`)?.addEventListener('click', () => {
+            this.visualizer.setCameraView(view);
+            this.setActiveViewButton(view);
+          });
+        });
+
+        document.getElementById('btn_reset_view')?.addEventListener('click', () => {
+          this.visualizer.resetView();
+          this.setActiveViewButton('isometric');
+        });
+
+        document.getElementById('btn_reset_params')?.addEventListener('click', () => this.resetParams());
+
+        const toggles = [
+          { id: 'toggle_robot_model', k: 'showRobotModel' },
+          { id: 'toggle_link_coms', k: 'showLinkCoMs' },
+          { id: 'toggle_joint_heatmap', k: 'showJointHeatmap' },
+          { id: 'toggle_axes', k: 'showAxes' }, { id: 'toggle_grid', k: 'showGrid' },
+          { id: 'toggle_vector_r', k: 'showVectorR' }, { id: 'toggle_gravity', k: 'showGravity' },
+          { id: 'toggle_gravity_line', k: 'showGravityLine' }, { id: 'toggle_moment_arm', k: 'showMomentArm' },
+          { id: 'toggle_torque', k: 'showTorque' }, { id: 'toggle_torque_components', k: 'showTorqueComponents' },
+          { id: 'toggle_angles', k: 'showAngles' }, { id: 'toggle_labels', k: 'showLabels' },
+          { id: 'toggle_autoscale', k: 'autoScale' }
+        ];
+        toggles.forEach(({ id, k }) => {
+          const el = document.getElementById(id);
+          if (el) {
+            el.checked = this.visualizer.options[k];
+            el.addEventListener('change', (e) => this.visualizer.setLayerVisibility(k, e.target.checked));
+          }
+        });
+
+        // 动力学多 Tab 标签页切换
+        ['spatial', 'joints', 'wholebody'].forEach(tabId => {
+          document.getElementById(`btn_tab_${tabId}`)?.addEventListener('click', () => {
+            this.switchTab(tabId);
+          });
+        });
+
+        // 关节谱搜索与排序监听
+        document.getElementById('input_joint_search')?.addEventListener('input', (e) => {
+          this.jointSearchQuery = e.target.value.toLowerCase().trim();
+          this.renderJointSpectrum();
+        });
+        document.getElementById('select_joint_sort')?.addEventListener('change', (e) => {
+          this.jointSortMode = e.target.value;
+          this.renderJointSpectrum();
+        });
+
+        // 机器人模型外壳 Mesh 透明度滑块调节
+        const meshOpacitySlider = document.getElementById('range_mesh_opacity');
+        const meshOpacityValText = document.getElementById('mesh_opacity_val');
+        if (meshOpacitySlider && meshOpacityValText) {
+          meshOpacitySlider.addEventListener('input', (e) => {
+            const pct = parseInt(e.target.value, 10);
+            meshOpacityValText.textContent = `${pct}%`;
+            this.visualizer.setMeshOpacity(pct / 100);
+          });
+        }
+
+        // 浮标背景透明度滑块调节
+        const opacitySlider = document.getElementById('range_badge_opacity');
+        const opacityValText = document.getElementById('badge_opacity_val');
+        if (opacitySlider && opacityValText) {
+          opacitySlider.addEventListener('input', (e) => {
+            const pct = parseInt(e.target.value, 10);
+            opacityValText.textContent = `${pct}%`;
+            const alpha = (pct / 100).toFixed(2);
+            document.documentElement.style.setProperty('--badge-bg-alpha', alpha);
+          });
+        }
+
+        // 指示球统一直径滑块调节 (统一调整负荷球与质心球尺寸)
+        const sphereSizeSlider = document.getElementById('range_sphere_size');
+        const sphereSizeValText = document.getElementById('sphere_size_val');
+        if (sphereSizeSlider && sphereSizeValText) {
+          sphereSizeSlider.addEventListener('input', (e) => {
+            const diamMm = parseInt(e.target.value, 10);
+            sphereSizeValText.textContent = `${diamMm}mm`;
+            const radiusM = (diamMm / 2) / 1000;
+            this.visualizer.setSphereRadius(radiusM);
+          });
+        }
+
+        // MoveIt 2 交互
+        this.moveItConnector.onStatusChange = (state, msg) => this.handleMoveItStatus(state, msg);
+        this.moveItConnector.onModelLoaded = (info) => {
+          const tag = document.getElementById('moveit_model_tag');
+          if (tag) tag.innerHTML = `模型: <strong>${escapeHTML(info.name)}</strong> | 连杆: ${info.linksCount} 节 | 质量: ${info.mass ? info.mass.toFixed(2) : '--'} kg`;
+        };
+
+        document.getElementById('btn_moveit_connect')?.addEventListener('click', () => {
+          const url = document.getElementById('input_moveit_ws')?.value.trim() || 'ws://127.0.0.1:9090';
+          const topic = document.getElementById('input_moveit_topic')?.value.trim() || '/moveit_gravity_data';
+          this.moveItConnector.connect(url, topic);
+        });
+
+        document.getElementById('btn_moveit_disconnect')?.addEventListener('click', () => this.moveItConnector.disconnect());
+
+        // 通用机器人模型与 Mesh 文件夹加载
+        const folderInput = document.getElementById('input_folder_model');
+        document.getElementById('btn_select_folder')?.addEventListener('click', () => {
+          folderInput?.click();
+        });
+        folderInput?.addEventListener('change', (e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            this.handleSelectedModelFiles(Array.from(e.target.files));
+          }
+        });
+
+        // 通用 URDF 与 Mesh 多文件加载
+        const filesInput = document.getElementById('input_files_model');
+        document.getElementById('btn_select_files')?.addEventListener('click', () => {
+          filesInput?.click();
+        });
+        filesInput?.addEventListener('change', (e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            this.handleSelectedModelFiles(Array.from(e.target.files));
+          }
+        });
+
+        // 自动贴地站立开关
+        document.getElementById('chk_auto_ground')?.addEventListener('change', (e) => {
+          this.visualizer.options.autoGround = e.target.checked;
+          if (this.lastPayload) {
+            this.moveItConnector.applyDataPayload(this.lastPayload);
+          }
+        });
+
+        // 支点对齐地面足底接触面
+        document.getElementById('btn_align_pivot_ground')?.addEventListener('click', () => {
+          this.params.pivot = { x: 0.0, y: 0.0, z: 0.0 };
+          this.syncInputs();
+          this.recalculateAndUpdate();
+        });
+      }
+
+      handleSelectedModelFiles(files) {
+        if (!files || files.length === 0) return;
+        // 注册所有 3D Mesh 与本地文件
+        this.visualizer.meshManager.registerFiles(files);
+
+        // 查找 URDF 或 XML 模型文件
+        const urdfFile = files.find(f => f.name.toLowerCase().endsWith('.urdf') || f.name.toLowerCase().endsWith('.xml'));
+        if (!urdfFile) {
+          alert(`已登记 ${files.length} 个模型资源文件，但未在所选文件列表中找到 .urdf 文件。请确保包含机器人的 URDF 描述文件。`);
+          return;
+        }
+
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          const xml = evt.target.result;
+          const payload = ClientURDFParser.parseURDF(xml);
+          if (payload) {
+            this.lastPayload = payload;
+            this.moveItConnector.applyDataPayload(payload);
+            const meshCount = this.visualizer.meshManager.count();
+            const groundNote = (this.visualizer.options.autoGround && payload.ground_offset > 0.05) ? ' (已自动对齐底面贴地站立)' : '';
+            this.handleMoveItStatus('connected', `已成功加载模型: ${payload.robot_name} (${payload.links_count} 连杆, ${meshCount} 个 Mesh 组件)${groundNote}`);
+          } else {
+            alert('URDF 模型文件解析失败，请检查 XML 格式。');
+          }
+        };
+        reader.readAsText(urdfFile);
+      }
+
+      bindDualControl(id, numId, rangeId, updater) {
+        const num = document.getElementById(numId);
+        const range = document.getElementById(rangeId);
+        if (num && range) {
+          num.addEventListener('input', (e) => {
+            const v = parseFloat(e.target.value);
+            if (!isNaN(v)) { range.value = v; updater(v); this.recalculateAndUpdate(); }
+          });
+          range.addEventListener('input', (e) => {
+            const v = parseFloat(e.target.value);
+            num.value = v.toFixed(2); updater(v); this.recalculateAndUpdate();
+          });
+        }
+      }
+
+      populateTestCasesUI() {
+        const sel = document.getElementById('select_preset_cases');
+        if (!sel) return;
+        sel.innerHTML = '';
+        this.testCases.forEach(tc => {
+          const opt = document.createElement('option');
+          opt.value = tc.id; opt.textContent = tc.name;
+          sel.appendChild(opt);
+        });
+        sel.addEventListener('change', (e) => {
+          const tc = this.testCases.find(item => item.id === e.target.value);
+          if (tc) {
+            if (tc.params.mass !== undefined) this.params.mass = tc.params.mass;
+            if (tc.params.pivot) this.params.pivot = { ...tc.params.pivot };
+            if (tc.params.com) this.params.com = { ...tc.params.com };
+            document.getElementById('case_description').textContent = tc.desc;
+            this.syncInputs();
+            this.recalculateAndUpdate();
+          }
+        });
+        if (this.testCases[0]) document.getElementById('case_description').textContent = this.testCases[0].desc;
+      }
+
+      syncInputs() {
+        this.setVal('mass', this.params.mass);
+        this.setVal('pivot_x', this.params.pivot.x);
+        this.setVal('pivot_y', this.params.pivot.y);
+        this.setVal('pivot_z', this.params.pivot.z);
+        this.setVal('com_x', this.params.com.x);
+        this.setVal('com_y', this.params.com.y);
+        this.setVal('com_z', this.params.com.z);
+      }
+
+      setVal(k, v) {
+        const num = document.getElementById(`input_${k}`);
+        const range = document.getElementById(`range_${k}`);
+        if (num) num.value = Number(v).toFixed(2);
+        if (range) range.value = Number(v);
+      }
+
+      resetParams() {
+        this.params = JSON.parse(JSON.stringify(this.defaultParams));
+        document.getElementById('select_preset_cases').value = 'case_default';
+        document.getElementById('case_description').textContent = this.testCases[0].desc;
+
+        // 恢复模型透明度、浮标透明度与指示球直径默认参数
+        const meshSlider = document.getElementById('range_mesh_opacity');
+        const meshVal = document.getElementById('mesh_opacity_val');
+        if (meshSlider && meshVal) {
+          meshSlider.value = '75';
+          meshVal.textContent = '75%';
+          this.visualizer.setMeshOpacity(0.75);
+        }
+        const badgeSlider = document.getElementById('range_badge_opacity');
+        const badgeVal = document.getElementById('badge_opacity_val');
+        if (badgeSlider && badgeVal) {
+          badgeSlider.value = '25';
+          badgeVal.textContent = '25%';
+          document.documentElement.style.setProperty('--badge-bg-alpha', '0.25');
+        }
+        const sphereSlider = document.getElementById('range_sphere_size');
+        const sphereVal = document.getElementById('sphere_size_val');
+        if (sphereSlider && sphereVal) {
+          sphereSlider.value = '24';
+          sphereVal.textContent = '24mm';
+          this.visualizer.setSphereRadius(0.012);
+        }
+
+        this.syncInputs();
+        this.recalculateAndUpdate();
+      }
+
+      recalculateAndUpdate() {
+        const data = GravityTorquePhysics.calculate(this.params.pivot, this.params.com, this.params.mass, this.params.g);
+        this.visualizer.update(data);
+        this.updateDashboard(data);
+      }
+
+      updateFromExternalSource({ mass, pivot, com }) {
+        if (mass !== null && mass !== undefined) this.params.mass = mass;
+        if (pivot) this.params.pivot = { ...this.params.pivot, ...pivot };
+        if (com) this.params.com = { ...this.params.com, ...com };
+        this.syncInputs();
+        this.recalculateAndUpdate();
+      }
+
+      updateDashboard(data) {
+        const { r, r_len, Fg_mag, d, tau, tau_mag, phi_deg, theta_deg, analysis } = data;
+        const fmt = (n, dec = 2) => n !== null && !isNaN(n) ? Number(n).toFixed(dec) : '--';
+
+        this.setText('val_r_vec', `(${fmt(r.x)}, ${fmt(r.y)}, ${fmt(r.z)}) m`);
+        this.setText('val_r_len', `${fmt(r_len, 3)} m`);
+        this.setText('val_d', `${fmt(d, 3)} m`);
+        this.setText('val_delta_z', `${fmt(r.z)} m`);
+        this.setText('val_fg', `${fmt(Fg_mag)} N`);
+
+        this.setText('val_tau_x', `${fmt(tau.x)} N·m`);
+        this.setText('val_tau_y', `${fmt(tau.y)} N·m`);
+        this.setText('val_tau_z', `0.00 N·m`);
+        this.setText('val_tau_mag', `${fmt(tau_mag)} N·m`);
+
+        this.setText('val_phi', phi_deg !== null ? `${fmt(phi_deg, 1)}°` : '未定义 (d=0)');
+        this.setText('val_theta', theta_deg !== null ? `${fmt(theta_deg, 1)}°` : '未定义 (|r|=0)');
+
+        const armComp = document.getElementById('val_arm_vs_r');
+        if (armComp) {
+          if (Math.abs(r.z) < 1e-4) {
+            armComp.innerHTML = `<span class="badge-success">d = |r| (${fmt(d)}m)</span> (等高水平面)`;
+          } else {
+            const ratio = r_len > 1e-4 ? (d / r_len) * 100 : 0;
+            armComp.innerHTML = `<span class="badge-accent">d (${fmt(d)}m) &lt; |r| (${fmt(r_len)}m)</span> (比值 sinθ = ${ratio.toFixed(1)}%)`;
+          }
+        }
+        this.setText('val_physics_summary', analysis.stateDescription);
+
+        // 同步更新动力学 Tab 2 (各关节谱) 与 Tab 3 (整机稳定与功耗)
+        this.renderJointSpectrum();
+        this.renderWholeBody(this.lastPayload ? this.lastPayload.dynamics : null, data);
+      }
+
+      switchTab(tabId) {
+        this.activeTab = tabId;
+        ['spatial', 'joints', 'wholebody'].forEach(t => {
+          const btn = document.getElementById(`btn_tab_${t}`);
+          const pane = document.getElementById(`pane_${t}`);
+          if (btn) btn.classList.toggle('active', t === tabId);
+          if (pane) pane.classList.toggle('active', t === tabId);
+        });
+      }
+
+      renderJointSpectrum() {
+        if (!this.lastPayload || !this.lastPayload.joint_loads) return;
+        const loads = this.lastPayload.joint_loads;
+        const dynamics = this.lastPayload.dynamics || {};
+
+        this.setText('badge_joint_count', loads.length);
+        if (dynamics.engine) {
+          this.setText('dyn_engine_badge', dynamics.engine);
+        }
+
+        if (dynamics.peak_joint) {
+          const pj = dynamics.peak_joint;
+          const peakInfoEl = document.getElementById('peak_joint_info');
+          if (peakInfoEl) peakInfoEl.innerHTML = `峰值关节: <strong>${escapeHTML(pj.name)}</strong> (${pj.torque.toFixed(2)} N·m)`;
+          const peakStatusEl = document.getElementById('peak_load_status');
+          if (peakStatusEl) {
+            const statusText = pj.status === 'danger' ? '危险超载' : (pj.status === 'warning' ? '警戒负荷' : '安全裕度');
+            const color = pj.status === 'danger' ? '#f87171' : (pj.status === 'warning' ? '#fbbf24' : '#34d399');
+            peakStatusEl.innerHTML = `<span style="color:${color};">${statusText} (${pj.load_pct.toFixed(1)}%)</span>`;
+          }
+        }
+
+        let filtered = [...loads];
+        if (this.jointSearchQuery) {
+          filtered = filtered.filter(jl => jl.name.toLowerCase().includes(this.jointSearchQuery));
+        }
+
+        if (this.jointSortMode === 'torque_desc') {
+          filtered.sort((a, b) => Math.abs(b.torque) - Math.abs(a.torque));
+        } else if (this.jointSortMode === 'name_asc') {
+          filtered.sort((a, b) => a.name.localeCompare(b.name));
+        } else {
+          // load_desc default
+          filtered.sort((a, b) => b.load_pct - a.load_pct);
+        }
+
+        const listEl = document.getElementById('joint_list_container');
+        if (!listEl) return;
+        listEl.innerHTML = '';
+
+        if (filtered.length === 0) {
+          listEl.innerHTML = `<div style="text-align:center; padding:18px; color:var(--text-muted); font-size:11px;">未找到匹配 "${escapeHTML(this.jointSearchQuery)}" 的关节</div>`;
+          return;
+        }
+
+        filtered.forEach(jl => {
+          const item = document.createElement('div');
+          item.className = 'joint-item-card';
+          const barColor = jl.status === 'danger' ? '#ef4444' : (jl.status === 'warning' ? '#f59e0b' : '#10b981');
+          const barWidth = Math.min(100, Math.max(0, jl.load_pct));
+          const statusText = jl.status === 'danger' ? '超载' : (jl.status === 'warning' ? '警戒' : '安全');
+
+          item.innerHTML = `
+            <div class="joint-header">
+              <span class="joint-name">${escapeHTML(jl.name)}</span>
+              <span class="status-pill ${jl.status}">${statusText} (${jl.load_pct.toFixed(1)}%)</span>
+            </div>
+            <div class="joint-bar-container">
+              <div class="joint-bar-fill" style="width: ${barWidth}%; background: ${barColor};"></div>
+            </div>
+            <div class="joint-metrics">
+              <span>静力矩 τ: <strong>${jl.torque.toFixed(2)} N·m</strong></span>
+              <span>额定极限: <strong>${jl.limit ? jl.limit.toFixed(1) + ' N·m' : '未标定'}</strong></span>
+            </div>
+          `;
+          listEl.appendChild(item);
+        });
+      }
+
+      renderWholeBody(dynamics, data) {
+        const fmt = (n, dec = 2) => n !== null && !isNaN(n) ? Number(n).toFixed(dec) : '--';
+        const m = data ? data.mass : (dynamics ? dynamics.total_mass : 0);
+        const g = data ? data.g : 9.81;
+        const d = data ? data.d : (dynamics ? dynamics.stability_margin : 0);
+
+        const fz = dynamics?.base_wrench?.fz ?? (m * g);
+        const mag = dynamics?.base_wrench?.mag ?? (m * g * d);
+        const mx = dynamics?.base_wrench?.mx ?? (data ? -data.tau.x : 0);
+        const my = dynamics?.base_wrench?.my ?? (data ? data.tau.y : 0);
+
+        this.setText('val_base_fz', `${fmt(fz, 1)} N`);
+        this.setText('val_total_mass_dyn', `${fmt(m, 1)} kg`);
+        this.setText('val_base_m_mag', `${fmt(mag, 2)} N·m`);
+        this.setText('val_base_m_comp', `Mx: ${fmt(mx, 1)}, My: ${fmt(my, 1)} N·m`);
+
+        if (dynamics && dynamics.sum_tau_sq !== undefined) {
+          this.setText('val_sum_tau_sq', `${fmt(dynamics.sum_tau_sq, 2)} N²·m²`);
+          this.setText('val_tau_rms', `${fmt(dynamics.tau_rms, 2)} N·m`);
+          const count = this.lastPayload?.joint_loads?.length || '--';
+          this.setText('val_monitored_joints', `${count} 个`);
+        } else {
+          this.setText('val_sum_tau_sq', `-- N²·m²`);
+          this.setText('val_tau_rms', `-- N·m`);
+          this.setText('val_monitored_joints', `-- 个`);
+        }
+
+        const margin = dynamics?.stability_margin ?? d;
+        this.setText('val_dyn_margin', `${fmt(margin, 3)} m`);
+
+        const badgeEl = document.getElementById('badge_stability_level');
+        const descEl = document.getElementById('desc_stability_margin');
+        if (badgeEl && descEl) {
+          if (margin < 0.05) {
+            badgeEl.className = 'status-pill safe';
+            badgeEl.textContent = '极稳 (居中)';
+            descEl.textContent = '重心地面投影紧密位于支点支撑接触面中心区，抗扰动倾覆裕度极佳。';
+          } else if (margin < 0.15) {
+            badgeEl.className = 'status-pill warning';
+            badgeEl.textContent = '倾角偏置';
+            descEl.textContent = '重心偏离支撑中心，产生持续倾覆静力矩，需注意支撑面边界裕度。';
+          } else {
+            badgeEl.className = 'status-pill danger';
+            badgeEl.textContent = '倾覆风险';
+            descEl.textContent = '重心偏离支撑中心较大，整机倾覆合力矩显著升高，存在失稳翻倒风险！';
+          }
+        }
+
+        const linkComsCount = this.lastPayload?.link_coms?.length ?? 0;
+        const linkComBadge = document.getElementById('badge_link_com_count');
+        const linkComDesc = document.getElementById('desc_link_com_info');
+        if (linkComBadge) linkComBadge.textContent = linkComsCount > 0 ? `${linkComsCount} 节已解算` : '-- 节';
+        if (linkComDesc && linkComsCount > 0) {
+          linkComDesc.textContent = `已解算并标定全部 ${linkComsCount} 根有效连杆的质心空间位姿（直接基于 URDF <inertial> 质量与偏置，以冰蓝色发光球呈现）。`;
+        }
+      }
+
+      setText(id, text) {
+        const el = document.getElementById(id);
+        if (el) el.textContent = text;
+      }
+
+      handleMoveItStatus(state, msg) {
+        const badge = document.getElementById('moveit_status_badge');
+        const text = document.getElementById('moveit_status_text');
+        const btnC = document.getElementById('btn_moveit_connect');
+        const btnD = document.getElementById('btn_moveit_disconnect');
+
+        if (text) text.textContent = msg;
+        if (badge) {
+          badge.className = 'status-dot';
+          if (state === 'connected') {
+            badge.classList.add('status-connected');
+            if (btnC) btnC.style.display = 'none';
+            if (btnD) btnD.style.display = 'inline-block';
+          } else if (state === 'connecting') {
+            badge.classList.add('status-connecting');
+          } else if (state === 'simulating') {
+            badge.classList.add('status-active');
+          } else {
+            badge.classList.add('status-disconnected');
+            if (btnC) btnC.style.display = 'inline-block';
+            if (btnD) btnD.style.display = 'none';
+          }
+        }
+      }
+
+      setActiveViewButton(activeView) {
+        ['isometric', 'top', 'front', 'side'].forEach(v => {
+          const btn = document.getElementById(`btn_view_${v}`);
+          if (btn) btn.classList.toggle('active', v === activeView);
+        });
+      }
+    }
+
+    // ----------------------------------------------------
+    // 5. 应用启动入口
+    // ----------------------------------------------------
+    document.addEventListener('DOMContentLoaded', () => {
+      try {
+        if (typeof THREE === 'undefined') throw new Error('Three.js 核心库未能加载');
+        const visualizer = new GravityTorqueVisualizer('webgl_container');
+        window.appUI = new GravityTorqueUI(visualizer);
+        console.log('机器人整机重力矩 3D 可视化系统启动成功');
+      } catch (err) {
+        console.error('启动失败:', err);
+      }
+    });
+  </script>
+</body>
+</html>
