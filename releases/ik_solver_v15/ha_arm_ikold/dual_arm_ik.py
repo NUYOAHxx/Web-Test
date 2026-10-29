@@ -19,8 +19,8 @@ ik_candidate.py / robot_model.py。位姿容差、限位裕度、跳变上限、
     2. 可达性预检（证明，不搜索）：目标位置对所有腰角都超出臂展 -> X_UNREACHABLE；两目标间距超过
        “两手臂根关节间距 + 两臂臂展”或没有同一个腰角让两手都在臂展内 -> NOT_JOINTLY_REACHABLE。
        状态都是 OUTSIDE_WORKSPACE，耗时 < 1 ms。
-    3. 续算（路点跟踪，单臂 v9 续算框 + v15 防漂移规则）：每只手的目标都在 FK(q_prev) 附近（位置差 <= 0.1 × 臂展
-       且姿态差 <= 0.1 rad）时，先从 q_prev 在 q_prev ± continuation_max_step（0.15 rad）内求解、不做达标后的姿态整理，
+    3. 续算（路点跟踪，单臂 v9 规则）：每只手的目标都在 FK(q_prev) 附近（位置差 <= 0.1 × 臂展且姿态差
+       <= 0.1 rad）时，先从 q_prev 在 q_prev ± continuation_max_step（0.15 rad）内求解、不做达标后的姿态整理，
        有解即采用（含 NEAR_LIMIT）。关节步长随手的移动量走，q_prev 已是解时原样返回（伺服循环里不漂）。
     4. 联合搜索（最多用预算的 70%）：种子依次为 q_prev -> q_ready -> 组合种子库 -> 随机扰动，
        第一个满足全部判据的解即返回。迭代限位 = 物理限位内缩 SAFE_MARGIN，
@@ -286,10 +286,6 @@ def _smoothstep(t):
     return t * t * (3.0 - 2.0 * t)
 
 
-_RIGID_BOTTOM_ROW = np.array([0.0, 0.0, 0.0, 1.0])
-_EYE3 = np.eye(3)
-
-
 def validate_transform(T, name="T_target"):
     """4×4 刚体变换（或 pin.SE3）校验，返回 pin.SE3。规则与单臂 validate_transform4x4 相同。"""
     if isinstance(T, pin.SE3):
@@ -297,15 +293,14 @@ def validate_transform(T, name="T_target"):
     T = np.asarray(T, dtype=float)
     if T.shape != (4, 4):
         raise ValueError(f"{name} must be a 4x4 matrix, got shape {T.shape}")
-    if not np.isfinite(T).all():
+    if not np.all(np.isfinite(T)):
         raise ValueError(f"{name} contains non-finite values")
     rot = T[:3, :3]
-    # 判定与 np.allclose / np.isclose(rtol=0) 逐位等价（参考值有限时 isclose(x, y) ⇔ |x - y| <= atol）
-    if not (np.abs(T[3] - _RIGID_BOTTOM_ROW) <= RIGID_BOTTOM_ROW_TOL).all():
+    if not np.allclose(T[3], [0.0, 0.0, 0.0, 1.0], atol=RIGID_BOTTOM_ROW_TOL, rtol=0.0):
         raise ValueError(f"{name} bottom row must be [0, 0, 0, 1]")
     if not (
-        (np.abs(rot.T @ rot - _EYE3) <= RIGID_ROTATION_TOL).all()
-        and abs(np.linalg.det(rot) - 1.0) <= RIGID_ROTATION_TOL
+        np.allclose(rot.T @ rot, np.eye(3), atol=RIGID_ROTATION_TOL, rtol=0.0)
+        and np.isclose(np.linalg.det(rot), 1.0, atol=RIGID_ROTATION_TOL, rtol=0.0)
     ):
         raise ValueError(f"{name} rotation block is not a proper rotation matrix")
     return pin.SE3(rot.copy(), T[:3, 3].copy())
@@ -500,8 +495,7 @@ class _ArmLibrary:
             v = QT[j]
             if periodic[j]:
                 v = center[j] + (v - center[j] + np.pi) % _TWO_PI - np.pi
-            np.logical_and(ok, v >= lo[j] - 1e-12, out=ok)
-            np.logical_and(ok, v <= hi[j] + 1e-12, out=ok)
+            ok &= (v >= lo[j] - 1e-12) & (v <= hi[j] + 1e-12)
         return ok
 
     def best(self, T, Rg, og, mask=None, out=None):
@@ -509,7 +503,7 @@ class _ArmLibrary:
 
         mask（跳变框内的样本）：每格在“各块最近样本”里取框内最近的一个（块是 256 个随机样本，块内最近的
         在框外时放弃这一块；近似但几乎不增加开销）；没有框内候选的格点距离为 inf。
-        out = 调用方的距离缓冲（免去每次分配约 8.6 MB）。"""
+        out = 调用方的距离缓冲（免去每次分配 8 MB）。"""
         ng = len(og)
         cols = np.arange(ng)
         pt = np.einsum("gji,gj->gi", Rg, T.translation[None, :] - og)
@@ -650,7 +644,7 @@ def _library_for(mdl, layout, q_ready, size, waist_grid, lo_s, hi_s):
 # 8. 一次求解的任务与上下文
 # =============================================================================
 class _Hand:
-    """一只手的任务：目标位姿 + 姿态模式；row 为它在任务向量（6 × 受控手数，最多 12 行）里的起始行。"""
+    """一只手的任务：目标位姿 + 姿态模式；row 为它在 12 行任务里的起始行。"""
 
     __slots__ = ("side", "kind", "fid", "mode", "T", "p", "axis", "dt", "half", "ch", "sh", "perp",
                  "row", "sjid", "reach", "ref_release")
@@ -882,7 +876,7 @@ class DualArmIKSolver:
                 best.update(err2=err2, q=q.copy())
             return q, ok, why
 
-        # 3. 续算（路点跟踪，单臂 v9 续算框 + v15 防漂移规则）：目标就在 FK(q_prev) 附近时，先从 q_prev 在续算框
+        # 3. 续算（路点跟踪，单臂 v9 规则）：目标就在 FK(q_prev) 附近时，先从 q_prev 在续算框
         #    q_prev ± continuation_max_step 内求解——零空间回中不会一步漂到远处的姿态；有局部解（含 NEAR_LIMIT）
         #    即采用，否则进入联合搜索
         found = None
@@ -1215,7 +1209,7 @@ class DualArmIKSolver:
 
     # ------------------------------------------------------------------ 单种子迭代
     def _evaluate(self, q, hands, jac, e, J, template):
-        """受控手任务误差（缩放后）写入 e、雅可比写入 J；返回 (受控手都达标, |e|², [(位置误差, 姿态误差)])。
+        """两手任务误差（缩放后）写入 e、雅可比写入 J；返回 (两手都达标, |e|², [(位置误差, 姿态误差)])。
 
         e 的方向是“当前 -> 目标”，J 满足 de/dq = -J（迭代步 dq = J⁺e）；tests 用有限差分核对。"""
         mdl = self._m

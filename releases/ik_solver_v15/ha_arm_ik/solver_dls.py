@@ -15,10 +15,12 @@
 单种子迭代 pinocchio_ik_one_seed（每次迭代）：
   1. 主任务 _make_task_terms：位姿残差 e（位置按 characteristic_length 归一）与解析雅可比 J
   2. 逆度量 D（对角）：手臂 = 1；腰部按“肩 -> 目标距离 / 臂展”与腰部偏离 q_ref 平滑释放（无状态，去返程对称）
-  3. 次任务 _SecondaryObjective：H(q) 与 z = -∇H；零空间权重随 |e| 衰减，达标后放大做姿态整理
+  3. 次任务 _SecondaryObjective：H(q) 与 z = -∇H；零空间权重随 |e| 衰减。posture_settle=True（默认）时达标后
+     放大权重做姿态整理；posture_settle=False（v15 续算）时未达标零空间步限幅为 NO_SETTLE_NULL_STEP_RATIO × |e|，
+     第一个同时满足位姿达标、负荷合格、可动关节离限位 >= SAFE_MARGIN 的迭代点即直接返回（POSE_REACHED）
   4. _sns_clamped_core：主动集限位钳制 + 正交信赖域，一步内不越界且 ||dq|| <= max_step（_metric_svd_step 回退）
   5. 回溯线搜索（先合成步、再纯主任务步）、停滞检测、180° 对径死点逃逸、姿态整理与收敛判定
-  返回 (q, diag)：q 为位姿达标点中按“峰值容差带 + 次任务代价”择优者；没有达标点时为主任务误差最小点
+  返回 (q, diag)：q 为位姿达标点中按“峰值容差带 + 次任务代价”择优者（或 POSE_REACHED 首点）；无达标点时为主任务误差最小点
 
 模块内容
   数据结构    JointStateSnapshot（不可变关节快照）、LoadPolicy（负荷门控策略）
@@ -31,7 +33,7 @@
               pinocchio_ik_one_seed
   种子        make_scatter_seeds、build_seed_library / seed_library_target / select_library_seeds
 2πk 分支对齐 / 去重直接用 ik_common 的 select_closest_bounded_branch、bounded_joint_difference、joint_difference。
-测试专用的旧入口（整函数形式的次任务梯度与 SNS 步）在 tests/dls_compat.py。版本演进见 README_v14.md。
+测试专用的旧入口（整函数形式的次任务梯度与 SNS 步）在 tests/dls_compat.py。版本演进见 README_v14.md 与 README_v15.md。
 """
 
 from dataclasses import dataclass, field, replace
@@ -49,19 +51,34 @@ try:
 except Exception:
     pin = None
 
-from ha_arm_ik.ik_common import (
-    SAFE_MARGIN,
-    TOOL_AXIS_X,
-    bounded_joint_difference,
-    clip_to_bounds,
-    joint_difference,
-    normalize_cone_half_angle,
-    select_closest_bounded_branch,
-    skew,
-    unique_seed_list,
-    validate_orientation_mode,
-)
-from ha_arm_ik.robot_model import WAIST_JOINT_NAMES
+try:
+    from ha_arm_ik.ik_base import (
+        SAFE_MARGIN,
+        TOOL_AXIS_X,
+        WAIST_JOINT_NAMES,
+        bounded_joint_difference,
+        clip_to_bounds,
+        joint_difference,
+        normalize_cone_half_angle,
+        select_closest_bounded_branch,
+        skew,
+        unique_seed_list,
+        validate_orientation_mode,
+    )
+except ImportError:
+    from .ik_base import (
+        SAFE_MARGIN,
+        TOOL_AXIS_X,
+        WAIST_JOINT_NAMES,
+        bounded_joint_difference,
+        clip_to_bounds,
+        joint_difference,
+        normalize_cone_half_angle,
+        select_closest_bounded_branch,
+        skew,
+        unique_seed_list,
+        validate_orientation_mode,
+    )
 
 # =============================================================================
 # 1. 基础数值与收敛容差参数
@@ -2681,9 +2698,15 @@ def build_seed_library(
         )
         P[i] = M.translation
         Rm[i] = M.rotation
-    for arr in (Q, P, Rm):
+    q_min = Q.min(axis=0)
+    q_max = Q.max(axis=0)
+    QT = np.ascontiguousarray(Q.T)
+    for arr in (Q, P, Rm, q_min, q_max, QT):
         arr.setflags(write=False)   # 同一模型的多个求解器实例共享同一份库（见 solver._shared_seed_library）
-    return {"q": Q, "p": P, "R": Rm, "base_joint": base, "size": size}
+    return {
+        "q": Q, "p": P, "R": Rm, "base_joint": base, "size": size,
+        "_q_min": q_min, "_q_max": q_max, "_qt": QT,
+    }
 
 
 def seed_library_target(pin_model, pin_data, pin_maps, library, q_active, T_target):
@@ -2723,15 +2746,48 @@ def select_library_seeds(
     if library is None or count <= 0:
         return []
     Q = library["q"]
-    inside = np.all((Q >= lower) & (Q <= upper), axis=1)
-    idx = np.flatnonzero(inside)
-    if idx.size == 0:
-        return []
+    lo_b = np.asarray(lower, dtype=float)
+    hi_b = np.asarray(upper, dtype=float)
+    q_min = library.get("_q_min")
+    q_max = library.get("_q_max")
+    QT = library.get("_qt")
+    idx = None
+    if q_min is not None and q_max is not None and QT is not None:
+        if np.isnan(lo_b).any() or np.isnan(hi_b).any() or (lo_b > hi_b).any():
+            return []
+        if (lo_b > q_max).any() or (hi_b < q_min).any():
+            return []
+        tight = np.flatnonzero((lo_b > q_min) | (hi_b < q_max))
+        if tight.size == 0:
+            n_in = len(Q)
+            P_sub = library["p"]
+            Rm = library["R"]
+        else:
+            j0 = int(tight[0])
+            inside = (QT[j0] >= lo_b[j0]) & (QT[j0] <= hi_b[j0])
+            for j in tight[1:]:
+                jj = int(j)
+                inside &= (QT[jj] >= lo_b[jj]) & (QT[jj] <= hi_b[jj])
+            idx = np.flatnonzero(inside)
+            n_in = idx.size
+            if n_in == 0:
+                return []
+            P_sub = library["p"] if n_in == len(Q) else library["p"][idx]
+            Rm = library["R"] if n_in == len(Q) else library["R"][idx]
+            if n_in == len(Q):
+                idx = None
+    else:
+        inside = np.all((Q >= lo_b) & (Q <= hi_b), axis=1)
+        idx = np.flatnonzero(inside)
+        n_in = idx.size
+        if n_in == 0:
+            return []
+        P_sub = library["p"][idx]
+        Rm = library["R"][idx]
     T = np.asarray(T_target_base, dtype=float)
-    dist = np.linalg.norm(library["p"][idx] - T[:3, 3], axis=1) / float(
+    dist = np.linalg.norm(P_sub - T[:3, 3], axis=1) / float(
         characteristic_length
     )
-    Rm = library["R"][idx]
     if orientation_mode == "full":
         cosine = 0.5 * (np.einsum("nij,ij->n", Rm, T[:3, :3]) - 1.0)
         angle = np.arccos(np.clip(cosine, -1.0, 1.0))
@@ -2742,13 +2798,13 @@ def select_library_seeds(
         if orientation_mode == "tool_cone":
             angle = np.maximum(0.0, angle - float(cone))
     score = np.hypot(dist, angle)
-    k = min(int(pool), idx.size)
-    near = np.argpartition(score, k - 1)[:k] if k < idx.size else np.arange(idx.size)
+    k = min(int(pool), n_in)
+    near = np.argpartition(score, k - 1)[:k] if k < n_in else np.arange(n_in)
     near = near[np.argsort(score[near], kind="stable")]
     chosen = []
     taken = [np.asarray(e, dtype=float) for e in exclude]
     for j in near:
-        q = Q[idx[j]]
+        q = Q[j] if idx is None else Q[idx[j]]
         if all(float(np.max(np.abs(q - e))) >= min_separation for e in taken):
             chosen.append(q.copy())
             taken.append(q)

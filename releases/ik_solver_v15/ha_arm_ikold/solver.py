@@ -581,7 +581,6 @@ class DirectPsiProblem:
         self.w_seed = w_seed
         self.w_bias = w_bias
         self.w_center = w_center
-        # w_limit / limit_margin 保留以兼容旧版构造签名；关节限位在 solve_direct_psi 中由 least_squares bounds 约束
         self.w_limit = w_limit
         self.limit_margin = limit_margin
 
@@ -1231,10 +1230,8 @@ def collect_pinocchio_candidates_and_seeds(
 
     阶段（依次判定；候选池跨阶段累积，各阶段最多 max_seeds 个名额，共享时间预算）：
       continuation  续算且 continuation_local=True：随动续算（种子 q_prev，范围 = 有效限位 ∩ q_prev ±
-                    continuation_max_step ∩ 跳变框，DLS 单步 <= CONTINUATION_DLS_STEP_FRACTION × 该值；
-                    v15 默认 CONTINUATION_POSTURE_SETTLE=False 不做达标后的姿态整理，随动续算解等于 q_prev 且
-                    可接受时直接记 continuation_hold 返回、不再跑锁腰续算）+ 锁腰续算（未触发 hold 且 q_prev 的
-                    腰部偏离 q_ready <= 该值时才跑；锁腰解负荷超 soft_ratio 时释放腰部、重跑随动续算）。
+                    continuation_max_step ∩ 跳变框，DLS 单步 <= CONTINUATION_DLS_STEP_FRACTION × 该值）+ 锁腰续算
+                    （q_prev 的腰部偏离 q_ready <= 该值时才跑；锁腰解负荷超 soft_ratio 时释放腰部、重跑随动续算）。
                     有局部可接受候选（单关节步长 <= continuation_max_step）时候选池只保留它们、不再跑后面的阶段
                     （stop = CONTINUATION_LOCAL），否则候选留在池中继续常规搜索
       comfort       重新定位、舒适窗确实收窄限位且含 q_ready：有效限位 ∩ 舒适窗（∩ 跳变框）
@@ -1311,7 +1308,7 @@ def collect_pinocchio_candidates_and_seeds(
         active_names=pin_maps["active_names"],
     )
 
-    # v8：舒适窗与有效限位求交；不收窄任何关节、或不含 q_ready 时常规搜索退化为单一 full 阶段
+    # v8：舒适窗与有效限位求交；不收窄任何关节、或不含 q_ready 时退化为单阶段
     comfort = None
     regime = None
     comfort_enabled = bool(include_waist and comfort_bounds is not None)
@@ -1362,7 +1359,7 @@ def collect_pinocchio_candidates_and_seeds(
             and np.all(q_ready <= c_hi)
         ):
             comfort = (c_lo, c_hi)
-    # full 回退阶段使用与 v7 完全相同的随机扰动：在 comfort 阶段消耗随机数之前复制生成器状态
+    # 阶段 2 使用与 v7 完全相同的随机扰动：在阶段 1 消耗随机数之前复制生成器状态
     rng_full = copy.deepcopy(rng) if comfort is not None else None
 
     near = (
@@ -1382,7 +1379,7 @@ def collect_pinocchio_candidates_and_seeds(
     released = False
     multi_turn = active_multi_turn_mask(pin_maps)
     early_stop_ratio = context["policy"].early_stop_ratio if strict else None
-    edge_pool = []                  # comfort 阶段未达标种子的 (主任务 merit, seed_idx, q)
+    edge_pool = []                  # 阶段 1 未达标种子的 (主任务 merit, seed_idx, q)
 
     # v13：种子库种子（延迟计算：只有排到时才把目标换到库基座坐标系并选样本）
     lib_k = 0 if seed_library is None else int(search.get("library_seeds", SEED_LIBRARY_SEEDS) or 0)
@@ -1551,7 +1548,6 @@ def collect_pinocchio_candidates_and_seeds(
                     waist_load_release=released,
                     **stage_params,
                 )
-                q_seed_out = q
                 # 在本阶段搜索限位内对齐至最接近当前关节角 q_prev 的合法 2πk 分支
                 q = select_closest_bounded_branch(
                     q, q_prev, lo_s, hi_s, multi_turn_mask=multi_turn
@@ -1597,13 +1593,6 @@ def collect_pinocchio_candidates_and_seeds(
                         load_peak_ratio=physical["peak_ratio"],
                         load_peak_joint=physical["peak_joint"],
                     )
-                    q_bytes = q.tobytes()
-                    context.setdefault("_physics_cache", {})[q_bytes] = physical
-                    if np.array_equal(q, q_seed_out):
-                        context.setdefault("_task_cache", {})[(q_bytes, id(T_target_pin))] = (
-                            float(diag["final_pos_err"]),
-                            float(diag["final_ori_violation"]),
-                        )
                     if (
                         fixed is not None
                         and physical["peak_ratio"] > context["policy"].soft_ratio
@@ -1861,7 +1850,7 @@ def collect_pinocchio_candidates_and_seeds(
         else:
             released = released_before  # 回到常规搜索：腰部释放状态从头判定（与 v8 相同）
 
-    # ---- 常规搜索阶段 1（comfort 舒适窗；未启用舒适窗时直接跑 full 阶段）-----------
+    # ---- 阶段 1：舒适窗（未启用舒适窗时即 v7 的唯一阶段）--------------------------
     lo1, hi1 = comfort if comfort is not None else (eff_lower, eff_upper)
     lo1, hi1 = boxed(lo1, hi1, box_half)
     # 续算局部解已采用时也生成队列：随机数消耗与之前的版本一致
@@ -1884,7 +1873,7 @@ def collect_pinocchio_candidates_and_seeds(
         and not local_used
     )
 
-    # ---- 常规搜索阶段 2（full / jump_box：舒适窗内无可接受解时放开到有效限位）------
+    # ---- 阶段 2：舒适窗内无可接受解 -> 放开到有效限位 -----------------------------
     comfort_ok = comfort is not None and any(acceptable(c) for c in candidates)
     fallback = comfort is not None and not comfort_ok and not local_used
     # v13：舒适阶段已出现“只因跳变超限被拒”的解 -> 放开阶段直接在跳变框内搜索（阶段名 "jump_box"）。
@@ -2048,23 +2037,13 @@ def add_torque_metrics_to_candidate(
     if candidate is None or "q" not in candidate:
         return
 
-    guard_efforts = candidate.get("load_guard_efforts")
-    q_arr = np.asarray(candidate["q"], dtype=float)
-    if (
-        isinstance(guard_efforts, dict)
-        and candidate.get("_load_checked_q_bytes") == q_arr.tobytes()
-        and all(n in guard_efforts for n in active_joint_names)
-    ):
-        # strict 模式下 _check_load_candidate 已在同一 q_template 下算过全身重力矩，直接复用（结果逐位相同）
-        tau = np.array([float(guard_efforts[n]) for n in active_joint_names], dtype=float)
-    else:
-        tau = gravity_torque_for_active_q(
-            pin_model=pin_model,
-            pin_data=pin_data,
-            pin_maps=pin_maps,
-            active_joint_names=active_joint_names,
-            q_active=q_arr,
-        )
+    tau = gravity_torque_for_active_q(
+        pin_model=pin_model,
+        pin_data=pin_data,
+        pin_maps=pin_maps,
+        active_joint_names=active_joint_names,
+        q_active=candidate["q"],
+    )
 
     if not np.all(np.isfinite(joint_efforts_active)) or np.any(
         joint_efforts_active <= 0.0
@@ -3497,11 +3476,7 @@ class HAArmIKSolver:
             best["q"].copy(),
             status,
             make_result(
-                {
-                    k: v
-                    for k, v in best.items()
-                    if not k.startswith("load_") and k != "_load_checked_q_bytes"
-                },
+                {k: v for k, v in best.items() if not k.startswith("load_")},
                 status,
                 per_seed=per_seed or None,
             ),
@@ -3739,49 +3714,33 @@ class HAArmIKSolver:
         bounds_ok = bool(
             np.all(q >= self.search_lower) and np.all(q <= self.search_upper)
         )
-        q_bytes = q.tobytes()
-        filtering = bool(self._load_context is not None and self._load_context.get("_filtering"))
-        task_cached = (
-            self._load_context.get("_task_cache", {}).get((q_bytes, id(T_target_world)))
-            if filtering
-            else None
+        task = dls_task_terms(
+            self.pin_model,
+            self.pin_data,
+            self.pin_maps,
+            self.pin_ee_frame_id,
+            q,
+            T_target_world,
+            orientation_mode,
+            tool_axis,
+            cone,
+            float(self.dls_characteristic_length),
+            False,
         )
-        if task_cached is not None:
-            pos_err, ori_violation = task_cached
-        else:
-            task = dls_task_terms(
-                self.pin_model,
-                self.pin_data,
-                self.pin_maps,
-                self.pin_ee_frame_id,
-                q,
-                T_target_world,
-                orientation_mode,
-                tool_axis,
-                cone,
-                float(self.dls_characteristic_length),
-                False,
-            )
-            pos_err = task["pos_err"]
-            ori_violation = task["ori_violation"]
         pose_ok = bool(
             candidate.get("pose_ok", False)
-            and pos_err <= POS_TOL
-            and ori_violation <= ORI_TOL
+            and task["pos_err"] <= POS_TOL
+            and task["ori_violation"] <= ORI_TOL
         )
-        cache = self._load_context.get("_physics_cache") if filtering else None
-        physical = None if cache is None else cache.get(q_bytes)
-        if physical is None:
-            physical = load_physics(
-                self.pin_model,
-                self.pin_data,
-                self.pin_maps,
-                q,
-                self._load_context,
-                False,
-            )
+        physical = load_physics(
+            self.pin_model,
+            self.pin_data,
+            self.pin_maps,
+            q,
+            self._load_context,
+            False,
+        )
         candidate.update(
-            _load_checked_q_bytes=q_bytes,
             load_ok=physical["load_ok"],
             load_bounds_ok=bounds_ok,
             load_pose_ok=pose_ok,
@@ -3794,8 +3753,8 @@ class HAArmIKSolver:
                 zip(self._load_context["guard_names"], physical["tau"])
             ),
             load_overloaded_joints=physical["overloaded_joints"],
-            load_final_pos_err=pos_err,
-            load_final_ori_violation=ori_violation,
+            load_final_pos_err=task["pos_err"],
+            load_final_ori_violation=task["ori_violation"],
         )
         return bool(bounds_ok and pose_ok and physical["load_ok"])
 
@@ -3814,37 +3773,31 @@ class HAArmIKSolver:
         rejected = []
         pose_count = 0
         errors = 0
-        if self._load_context is not None:
-            self._load_context["_filtering"] = True
-        try:
-            for index, c in enumerate(candidates):
-                try:
-                    safe = self._check_load_candidate(
-                        c, T_target_world, orientation_mode, tool_axis, cone
-                    )
-                    pose_count += int(c["load_pose_ok"] and c["load_bounds_ok"])
-                    if c["load_bounds_ok"] and c["load_ok"]:
-                        load_safe_pool.append(c)
-                    if safe:
-                        eligible.append(c)
-                    else:
-                        rejected.append(
-                            {
-                                "index": index,
-                                "pose_ok": c["load_pose_ok"],
-                                "bounds_ok": c["load_bounds_ok"],
-                                "peak_ratio": c["load_peak_ratio"],
-                                "overloaded_joints": c["load_overloaded_joints"],
-                            }
-                        )
-                except Exception as exc:
-                    errors += 1
+        for index, c in enumerate(candidates):
+            try:
+                safe = self._check_load_candidate(
+                    c, T_target_world, orientation_mode, tool_axis, cone
+                )
+                pose_count += int(c["load_pose_ok"] and c["load_bounds_ok"])
+                if c["load_bounds_ok"] and c["load_ok"]:
+                    load_safe_pool.append(c)
+                if safe:
+                    eligible.append(c)
+                else:
                     rejected.append(
-                        {"index": index, "error": f"{type(exc).__name__}: {exc}"}
+                        {
+                            "index": index,
+                            "pose_ok": c["load_pose_ok"],
+                            "bounds_ok": c["load_bounds_ok"],
+                            "peak_ratio": c["load_peak_ratio"],
+                            "overloaded_joints": c["load_overloaded_joints"],
+                        }
                     )
-        finally:
-            if self._load_context is not None:
-                self._load_context["_filtering"] = False
+            except Exception as exc:
+                errors += 1
+                rejected.append(
+                    {"index": index, "error": f"{type(exc).__name__}: {exc}"}
+                )
 
         self.last_load_diagnostics.update(
             candidate_count=len(candidates),
