@@ -39,65 +39,65 @@ try:
 except Exception:
     pin = None
 
-from ha_arm_ik.ik_candidate import (
-    PHI_TIE_TOL,
-    W_LIMIT,
-    W_NOM,
-    W_SMOOTH,
-    W_TORQUE,
-    W_WAIST_RETURN,
-    FailureReason,
-    IKResult,
-    Status,
-    candidate_sort_key,
-    candidate_status,
-    failure_reason_for_status,
-    finalize_ik_result,
-    has_valid_torque,
-    is_valid_status,
-    make_result,
-    phi_sort_value,
-    score_candidate,
-    select_best_candidate,
-    status_from_str,
-    update_candidate_final_cost_with_torque,
-)
-from ha_arm_ik.ik_common import (
+from ha_arm_ik.ik_base import (
+    ARM_CONFIGS,
+    E_JOINT,
     ORIENTATION_MODES,
     ORI_TOL,
+    PHI_TIE_TOL,
     POS_TOL,
+    REF_DIR,
+    S_JOINT,
     SAFE_MARGIN,
     TOOL_AXIS_X,
     TOOL_CONE_HALF_ANGLE,
     T_origin,
     T_prismatic,
     T_revolute,
+    W_JOINT,
+    W_LIMIT,
+    W_NOM,
+    W_SMOOTH,
+    W_TORQUE,
+    W_WAIST_RETURN,
+    WAIST_JOINT_NAMES,
+    FailureReason,
+    IKResult,
+    SerialChain,
+    Status,
+    candidate_sort_key,
     clip_to_bounds,
     closest_direction_on_cone,
+    estimate_chain_max_reach_from_joint,
+    failure_reason_for_status,
+    get_fixed_joint_origin,
+    get_urdf_root_link,
+    has_valid_torque,
     invert_T,
+    is_valid_status,
     joint_center_from_bounds,
     joint_dist,
-    joint_limit_barrier,
-    joint_limit_barrier_jac,
     joint_limit_penalty,
     joint_margin,
-    joint_margin_from_bounds,
+    joint_origin_position_at_zero,
     joint_range_scale,
+    make_result,
     make_T,
-    make_T_from_xyz_rpy,
     make_translation_T,
     normalize,
     normalize_cone_half_angle,
     pose_error,
-    pose_errors,
     project_to_plane,
     rot_axis,
     rotx,
     roty,
     rotz,
     rpy_to_R,
+    score_candidate,
+    select_best_candidate,
     sew_angle_from_points,
     skew,
+    status_from_str,
     target_frames,
     tool_cone_angle_error,
     tool_cone_residual,
@@ -106,24 +106,11 @@ from ha_arm_ik.ik_common import (
     tool_direction_residual,
     transform_point,
     unique_seed_list,
+    update_candidate_final_cost_with_torque,
     validate_orientation_mode,
     validate_q_vector,
     validate_transform4x4,
     wrap_to_pi,
-)
-from ha_arm_ik.robot_model import (
-    ARM_CONFIGS,
-    E_JOINT,
-    REF_DIR,
-    S_JOINT,
-    W_JOINT,
-    WAIST_JOINT_NAMES,
-    SerialChain,
-    estimate_chain_max_reach_from_joint,
-    get_fixed_joint_origin,
-    get_urdf_root_link,
-    joint_origin_position_at_zero,
-    parse_vec,
 )
 from ha_arm_ik.solver_dls import (
     COM_XY_GAIN,
@@ -368,14 +355,14 @@ def evaluate_direct_psi_solution(
 
     psi_q = chain.psi(
         q,
-        S_joint=S_joint,
-        E_joint=E_joint,
-        W_joint=W_joint,
+        s_joint=S_joint,
+        e_joint=E_joint,
+        w_joint=W_joint,
         ref_dir=ref_dir,
     )
     psi_err = float(abs(wrap_to_pi(psi_q - psi_des)))
 
-    margin, margin_idx = joint_margin_from_bounds(q, lower, upper)
+    margin, margin_idx, _ = joint_margin(q, lower, upper)
 
     if q_ref is None:
         q_ref_dq = np.nan
@@ -1414,7 +1401,7 @@ class HAArmIKSolver:
             float(v) for v in R.from_matrix(rpy_to_R(self.mount_rpy)).as_quat()
         )
         if self.urdf_has_world_mount or self.urdf_root_link != self.base_link:
-            self.T_world_from_base = make_T_from_xyz_rpy(
+            self.T_world_from_base = T_origin(
                 self.mount_xyz,
                 self.mount_rpy,
             )

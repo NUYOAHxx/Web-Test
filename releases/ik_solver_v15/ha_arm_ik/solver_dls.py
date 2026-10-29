@@ -51,34 +51,19 @@ try:
 except Exception:
     pin = None
 
-try:
-    from ha_arm_ik.ik_base import (
-        SAFE_MARGIN,
-        TOOL_AXIS_X,
-        WAIST_JOINT_NAMES,
-        bounded_joint_difference,
-        clip_to_bounds,
-        joint_difference,
-        normalize_cone_half_angle,
-        select_closest_bounded_branch,
-        skew,
-        unique_seed_list,
-        validate_orientation_mode,
-    )
-except ImportError:
-    from .ik_base import (
-        SAFE_MARGIN,
-        TOOL_AXIS_X,
-        WAIST_JOINT_NAMES,
-        bounded_joint_difference,
-        clip_to_bounds,
-        joint_difference,
-        normalize_cone_half_angle,
-        select_closest_bounded_branch,
-        skew,
-        unique_seed_list,
-        validate_orientation_mode,
-    )
+from ha_arm_ik.ik_base import (
+    SAFE_MARGIN,
+    TOOL_AXIS_X,
+    WAIST_JOINT_NAMES,
+    bounded_joint_difference,
+    clip_to_bounds,
+    joint_difference,
+    normalize_cone_half_angle,
+    select_closest_bounded_branch,
+    skew,
+    unique_seed_list,
+    validate_orientation_mode,
+)
 
 # =============================================================================
 # 1. 基础数值与收敛容差参数
