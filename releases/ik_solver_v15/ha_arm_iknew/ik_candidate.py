@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""IK solver的候选解评分、筛选与公共结果类型。
-
-候选解用轻量字典承载，方便不同solver附加自己的诊断字段。本模块定义公共状态词
-汇、确定性候选排序，以及把候选池收敛为 ``IKResult`` 的统一收尾逻辑。
-"""
+"""IK 求解器候选解评分、筛选、排序与结果类型封装。"""
 
 from enum import Enum
 
@@ -23,8 +19,9 @@ from ha_arm_ik.ik_common import (
     joint_margin,
     normalize,
     normalize_cone_half_angle,
-    pose_errors,
+    pose_error,
     sew_angle_from_points,
+    tool_cone_angle_error,
     tool_direction_angle_error,
     validate_orientation_mode,
     wrap_to_pi,
@@ -37,8 +34,17 @@ from ha_arm_ik.robot_model import (
     WAIST_JOINT_NAMES,
 )
 
-# 兼容导出：本模块当前不直接调用，但保留旧公共路径，避免外部导入失效。
-# 说明：这两个函数来自 ik_common；此处只做向后兼容导出，不参与本模块评分。
+try:
+    from ha_arm_ik.robot_model import get_sew_joints
+except ImportError:
+    def get_sew_joints(chain=None, s_joint=None, e_joint=None, w_joint=None):
+        return (
+            s_joint or getattr(chain, "s_joint", None) or S_JOINT,
+            e_joint or getattr(chain, "e_joint", None) or E_JOINT,
+            w_joint or getattr(chain, "w_joint", None) or W_JOINT,
+        )
+
+# 兼容导出：保留旧公共路径
 _COMPAT_EXPORTS = (joint_difference, joint_dist)
 
 W_NOM = 50.0
@@ -50,8 +56,7 @@ PHI_TIE_TOL = 1e-5
 
 
 class Status(Enum):
-    """solve() 的公共状态词表。"""
-
+    """solve() 公共状态词表。"""
     SUCCESS = "SUCCESS"
     NEAR_LIMIT = "NEAR_LIMIT"
     APPROXIMATE = "APPROXIMATE"
@@ -61,8 +66,7 @@ class Status(Enum):
 
 
 class FailureReason(Enum):
-    """solve() 失败原因；SUCCESS / NEAR_LIMIT 时为 None。"""
-
+    """solve() 失败原因（SUCCESS / NEAR_LIMIT 时为 None）。"""
     QP_INFEASIBLE_ALL_SEEDS = "QP_INFEASIBLE_ALL_SEEDS"
     QP_SOLVER_ERROR = "QP_SOLVER_ERROR"
     SEEDS_EXHAUSTED = "SEEDS_EXHAUSTED"
@@ -89,12 +93,7 @@ def failure_reason_for_status(status_str):
 
 
 class IKResult(dict):
-    """
-    solve() 的诊断结果；带内省字段的信息字典。
-
-    向后兼容：``(q, status, info)`` 三元组不变；由于 IKResult 是 dict 子类，
-    ``info["pos_err"]`` 等旧访问方式仍然有效。
-    """
+    """solve() 的诊断结果包装器，继承自 dict 保证向后兼容。"""
 
     def __init__(
         self,
@@ -138,7 +137,7 @@ def make_result(
     failure_detail="",
     per_seed=None,
 ):
-    """把候选信息字典和内部状态字符串打包成 IKResult。"""
+    """打包构造 IKResult 对象。"""
     if failure_reason is None:
         failure_reason = failure_reason_for_status(status_str)
     return IKResult(
@@ -151,23 +150,20 @@ def make_result(
 
 
 def is_valid_status(status):
-    """判断状态字符串是否允许伴随非空 ``q`` 返回。"""
+    """判断状态字符串是否允许伴随有效关节角 q 返回。"""
     return status in ["SUCCESS", "NEAR_LIMIT", "APPROXIMATE"]
 
 
 def phi_sort_value(c):
+    """提取用于排序的臂角偏离值（过滤 PHI_TIE_TOL 内微弱扰动）。"""
     x = c.get("phi_abs", np.inf)
-
     if not np.isfinite(x):
         return np.inf
-
-    if x < PHI_TIE_TOL:
-        return 0.0
-    return float(x)
+    return 0.0 if x < PHI_TIE_TOL else float(x)
 
 
 def candidate_sort_key(c):
-    """所有solver共用的候选解排序键。"""
+    """8 级分层候选解排序键：位姿达标 > 代价 > 臂角差 > 连续平滑 > 限位裕度 > 预备姿态距离 > 位置误差 > 姿态误差。"""
     return (
         not c.get("pose_ok", False),
         c.get("cost", c.get("cost_no_torque", np.inf)),
@@ -181,22 +177,18 @@ def candidate_sort_key(c):
 
 
 def candidate_status(c):
-    """把内部评分候选映射为公共状态字符串。"""
+    """根据候选解字典的评估字段映射为对应的公共状态字符串。"""
     if c is None:
         return "NO_RESULT"
-
-    if not c["pose_ok"]:
+    if not c.get("pose_ok", False):
         return "NO_VALID_POSE"
-
-    if c["margin"] < SAFE_MARGIN:
+    if c.get("margin", -np.inf) < SAFE_MARGIN:
         return "NEAR_LIMIT"
-
     return "SUCCESS"
 
 
 def _waist_indices(chain, n):
-    """腰关节在活动关节向量中的下标：优先按链的关节名匹配 WAIST_JOINT_NAMES；
-    链没有关节名信息时沿用旧约定（2 腰 + 7 臂时取前两个）。"""
+    """识别躯干腰部关节在活动关节向量中的下标。"""
     joints = getattr(chain, "active_joints", None)
     if joints is not None and len(joints) == n:
         names = [j.get("name") if isinstance(j, dict) else None for j in joints]
@@ -225,60 +217,54 @@ def score_candidate(
     apply_waist_return=False,
     periodic_mask=None,
 ):
-    """评估单个候选解并返回位姿/代价诊断。
-
-    臂角、平滑、限位和可选腰回中项组成不含力矩的代价；力矩项随后由具体solver
-    加入，因为不同solver使用的力学模型并不完全一致。
-    """
+    """评估单个候选解并返回位姿、各项代价分量与诊断指标。"""
     q = np.asarray(q, dtype=float)
     orientation_mode = validate_orientation_mode(orientation_mode)
-
-    if tool_axis is None:
-        tool_axis = TOOL_AXIS_X
-
-    tool_axis = normalize(tool_axis)
-    # psi_ready 不可用（q_ready 处臂角无定义，如肘部伸直）时臂角项不参与打分，其余代价照算；
-    # 旧实现会让所有候选 cost = inf，力矩 / 腰回中 / 限位择优全部失效
+    tool_axis = TOOL_AXIS_X if tool_axis is None else normalize(tool_axis)
     psi_ready_ok = psi_ready is not None and bool(np.isfinite(psi_ready))
+    tool_cone_half_angle_val = normalize_cone_half_angle(tool_cone_half_angle)
 
     psi = np.nan
     phi = np.nan
     pos_err = np.inf
     ori_err = np.inf
+    tool_dir_angle_err = np.nan
+    tool_cone_violation = np.nan
     Tq = None
 
     try:
-        S_joint = chain.s_joint if chain.s_joint else S_JOINT
-        E_joint = chain.e_joint if chain.e_joint else E_JOINT
-        W_joint = chain.w_joint if chain.w_joint else W_JOINT
-        Tq, joint_T = chain.fk_pose_and_joints(
-            q,
-            (S_joint, E_joint, W_joint),
-        )
-        pos_err, ori_err = pose_errors(
-            chain,
-            q,
-            T_target,
-            orientation_mode=orientation_mode,
-            tool_axis=tool_axis,
-            tool_cone_half_angle=tool_cone_half_angle,
-            T_current=Tq,
-        )
+        S_joint, E_joint, W_joint = get_sew_joints(chain)
+        Tq, joint_T = chain.fk_pose_and_joints(q, (S_joint, E_joint, W_joint))
+
+        dp = Tq[:3, 3] - T_target[:3, 3]
+        pos_err = float(np.linalg.norm(dp))
+
+        if orientation_mode == "full":
+            _, drot = pose_error(Tq, T_target)
+            ori_err = float(np.linalg.norm(drot))
+        elif orientation_mode == "tool_dir":
+            tool_dir_angle_err = tool_direction_angle_error(
+                T_current=Tq, T_target=T_target, tool_axis=tool_axis
+            )
+            ori_err = tool_dir_angle_err
+        elif orientation_mode == "tool_cone":
+            tool_cone_violation, tool_dir_angle_err = tool_cone_angle_error(
+                T_current=Tq,
+                T_target=T_target,
+                tool_axis=tool_axis,
+                cone_half_angle=tool_cone_half_angle_val,
+            )
+            ori_err = tool_cone_violation
+
+        psi = float(sew_angle_from_points(
+            joint_T[S_joint][:3, 3],
+            joint_T[E_joint][:3, 3],
+            joint_T[W_joint][:3, 3],
+            REF_DIR,
+        ))
+        phi = float(wrap_to_pi(psi - psi_ready)) if psi_ready_ok else np.nan
     except Exception:
-        psi = np.nan
-        phi = np.nan
-    else:
-        try:
-            psi = float(sew_angle_from_points(
-                joint_T[S_joint][:3, 3],
-                joint_T[E_joint][:3, 3],
-                joint_T[W_joint][:3, 3],
-                REF_DIR,
-            ))
-            phi = float(wrap_to_pi(psi - psi_ready)) if psi_ready_ok else np.nan
-        except Exception:
-            psi = np.nan
-            phi = np.nan
+        pass
 
     margin, margin_idx, _ = joint_margin(q, lower, upper)
     dq_prev = joint_dist_periodic(q, q_prev, periodic_mask)
@@ -287,44 +273,22 @@ def score_candidate(
     waist_dev = float("nan")
     waist_idx = _waist_indices(chain, len(q))
     if waist_idx.size:
-        waist_dev = joint_dist_periodic(
-            q[waist_idx],
-            np.asarray(q_ready, dtype=float)[waist_idx],
-            (
-                np.asarray(periodic_mask, dtype=bool)[waist_idx]
-                if periodic_mask is not None
-                else None
-            ),
+        waist_mask = (
+            np.asarray(periodic_mask, dtype=bool)[waist_idx]
+            if periodic_mask is not None
+            else None
         )
+        waist_dev = joint_dist_periodic(
+            q[waist_idx], np.asarray(q_ready, dtype=float)[waist_idx], waist_mask
+        )
+
     limit_pen = joint_limit_penalty(q, lower, upper, safe_margin=SAFE_MARGIN)
-
-    tool_dir_angle_err = np.nan
-    tool_cone_violation = np.nan
-    tool_cone_half_angle_val = normalize_cone_half_angle(
-        tool_cone_half_angle
-    )
-
-    if orientation_mode in ("tool_dir", "tool_cone") and Tq is not None:
-        try:
-            tool_dir_angle_err = tool_direction_angle_error(
-                T_current=Tq,
-                T_target=T_target,
-                tool_axis=tool_axis,
-            )
-            if orientation_mode == "tool_cone":
-                tool_cone_violation = max(
-                    0.0,
-                    tool_dir_angle_err - tool_cone_half_angle_val,
-                )
-        except Exception:
-            pass
     pose_ok = (pos_err <= POS_TOL) and (ori_err <= ORI_TOL)
 
     if np.isfinite(phi) or (not psi_ready_ok and Tq is not None):
         psi_cost = W_NOM * phi * phi if np.isfinite(phi) else 0.0
         smooth_cost = W_SMOOTH * dq_prev * dq_prev
         limit_cost = W_LIMIT * limit_pen
-        # 链上没有腰关节（waist_dev = NaN）时没有可回中的腰，腰回中项为 0（旧实现得到 NaN 代价）
         waist_cost = (
             W_WAIST_RETURN * waist_dev * waist_dev
             if apply_waist_return and np.isfinite(waist_dev)
@@ -338,23 +302,12 @@ def score_candidate(
         waist_cost = np.inf
         cost_no_torque = np.inf
 
-    # 与公共状态词表一致（candidate_status 同一规则）；旧值 "VALID" / "BAD_POSE" 会让
-    # info["status"] 与 IKResult.status 不一致
-    if not pose_ok:
-        status = "NO_VALID_POSE"
-    elif margin < SAFE_MARGIN:
-        status = "NEAR_LIMIT"
-    else:
-        status = "SUCCESS"
-
-    return {
+    res = {
         "q": q.copy(),
         "pos_err": pos_err,
         "ori_err": ori_err,
         "orientation_mode": orientation_mode,
-        "tool_axis": (
-            None if tool_axis is None else np.asarray(tool_axis, dtype=float).copy()
-        ),
+        "tool_axis": None if tool_axis is None else np.asarray(tool_axis, dtype=float).copy(),
         "tool_dir_angle_err": float(tool_dir_angle_err),
         "tool_dir_angle_err_deg": (
             float(np.rad2deg(tool_dir_angle_err))
@@ -362,9 +315,7 @@ def score_candidate(
             else np.nan
         ),
         "tool_cone_half_angle": float(tool_cone_half_angle_val),
-        "tool_cone_half_angle_deg": float(
-            np.rad2deg(tool_cone_half_angle_val)
-        ),
+        "tool_cone_half_angle_deg": float(np.rad2deg(tool_cone_half_angle_val)),
         "tool_cone_violation": float(tool_cone_violation),
         "tool_cone_violation_deg": (
             float(np.rad2deg(tool_cone_violation))
@@ -374,9 +325,7 @@ def score_candidate(
         "psi": psi,
         "phi": phi,
         "phi_abs": abs(phi) if np.isfinite(phi) else np.inf,
-        "phi_deg": (
-            float(np.rad2deg(phi)) if np.isfinite(phi) else np.nan
-        ),
+        "phi_deg": float(np.rad2deg(phi)) if np.isfinite(phi) else np.nan,
         "margin": margin,
         "margin_idx": margin_idx,
         "dq_prev": dq_prev,
@@ -391,16 +340,13 @@ def score_candidate(
         "torque_weighted_cost": 0.0,
         "cost": float(cost_no_torque),
         "pose_ok": pose_ok,
-        "status": status,
     }
+    res["status"] = candidate_status(res)
+    return res
 
 
 def evaluate_config_quality(pin_model, pin_data, pin_maps, q, ee_frame_id):
-    """构型质量指标（只记录，不参与打分）：末端 Jacobian 条件数。
-
-    平移行按 0.5m 特征长度归一后与角速度行同量纲，再 SVD。
-    自碰撞：模型无碰撞模型，不可用（调用方报告中注明）。
-    """
+    """计算构型质量诊断指标：末端 Jacobian 条件数与最小奇异值。"""
     try:
         import pinocchio as pin
 
@@ -408,8 +354,6 @@ def evaluate_config_quality(pin_model, pin_data, pin_maps, q, ee_frame_id):
         idx = list(pin_maps["active_q_indices"])
         if q.shape != (len(idx),) or not np.all(np.isfinite(q)):
             raise ValueError("q must be a finite active-joint vector")
-        # 非活动关节取 q_template（strict 模式下的实测全身状态），没有时取 neutral；
-        # continuous 关节在 Pinocchio q 中占 (cos, sin) 两个分量
         template = pin_maps.get("q_template")
         q_full = (
             pin.neutral(pin_model)
@@ -442,12 +386,10 @@ def evaluate_config_quality(pin_model, pin_data, pin_maps, q, ee_frame_id):
 
 
 def has_valid_torque(c):
-    """判断候选解是否具有有限的力矩代价和力矩范数。"""
-    if c is None:
-        return False
-
+    """判断候选解是否具备有限的力矩代价和力矩范数。"""
     return (
-        "torque_cost" in c
+        c is not None
+        and "torque_cost" in c
         and "torque_l2" in c
         and np.isfinite(c.get("torque_cost", np.inf))
         and np.isfinite(c.get("torque_l2", np.inf))
@@ -455,7 +397,7 @@ def has_valid_torque(c):
 
 
 def update_candidate_final_cost_with_torque(candidate):
-    """把solver计算出的力矩代价合并进共享候选代价。"""
+    """把 solver 计算出的力矩代价合并进共享候选代价。"""
     if candidate is None:
         return
 
@@ -471,17 +413,12 @@ def update_candidate_final_cost_with_torque(candidate):
 
     torque_cost = float(candidate["torque_cost"])
     torque_weighted_cost = float(W_TORQUE * torque_cost)
-
     candidate["torque_weighted_cost"] = torque_weighted_cost
     candidate["cost"] = float(cost_no_torque + torque_weighted_cost)
 
 
 def select_best_candidate(candidates, use_torque=True):
-    """选择最优候选，并返回 ``(best, public_status)``。
-
-    若没有候选满足位姿容差，则返回误差最小的候选和 ``NO_VALID_POSE``，供诊断
-    使用；否则在要求时优先保留力矩有效候选，再按标准加权键排序。
-    """
+    """选择最优候选解并返回 (best, public_status)。"""
     if len(candidates) == 0:
         return None, "NO_RESULT"
 
@@ -510,14 +447,12 @@ def select_best_candidate(candidates, use_torque=True):
         pool = valid
 
     pool.sort(key=candidate_sort_key)
-
     best = dict(pool[0])
     best["selected_reason"] = "weighted_cost"
     best["selection_W_TORQUE"] = float(W_TORQUE)
     best["selection_cost_has_torque"] = bool(
         use_torque and has_valid_torque(best)
     )
-
     return best, candidate_status(best)
 
 
@@ -531,12 +466,7 @@ def finalize_ik_result(
     allow_approximate=False,
     failure_diagnosis=None,
 ):
-    """
-    所有 IK solver solve() 的共享收尾逻辑。
-
-    先选择最优候选；若状态合法则返回解，若允许近似则把 ``NO_VALID_POSE`` 映射
-    为 ``APPROXIMATE``，否则给出失败诊断。
-    """
+    """所有 IK solver 的共享收尾与诊断包装逻辑。"""
     best, status = select_best_candidate(
         candidates,
         **(select_kwargs or {}),

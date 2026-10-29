@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""URDF serial-chain model and the built-in humanoid arm configurations."""
+"""URDF 串联机器人运动学链模型及人形臂配置。"""
 
 from collections import defaultdict, deque
 import xml.etree.ElementTree as ET
 
 import numpy as np
-
 from scipy.spatial.transform import Rotation as R
 
 from ha_arm_ik.ik_common import (
@@ -19,9 +18,7 @@ from ha_arm_ik.ik_common import (
     sew_angle_from_points,
 )
 
-# 臂角 S / E / W 关节的兜底名（SerialChain 未给 s_joint / e_joint / w_joint 时使用）。
-# 与 ARM_CONFIGS["left"] 的命名一致；旧值 "Left_J2/4/6" 与 ARM_CONFIGS 的 LHand_Link* 命名不符，
-# 兜底生效时找不到关节，臂角恒为 NaN。
+# 臂角 Shoulder(肩) / Elbow(肘) / Wrist(腕) 关节的默认兜底名（与左臂一致）
 S_JOINT = "LHand_Link2"
 E_JOINT = "LHand_Link4"
 W_JOINT = "LHand_Link6"
@@ -30,8 +27,6 @@ WAIST_JOINT_NAMES = ["Hip_Link1", "Body_Link"]
 
 ARM_CONFIGS = {
     "left": {
-        # Arm IK root. Body_Link is intentional so Hip_Link1 / Body_Link are
-        # not part of the 7-DOF arm chain.
         "base_link": "Body_Link",
         "ee_link": "left_l_dg_tcp",
         "s_joint": "LHand_Link2",
@@ -55,11 +50,21 @@ ARM_CONFIGS = {
 }
 
 
+def get_sew_joints(chain=None, s_joint=None, e_joint=None, w_joint=None):
+    """获取肩、肘、腕关节点名称，未指定时按链属性或全局常量兜底。"""
+    s = s_joint or getattr(chain, "s_joint", None) or S_JOINT
+    e = e_joint or getattr(chain, "e_joint", None) or E_JOINT
+    w = w_joint or getattr(chain, "w_joint", None) or W_JOINT
+    return s, e, w
+
+
 def parse_vec(s):
+    """解析空格分隔的浮点数字符串为一维数组。"""
     return np.array([float(x) for x in s.split()], dtype=float)
 
 
 def get_fixed_joint_origin(urdf_path, parent_link, child_link):
+    """从 URDF 检索连接指定父子连杆的 fixed 关节原点 (xyz, rpy)。"""
     root = ET.parse(urdf_path).getroot()
 
     for joint in root.findall("joint"):
@@ -89,7 +94,7 @@ def get_fixed_joint_origin(urdf_path, parent_link, child_link):
 
 
 def get_urdf_root_link(urdf_path):
-    """Return the single root link of a URDF tree."""
+    """检索 URDF 拓扑树中唯一的根连杆。"""
     root = ET.parse(urdf_path).getroot()
 
     links = {
@@ -112,6 +117,7 @@ def get_urdf_root_link(urdf_path):
 
 
 def find_chain(urdf_path, base_link, ee_link):
+    """使用 BFS 从 URDF 中提取 base_link 到 ee_link 的串联关节链。"""
     root = ET.parse(urdf_path).getroot()
 
     children = defaultdict(list)
@@ -182,6 +188,8 @@ def find_chain(urdf_path, base_link, ee_link):
 
 
 class SerialChain:
+    """URDF 串联机器人运动学链。"""
+
     def __init__(
         self,
         urdf_path,
@@ -212,6 +220,7 @@ class SerialChain:
             )
 
     def bounds(self):
+        """返回所有活动关节的限位上下界数组 (lower, upper)。"""
         lower = []
         upper = []
 
@@ -226,6 +235,7 @@ class SerialChain:
         return np.array(lower, dtype=float), np.array(upper, dtype=float)
 
     def fk_all(self, q):
+        """计算所有连杆及关节原点相对于基座的 4x4 齐次变换矩阵。"""
         q = np.asarray(q, dtype=float)
         if len(q) != len(self.active_joints):
             raise ValueError(
@@ -251,10 +261,8 @@ class SerialChain:
 
         return link_T, joint_origin_T
 
-    # v15 提速（结果逐位不变）：
-    #   - 关节原点变换只取决于 (xyz, rpy) 的数值，按其 float64 字节缓存，命中时与重算 T_origin 完全相同；
-    #   - 转动关节的旋转矩阵整链一次批量调用 scipy from_rotvec（逐行同一例程，与逐关节 rot_axis 逐位相同）。
     def _origin_T(self, joint):
+        """按 (xyz, rpy) 字节缓存关节原点变换矩阵。"""
         key = (
             np.asarray(joint["xyz"], dtype=float).tobytes(),
             np.asarray(joint["rpy"], dtype=float).tobytes(),
@@ -268,6 +276,7 @@ class SerialChain:
         return T
 
     def _unit_axis(self, axis):
+        """按原始转轴字节缓存归一化轴。"""
         key = np.asarray(axis, dtype=float).tobytes()
         cache = self.__dict__.setdefault("_axis_cache", {})
         unit = cache.get(key)
@@ -278,7 +287,7 @@ class SerialChain:
         return unit
 
     def _joint_motions(self, q):
-        """与 self.joints 对齐的关节运动变换（fixed 为 None）；数值与逐个 T_revolute / T_prismatic 相同。"""
+        """批量计算与 self.joints 对齐的局部运动变换。"""
         motions = [None] * len(self.joints)
         rows, rotvecs = [], []
         active_idx = 0
@@ -302,10 +311,12 @@ class SerialChain:
         return motions
 
     def fk(self, q):
+        """返回末端执行器（ee_link）的 4x4 位姿变换。"""
         link_T, _ = self.fk_all(q)
         return link_T[self.ee_link]
 
     def fk_pose_and_joints(self, q, joint_names):
+        """单次前向递推同时获取末端位姿与指定关节点原点位姿。"""
         q = np.asarray(q, dtype=float)
         if len(q) != len(self.active_joints):
             raise ValueError(
@@ -332,6 +343,7 @@ class SerialChain:
         return T, joint_T
 
     def joint_position(self, q, joint_name):
+        """获取指定关节原点在基座系下的三维坐标。"""
         _, joint_origin_T = self.fk_all(q)
         if joint_name not in joint_origin_T:
             raise KeyError(f"Joint {joint_name} not found")
@@ -345,14 +357,8 @@ class SerialChain:
         W_joint=None,
         ref_dir=REF_DIR,
     ):
-        if S_joint is None:
-            S_joint = self.s_joint if self.s_joint else S_JOINT
-        if E_joint is None:
-            E_joint = self.e_joint if self.e_joint else E_JOINT
-        if W_joint is None:
-            W_joint = self.w_joint if self.w_joint else W_JOINT
-
-        # 单次整链 FK 同时提取 S / E / W 三个关节原点（与三次调用 joint_position 逐位相同，省去 2/3 开销）
+        """计算给定关节角下的 Shoulder-Elbow-Wrist (SEW) 臂角 ψ。"""
+        S_joint, E_joint, W_joint = get_sew_joints(self, S_joint, E_joint, W_joint)
         _, joint_origin_T = self.fk_all(q)
         for name in (S_joint, E_joint, W_joint):
             if name not in joint_origin_T:
@@ -364,11 +370,7 @@ class SerialChain:
 
 
 def estimate_chain_max_reach_from_joint(chain, anchor_joint_name):
-    """Estimate max EE reach from a given joint origin.
-
-    Sums all joint-origin translation lengths after ``anchor_joint_name`` in
-    the serial chain.
-    """
+    """估算串联链从指定锚点关节原点到末端的最大理论伸展距离。"""
     reach = 0.0
     found_anchor = False
 
@@ -387,11 +389,6 @@ def estimate_chain_max_reach_from_joint(chain, anchor_joint_name):
 
 
 def joint_origin_position_at_zero(chain, joint_name):
-    """Return a joint-origin position in the chain/base frame at zero pose."""
+    """返回零位姿下指定关节原点在基座系下的三维坐标。"""
     q0 = np.zeros(len(chain.active_joints), dtype=float)
-    _, joint_origin_T = chain.fk_all(q0)
-
-    if joint_name not in joint_origin_T:
-        raise KeyError(f"Joint {joint_name} not found in chain.")
-
-    return joint_origin_T[joint_name][:3, 3].copy()
+    return chain.joint_position(q0, joint_name).copy()
