@@ -14,9 +14,9 @@ from scipy.spatial.transform import Rotation as R
 
 from tests import fixtures as F
 from ha_arm_ik import solver as S
-import ha_arm_ik.ik_common as C
+import ha_arm_ik.ik_base as C
 import ha_arm_ik.solver_dls as D
-from ha_arm_ik.ik_common import T_origin, T_prismatic, T_revolute
+from ha_arm_ik.ik_base import T_origin, T_prismatic, T_revolute
 from ha_arm_ik.solver_dls import JointStateSnapshot
 
 

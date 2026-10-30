@@ -12,16 +12,16 @@ only = set(sys.argv[3].split(",")) if len(sys.argv) > 3 and sys.argv[3] else Non
 sys.path.insert(0, root)
 os.chdir(root)
 from scipy.spatial.transform import Rotation as Rot  # noqa: E402
-import ha_arm_ik.robot_model as RM  # noqa: E402
+import ha_arm_ik.ik_base as RM  # noqa: E402
 if os.environ.get("HA_ARM_IK_USE_UNIFIED", "0") == "1":
-    from ha_arm_ik import solver_unified as S  # noqa: E402
-    from ha_arm_ik.solver_unified import JointStateSnapshot  # noqa: E402
+    from ha_arm_ik import single_arm_ik as S  # noqa: E402
+    from ha_arm_ik.single_arm_ik import JointStateSnapshot  # noqa: E402
 else:
     from ha_arm_ik import solver as S  # noqa: E402
     from ha_arm_ik.solver_dls import JointStateSnapshot  # noqa: E402
 from tests import fixtures as F  # noqa: E402
 from tests import test_v12_changes as T  # noqa: E402
-from ha_arm_ik.ik_candidate import IKResult  # noqa: E402
+from ha_arm_ik.ik_base import IKResult  # noqa: E402
 import re  # noqa: E402
 
 IGNORE = {"elapsed_ms", "version", "frozen_snapshot_received_monotonic", "received_monotonic"}

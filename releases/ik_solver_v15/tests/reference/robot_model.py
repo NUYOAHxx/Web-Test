@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from ha_arm_ik.ik_common import (
+from ha_arm_ik.ik_base import (
     T_origin,
     T_prismatic,
     T_revolute,

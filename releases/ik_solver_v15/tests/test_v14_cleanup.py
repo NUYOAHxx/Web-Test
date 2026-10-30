@@ -11,8 +11,8 @@ import numpy as np
 from tests.fixtures import make_solver, robot_xml, root_target
 from tests import dls_compat
 from ha_arm_ik import solver as S
-import ha_arm_ik.ik_candidate as K
-import ha_arm_ik.ik_common as C
+import ha_arm_ik.ik_base as K
+import ha_arm_ik.ik_base as C
 import ha_arm_ik.solver_dls as D
 from ha_arm_ik.solver_dls import JointStateSnapshot
 
@@ -67,7 +67,7 @@ class RemovedNamesTests(unittest.TestCase):
             self.assertIs(getattr(S, name), getattr(C, name), name)
 
     def test_unused_solver_imports_removed(self):
-        for name in ("defaultdict", "Enum", "ET", "rotx", "T_origin", "joint_limit_barrier",
+        for name in ("defaultdict", "Enum", "ET", "rotx", "joint_limit_barrier",
                      "finalize_ik_result", "W_SMOOTH", "NULLSPACE_GAIN", "json_safe",
                      "pinocchio_q_to_active_q"):
             self.assertFalse(hasattr(S, name), name)

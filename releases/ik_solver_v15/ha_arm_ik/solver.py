@@ -2355,6 +2355,9 @@ class HAArmIKSolver:
             )
         )
         self.workspace_max_radius = self.workspace_max_j7_radius_from_anchor
+        self.chain_max_reach = float(
+            sum(np.linalg.norm(j.get("xyz", [0.0, 0.0, 0.0])) for j in self.chain.joints)
+        )
 
         self.lower, self.upper = self.chain.bounds()
         bounds_override = dict(cfg_tune.get("position_bounds", {}))
@@ -3543,6 +3546,30 @@ class HAArmIKSolver:
         T_target_local, T_target_world = self.target_to_local(
             T_target, frame=frame
         )
+        # 0. 工作空间绝对几何可达性预检 (< 0.001 ms)
+        if (
+            not allow_approximate
+            and hasattr(self, "chain_max_reach")
+            and self.chain_max_reach is not None
+            and float(np.linalg.norm(T_target_local[:3, 3])) > self.chain_max_reach + POS_TOL
+        ):
+            target_dist = float(np.linalg.norm(T_target_local[:3, 3]))
+            detail = f"target position {target_dist:.3f}m exceeds maximum chain reach {self.chain_max_reach:.3f}m"
+            self.last_load_diagnostics.update(
+                accepted=False,
+                code="WORKSPACE_REJECTED",
+                detail=detail,
+            )
+            return (
+                None,
+                "OUTSIDE_WORKSPACE",
+                make_result(
+                    {},
+                    "OUTSIDE_WORKSPACE",
+                    failure_reason=FailureReason.WORKSPACE_REJECTED,
+                    failure_detail=f"[WORKSPACE_REJECTED] {detail}",
+                ),
+            )
         orientation_mode = validate_orientation_mode(orientation_mode)
         tool_cone_half_angle = normalize_cone_half_angle(tool_cone_half_angle)
         if tool_axis is None:
@@ -3655,13 +3682,21 @@ class HAArmIKSolver:
             accepted=False, code=code, detail=str(detail)
         )
         status = "NO_VALID_POSE"
+        _reason_map = {
+            "JOINT_JUMP_LIMIT": FailureReason.JOINT_JUMP_LIMIT,
+            "TIME_BUDGET_EXCEEDED": FailureReason.TIME_BUDGET_EXCEEDED,
+            "SOLVER_BUSY": FailureReason.SOLVER_BUSY,
+            "NO_LOAD_SAFE_SOLUTION": FailureReason.NO_LOAD_SAFE_SOLUTION,
+            "OUTSIDE_WORKSPACE": FailureReason.WORKSPACE_REJECTED,
+        }
+        reason = _reason_map.get(code, FailureReason.NOT_CONVERGED)
         return (
             None,
             status,
             make_result(
                 {},
                 status,
-                failure_reason=FailureReason.NOT_CONVERGED,
+                failure_reason=reason,
                 failure_detail=f"[{code}] {detail}",
                 per_seed=per_seed or None,
             ),

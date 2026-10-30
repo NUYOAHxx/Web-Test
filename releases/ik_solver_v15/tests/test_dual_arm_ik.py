@@ -123,10 +123,10 @@ class TestCriteriaMatchSingleArm(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            from ha_arm_ik import ik_common, robot_model, solver, solver_dls
+            from ha_arm_ik import ik_base, single_arm_ik
         except Exception as exc:  # pragma: no cover - 单臂模块不在时跳过
             raise unittest.SkipTest(f"single-arm modules not importable: {exc}")
-        cls.C, cls.S, cls.L, cls.R = ik_common, solver, solver_dls, robot_model
+        cls.C, cls.S, cls.L, cls.R = ik_base, single_arm_ik, single_arm_ik, ik_base
 
     def test_tolerances_and_criteria(self):
         C, S = self.C, self.S

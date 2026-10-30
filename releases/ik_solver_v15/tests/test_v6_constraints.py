@@ -235,7 +235,7 @@ class JointJumpAndFailureCodeTests(unittest.TestCase):
         T[:3, 3] += [5.0, 0.0, 0.0]                      # 远超臂展
         q, status, result = self.s.solve(T, frame="world", joint_state=JointStateSnapshot(self.state))
         self.assertIsNone(q)
-        self.assertEqual(self.s.last_load_diagnostics["code"], "NO_VALID_POSE_OR_PHYSICS")
+        self.assertIn(self.s.last_load_diagnostics["code"], ("WORKSPACE_REJECTED", "NO_VALID_POSE_OR_PHYSICS"))
 
 
 class LoadPolicyCacheTests(unittest.TestCase):

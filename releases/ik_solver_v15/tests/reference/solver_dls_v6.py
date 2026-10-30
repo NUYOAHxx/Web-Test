@@ -35,7 +35,7 @@ try:
 except Exception:
     pin = None
 
-from ha_arm_ik.ik_common import (
+from ha_arm_ik.ik_base import (
     SAFE_MARGIN,
     TOOL_AXIS_X,
     clip_to_bounds,
@@ -46,7 +46,7 @@ from ha_arm_ik.ik_common import (
     unique_seed_list,
     validate_orientation_mode,
 )
-from ha_arm_ik.robot_model import WAIST_JOINT_NAMES
+from ha_arm_ik.ik_base import WAIST_JOINT_NAMES
 
 # =============================================================================
 # 1. 基础数值与收敛容差参数

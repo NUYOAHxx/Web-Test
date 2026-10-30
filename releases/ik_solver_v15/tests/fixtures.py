@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -59,7 +60,10 @@ def planar_xml():
 
 
 def make_solver(*,config=None,continuous=True,include_waist=True,other=True):
-    from ha_arm_ik import solver as module
+    if os.environ.get("HA_ARM_IK_USE_UNIFIED", "0") == "1":
+        from ha_arm_ik import single_arm_ik as module
+    else:
+        from ha_arm_ik import solver as module
     xml,names=robot_xml(other=other,continuous=continuous)
     tmp=TemporaryDirectory()
     path=Path(tmp.name)/"robot.urdf"

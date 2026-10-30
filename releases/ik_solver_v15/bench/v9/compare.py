@@ -26,7 +26,7 @@ os.chdir(eval_root)
 import pinocchio as pin  # noqa: E402
 from tests.fixtures import make_solver  # noqa: E402
 import ha_arm_ik.solver_dls as D  # noqa: E402
-from ha_arm_ik.ik_candidate import score_candidate  # noqa: E402
+from ha_arm_ik.ik_base import score_candidate  # noqa: E402
 from ha_arm_ik.solver import add_torque_metrics_to_candidate  # noqa: E402
 from ha_arm_ik.solver_dls import JointStateSnapshot  # noqa: E402
 # merged-v14 起整函数形式的次任务入口移到 tests/dls_compat.py（生产代码不再使用）

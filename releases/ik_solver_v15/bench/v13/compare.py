@@ -24,7 +24,7 @@ from tests.fixtures import make_solver  # noqa: E402
 def comfort_info(model):
     if model == "two_arm":
         from tests import test_v12_changes as T
-        import ha_arm_ik.robot_model as RM
+        import ha_arm_ik.ik_base as RM
         from ha_arm_ik import solver as S
         tmp = TemporaryDirectory()
         path = Path(tmp.name) / "two_arm.urdf"

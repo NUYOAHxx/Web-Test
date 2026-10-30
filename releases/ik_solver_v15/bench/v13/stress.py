@@ -30,7 +30,7 @@ from ha_arm_ik.solver_dls import JointStateSnapshot  # noqa: E402
 tmp = TemporaryDirectory()
 if model == "two_arm":
     from tests import test_v12_changes as T
-    import ha_arm_ik.robot_model as RM
+    import ha_arm_ik.ik_base as RM
     path = Path(tmp.name) / "two_arm.urdf"
     path.write_text(T.two_arm_xml())
     configs = T.arm_configs()

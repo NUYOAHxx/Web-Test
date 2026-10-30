@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""ha_arm_ik.solver_unified —— 高内聚统一单文件逆运动学求解器。
+"""ha_arm_ik.single_arm_ik —— 腰 2 + 臂 7（9 维 / 7 维）单臂逆运动学高内聚求解器。
 
-本文件将原本拆分在 `solver_dls.py`（Pinocchio 数值核心、静态负荷、腰部舒适窗、种子库）
-与 `solver.py`（求解器调度、候选集过滤排序、Direct-Psi 备用解、主求解器类）的所有算法逻辑、
-数学模型与工程实现进行了**深度有机整合**，形成分层清晰、高内聚的单一文件。
+本文件整合了单臂数值逆运动学求解器的全部算法逻辑、数学模型与面向对象接口，
+与双臂逆运动学模块 (dual_arm_ik.py) 共同构成标准统一的机械臂逆运动学套件。
 
 十层分层架构（由底层至高层，单向依赖）：
   [1] 模块元数据与统一依赖导入 (Module Metadata & Unified Imports)
@@ -17,7 +16,7 @@
   [7] 任务空间种子库与腰部舒适窗推导 (Task-Space Seed Library & Waist Comfort Bounds)
   [8] 数值 DLS/SNS 单种子迭代核心 (Numerical DLS/SNS Engine: _SecondaryObjective, _sns_clamped_core)
   [9] 备用与历史求解算法 (Legacy Solvers: DirectPsiProblem & SSIK 兼容包装)
-  [10] 多阶段候选解流水线与 HAArmIKSolver 主类 (Multi-Stage Pipeline & Unified OOP Solver)
+  [10] 多阶段候选解流水线与 SingleArmIKSolver / HAArmIKSolver 主类 (Multi-Stage Pipeline & Unified OOP Solver)
 """
 
 from collections import deque
@@ -110,6 +109,7 @@ from ha_arm_ik.ik_base import (
 # 公共导出接口
 __all__ = [
     # 核心求解器与公共结果
+    "SingleArmIKSolver",
     "HAArmIKSolver",
     "IKResult",
     "Status",
@@ -5390,6 +5390,10 @@ class HAArmIKSolver:
             )
         )
         self.workspace_max_radius = self.workspace_max_j7_radius_from_anchor
+        # 基座到末端的理论最大伸展长度（所有关节平移绝对模长之和，三角不等式绝对上界）
+        self.chain_max_reach = float(
+            sum(np.linalg.norm(j.get("xyz", [0.0, 0.0, 0.0])) for j in self.chain.joints)
+        )
 
         self.lower, self.upper = self.chain.bounds()
         bounds_override = dict(cfg_tune.get("position_bounds", {}))
@@ -6578,6 +6582,30 @@ class HAArmIKSolver:
         T_target_local, T_target_world = self.target_to_local(
             T_target, frame=frame
         )
+        # 0. 工作空间绝对几何可达性预检 (< 0.001 ms)
+        if (
+            not allow_approximate
+            and hasattr(self, "chain_max_reach")
+            and self.chain_max_reach is not None
+            and float(np.linalg.norm(T_target_local[:3, 3])) > self.chain_max_reach + POS_TOL
+        ):
+            target_dist = float(np.linalg.norm(T_target_local[:3, 3]))
+            detail = f"target position {target_dist:.3f}m exceeds maximum chain reach {self.chain_max_reach:.3f}m"
+            self.last_load_diagnostics.update(
+                accepted=False,
+                code="WORKSPACE_REJECTED",
+                detail=detail,
+            )
+            return (
+                None,
+                "OUTSIDE_WORKSPACE",
+                make_result(
+                    {},
+                    "OUTSIDE_WORKSPACE",
+                    failure_reason=FailureReason.WORKSPACE_REJECTED,
+                    failure_detail=f"[WORKSPACE_REJECTED] {detail}",
+                ),
+            )
         orientation_mode = validate_orientation_mode(orientation_mode)
         tool_cone_half_angle = normalize_cone_half_angle(tool_cone_half_angle)
         if tool_axis is None:
@@ -6685,18 +6713,33 @@ class HAArmIKSolver:
             self._solve_lock.release()
 
     def _load_failure(self, code, detail, per_seed=None):
-        """Preserve legacy formatter/status vocabulary, even on a new load failure."""
         self.last_load_diagnostics.update(
             accepted=False, code=code, detail=str(detail)
         )
         status = "NO_VALID_POSE"
+        if code == "JOINT_JUMP_LIMIT":
+            reason = FailureReason.JOINT_JUMP_LIMIT
+        elif code in ("SEARCH_TIME_BUDGET", "TIME_BUDGET", "TIME_BUDGET_EXCEEDED"):
+            reason = FailureReason.TIME_BUDGET_EXCEEDED
+        elif code in ("SOLVER_BUSY", "BUSY"):
+            reason = FailureReason.SOLVER_BUSY
+        elif code == "NO_LOAD_SAFE_SOLUTION":
+            reason = FailureReason.NO_LOAD_SAFE_SOLUTION
+        elif code in ("WORKSPACE_REJECTED", "OUTSIDE_WORKSPACE"):
+            reason = FailureReason.WORKSPACE_REJECTED
+            status = "OUTSIDE_WORKSPACE"
+        elif code in FailureReason._value2member_map_:
+            reason = FailureReason(code)
+        else:
+            reason = FailureReason.NOT_CONVERGED
+
         return (
             None,
             status,
             make_result(
                 {},
                 status,
-                failure_reason=FailureReason.NOT_CONVERGED,
+                failure_reason=reason,
                 failure_detail=f"[{code}] {detail}",
                 per_seed=per_seed or None,
             ),
@@ -6923,7 +6966,7 @@ class HAArmIKSolver:
                 make_result(
                     {},
                     "NO_VALID_POSE",
-                    failure_reason=FailureReason.NOT_CONVERGED,
+                    failure_reason=FailureReason.SOLVER_BUSY,
                     failure_detail="[BUSY] one solve per instance; use a single worker",
                 ),
             )
@@ -7119,19 +7162,6 @@ class HAArmIKSolver:
             check_load_during_iter=check_load_during_iter,
         )
 
-    def evaluate_physics(self, q_active, derivatives=False):
-        """面向对象的静态受力与质心评估接口。"""
-        if self._load_context is None:
-            return None
-        return load_physics(
-            self.pin_model,
-            self.pin_data,
-            self.pin_maps,
-            q_active,
-            self._load_context,
-            derivatives=derivatives,
-        )
-
     def query_seed_library(self, target_T, max_seeds=None, bounds=None):
         """面向对象的任务空间种子库查询接口。"""
         if self.seed_library is None:
@@ -7159,3 +7189,10 @@ class HAArmIKSolver:
             soft_ratio=soft_ratio,
             continuation_step=continuation_step,
         )
+
+
+# =============================================================================
+# 别名映射：与 DualArmIKSolver 形成单臂/双臂对称 API 体系
+# =============================================================================
+SingleArmIKSolver = HAArmIKSolver
+

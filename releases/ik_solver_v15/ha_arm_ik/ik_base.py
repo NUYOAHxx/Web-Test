@@ -105,6 +105,9 @@ __all__ = [
     "has_valid_torque",
     "update_candidate_final_cost_with_torque",
     "select_best_candidate",
+    "phi_sort_value",
+    "evaluate_config_quality",
+    "finalize_ik_result",
 ]
 
 # ==============================================================================
@@ -169,7 +172,7 @@ ARM_CONFIGS = {
 # 2. 状态枚举、诊断与结果封装 IKResult
 # ==============================================================================
 
-class Status(Enum):
+class Status(str, Enum):
     """solve() 公共状态词表。"""
     SUCCESS = "SUCCESS"
     NEAR_LIMIT = "NEAR_LIMIT"
@@ -179,7 +182,7 @@ class Status(Enum):
     OUTSIDE_WORKSPACE = "OUTSIDE_WORKSPACE"
 
 
-class FailureReason(Enum):
+class FailureReason(str, Enum):
     """solve() 失败原因（SUCCESS / NEAR_LIMIT 时为 None）。"""
     QP_INFEASIBLE_ALL_SEEDS = "QP_INFEASIBLE_ALL_SEEDS"
     QP_SOLVER_ERROR = "QP_SOLVER_ERROR"
@@ -187,6 +190,10 @@ class FailureReason(Enum):
     TOTAL_ITER_BUDGET_HIT = "TOTAL_ITER_BUDGET_HIT"
     NOT_CONVERGED = "NOT_CONVERGED"
     WORKSPACE_REJECTED = "WORKSPACE_REJECTED"
+    JOINT_JUMP_LIMIT = "JOINT_JUMP_LIMIT"
+    TIME_BUDGET_EXCEEDED = "TIME_BUDGET_EXCEEDED"
+    SOLVER_BUSY = "SOLVER_BUSY"
+    NO_LOAD_SAFE_SOLUTION = "NO_LOAD_SAFE_SOLUTION"
 
 
 _VALID_STATUS_STRS = {status.value for status in Status}
@@ -194,7 +201,10 @@ _VALID_STATUS_STRS = {status.value for status in Status}
 
 def status_from_str(s):
     """把内部状态字符串转换为 Status；未知值返回 None。"""
-    return Status(s) if s in _VALID_STATUS_STRS else None
+    try:
+        return Status(s)
+    except (ValueError, TypeError):
+        return None
 
 
 def failure_reason_for_status(status_str):
@@ -219,13 +229,16 @@ class IKResult(dict):
     ):
         super().__init__(info_dict or {})
         self.status = (
-            status_from_str(status) if isinstance(status, str) else status
+            Status(status) if isinstance(status, str) and status in _VALID_STATUS_STRS else status
         )
         self.failure_reason = failure_reason
         self.failure_detail = failure_detail or ""
         self.per_seed = list(per_seed) if per_seed else []
         if self.status is not None and "status" not in self:
             self["status"] = self.status.value
+        self["failure_reason"] = (
+            failure_reason.value if hasattr(failure_reason, "value") else failure_reason
+        )
 
     @property
     def ok(self):
@@ -1211,6 +1224,9 @@ def _phi_sort_value(c):
     return 0.0 if x < PHI_TIE_TOL else float(x)
 
 
+phi_sort_value = _phi_sort_value
+
+
 def candidate_sort_key(c):
     """8 级分层候选解排序键：位姿达标 > 代价 > 臂角差 > 平滑 > 余量 > 预备位距离 > 位置误差 > 姿态误差。"""
     return (
@@ -1472,3 +1488,119 @@ def select_best_candidate(candidates, use_torque=True):
         use_torque and has_valid_torque(best)
     )
     return best, candidate_status(best)
+
+
+def evaluate_config_quality(pin_model, pin_data, pin_maps, q, ee_frame_id):
+    """构型质量指标（只记录，不参与打分）：末端 Jacobian 条件数。
+
+    平移行按 0.5m 特征长度归一后与角速度行同量纲，再 SVD。
+    """
+    try:
+        import pinocchio as pin
+
+        q = np.asarray(q, dtype=float)
+        idx = list(pin_maps["active_q_indices"])
+        if q.shape != (len(idx),) or not np.all(np.isfinite(q)):
+            raise ValueError("q must be a finite active-joint vector")
+        template = pin_maps.get("q_template")
+        q_full = (
+            pin.neutral(pin_model)
+            if template is None
+            else np.array(template, dtype=float, copy=True)
+        )
+        cont = np.asarray(
+            pin_maps.get("active_continuous", np.zeros(len(idx), dtype=bool)),
+            dtype=bool,
+        )
+        for k, q_idx in enumerate(idx):
+            if cont[k]:
+                q_full[q_idx] = np.cos(q[k])
+                q_full[q_idx + 1] = np.sin(q[k])
+            else:
+                q_full[q_idx] = float(q[k])
+        J_full = pin.computeFrameJacobian(
+            pin_model, pin_data, q_full, ee_frame_id, pin.LOCAL
+        )
+        active_v_indices = np.asarray(pin_maps["active_v_indices"], dtype=np.intp)
+        J = np.asarray(J_full, dtype=float)[:, active_v_indices]
+        J[:3, :] /= 0.5
+        sv = np.linalg.svd(J, compute_uv=False)
+        return {
+            "jac_min_sv": float(sv[-1]),
+            "jac_cond": float(sv[0] / max(sv[-1], 1e-12)),
+        }
+    except Exception:
+        return {"jac_min_sv": float("nan"), "jac_cond": float("nan")}
+
+
+def finalize_ik_result(
+    solver,
+    candidates,
+    per_seed,
+    select_kwargs=None,
+    annotate=None,
+    update_prev=True,
+    allow_approximate=False,
+    failure_diagnosis=None,
+):
+    """所有 IK solver solve() 的共享收尾逻辑。"""
+    best, status = select_best_candidate(
+        candidates,
+        **(select_kwargs or {}),
+    )
+    if best is not None:
+        if annotate is not None:
+            annotate(best)
+        best["num_candidates"] = len(candidates)
+        best["approximate"] = False
+        best["approximate_accepted"] = False
+
+    if best is not None and is_valid_status(status):
+        if update_prev:
+            solver.q_prev = best["q"].copy()
+        return best["q"].copy(), status, make_result(
+            best, status, per_seed=per_seed or None
+        )
+
+    if (
+        allow_approximate
+        and best is not None
+        and status == "NO_VALID_POSE"
+        and "q" in best
+    ):
+        best["approximate"] = True
+        best["approximate_accepted"] = True
+        best["original_status"] = status
+        best["status"] = "APPROXIMATE"
+        if update_prev:
+            solver.q_prev = best["q"].copy()
+
+        return best["q"].copy(), "APPROXIMATE", make_result(
+            best, "APPROXIMATE", per_seed=per_seed or None
+        )
+
+    per_seed = per_seed or []
+    if failure_diagnosis is not None:
+        failure_reason, failure_detail = failure_diagnosis(candidates, per_seed)
+    elif not candidates:
+        failure_reason = FailureReason.SEEDS_EXHAUSTED
+        failure_detail = (
+            "no candidate survived any solve pass "
+            "(seed chain empty or all engines raised)"
+        )
+    else:
+        failure_reason = FailureReason.NOT_CONVERGED
+        n_stalled = sum(1 for s in per_seed if s.get("stalled"))
+        failure_detail = (
+            f"{len(candidates)} candidates, none within tolerance "
+            f"(POS_TOL={POS_TOL:.1e}); {n_stalled} seeds stalled"
+        )
+
+    return None, status, make_result(
+        best or {},
+        status,
+        failure_reason=failure_reason,
+        failure_detail=failure_detail,
+        per_seed=per_seed or None,
+    )
+

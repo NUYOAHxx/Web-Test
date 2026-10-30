@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-验证 solver_unified.py 相对于 solver.py 与 solver_dls.py 的完整性、等价性与面向对象内聚扩展。
+验证 single_arm_ik.py 相对于 solver.py 与 solver_dls.py 的完整性、等价性与面向对象内聚扩展。
 逐项核对：
 1. 函数符号与参数签名 (Function signatures)
 2. 类及其原有方法完整性，与新增高内聚 OOP 方法 (Classes, methods & extensions)
@@ -17,7 +17,7 @@ DIR = ROOT / 'ha_arm_ik'
 
 DLS_PATH = DIR / 'solver_dls.py'
 SOL_PATH = DIR / 'solver.py'
-UNI_PATH = DIR / 'solver_unified.py'
+UNI_PATH = DIR / 'single_arm_ik.py'
 
 def strip_loc(node):
     for n in ast.walk(node):
@@ -48,7 +48,7 @@ def extract_info(filepath):
 
 def main():
     print('============================================================')
-    print('ha_arm_ik/solver_unified.py 完整性、等价性与高内聚重构审计')
+    print(f'ha_arm_ik/{UNI_PATH.name} 完整性、等价性与高内聚重构审计')
     print('============================================================')
 
     dls_f, dls_c, dls_a, dls_ast = extract_info(DLS_PATH)
@@ -144,7 +144,7 @@ def main():
 
     print('============================================================')
     if errors == 0:
-        print('结论：solver_unified.py 架构重构成功，100% 保留原有逻辑与常量，且内聚性显著提升！')
+        print(f'结论：{UNI_PATH.name} 架构重构成功，100% 保留原有逻辑与常量，且内聚性显著提升！')
         sys.exit(0)
     else:
         print(f'结论：检测到 {errors} 处异常！')

@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-10-30 02:28:07",
-  "platform": "macOS-27.2-arm64-arm-64bit",
-  "python": "3.9.6",
+  "timestamp": "2026-10-31 01:32:27",
+  "platform": "Linux-6.8.0-147-generic-aarch64-with-glibc2.39",
+  "python": "3.12.3",
   "stages": {
     "environment": true,
     "ast_syntax": true,
     "integrity_audit": true,
-    "equiv_486": "Pending Linux runtime",
-    "unit_tests": "Pending Linux runtime"
+    "equiv_486": true,
+    "unit_tests": true
   },
   "all_passed": true
 }

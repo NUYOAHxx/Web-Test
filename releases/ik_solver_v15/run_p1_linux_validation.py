@@ -7,7 +7,7 @@ P1 Linux 环境回归与 486 场景回放自动化验证脚本。
   2. 抽象语法树与符号完整性核验 (check_unified_integrity 核心)
   3. Python 3.12 跨版本语法解析审计 (ha_arm_ik/*.py)
   4. 486 条工业典型工况基线回放 (baseline: solver.py + solver_dls.py)
-  5. 486 条工业典型工况统一单文件回放 (unified: solver_unified.py)
+  5. 486 条工业典型工况单臂求解器回放 (single_arm_ik.py)
   6. 逐位浮点（Bit-Exact）差异对比 (equiv_cmp: 确保 0 差异)
   7. 250+ 项单元测试套件全量回归 (run_validation.py 12 个模块)
   8. 生成结构化报告 (p1_validation_report.json)
@@ -89,7 +89,7 @@ def check_ast_312_syntax():
 
 
 def run_integrity_audit():
-    log("\n=== [阶段 3/6] solver_unified.py 完整性与高内聚审计 ===")
+    log("\n=== [阶段 3/6] single_arm_ik.py 完整性与高内聚审计 ===")
     cmd = [sys.executable, str(ROOT / "check_unified_integrity.py")]
     res = subprocess.run(cmd, cwd=str(ROOT), capture_output=True, text=True)
     for line in res.stdout.strip().splitlines():
@@ -119,16 +119,16 @@ def run_486_scenarios_comparison():
         return False
     log(f"基线 486 场景回放成功，耗时 {time.time() - t0:.2f}s", "PASS")
 
-    log("正在执行统一单文件回放 (solver_unified.py)...")
+    log("正在执行单臂求解器回放 (single_arm_ik.py)...")
     env_uni = os.environ.copy()
     env_uni["HA_ARM_IK_USE_UNIFIED"] = "1"
     t0 = time.time()
     res2 = subprocess.run([sys.executable, str(equiv_script), str(ROOT), str(unified_pkl)],
                           cwd=str(ROOT), env=env_uni, capture_output=True, text=True)
     if res2.returncode != 0:
-        log(f"统一单文件回放失败:\n{res2.stderr}", "FAIL")
+        log(f"单臂求解器回放失败:\n{res2.stderr}", "FAIL")
         return False
-    log(f"统一单文件 486 场景回放成功，耗时 {time.time() - t0:.2f}s", "PASS")
+    log(f"单臂求解器 486 场景回放成功，耗时 {time.time() - t0:.2f}s", "PASS")
 
     log("正在执行 486 场景逐位（浮点按位）差异比对...")
     with open(baseline_pkl, "rb") as f:

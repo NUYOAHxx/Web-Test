@@ -21,9 +21,9 @@ import pinocchio as pin
 
 from tests.fixtures import make_solver, root_target
 from ha_arm_ik import solver as S
-import ha_arm_ik.ik_candidate as C
-import ha_arm_ik.ik_common as K
-import ha_arm_ik.robot_model as RM
+import ha_arm_ik.ik_base as C
+import ha_arm_ik.ik_base as K
+import ha_arm_ik.ik_base as RM
 import ha_arm_ik.solver_dls as D
 from ha_arm_ik.solver_dls import JointStateSnapshot
 

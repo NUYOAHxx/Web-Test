@@ -14,7 +14,7 @@ name, jump, out = sys.argv[2], sys.argv[3], os.path.abspath(sys.argv[4])
 sys.path.insert(0, root); os.chdir(root)
 from tests import test_v12_changes as T
 from tests.fixtures import root_target
-import ha_arm_ik.robot_model as RM
+import ha_arm_ik.ik_base as RM
 import ha_arm_ik.solver_dls as D
 from ha_arm_ik import solver as S
 from ha_arm_ik.solver_dls import JointStateSnapshot

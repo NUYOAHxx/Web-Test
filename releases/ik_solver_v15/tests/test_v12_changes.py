@@ -21,7 +21,7 @@ import numpy as np
 from tests import stubs
 stubs.install()
 from ha_arm_ik import solver as S  # noqa: E402
-import ha_arm_ik.robot_model as RM  # noqa: E402
+import ha_arm_ik.ik_base as RM  # noqa: E402
 import ha_arm_ik.solver_dls as D  # noqa: E402
 from ha_arm_ik.solver_dls import JointStateSnapshot  # noqa: E402
 

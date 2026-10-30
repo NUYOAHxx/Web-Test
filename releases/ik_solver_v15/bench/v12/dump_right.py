@@ -15,7 +15,7 @@ sys.path.insert(0, root)
 os.chdir(root)
 from tests import test_v12_changes as T  # noqa: E402
 from tests.fixtures import root_target  # noqa: E402
-import ha_arm_ik.robot_model as RM  # noqa: E402
+import ha_arm_ik.ik_base as RM  # noqa: E402
 from ha_arm_ik import solver as S  # noqa: E402
 from ha_arm_ik.solver_dls import JointStateSnapshot  # noqa: E402
 
