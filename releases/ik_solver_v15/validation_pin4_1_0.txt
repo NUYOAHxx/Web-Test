@@ -266,6 +266,6 @@ S/E/W 兜底名与 ARM_CONFIGS 的 LHand_Link* 命名一致：链未给 s/e/w �
 test_fk_pose_and_joints_missing_joint_raises (tests.test_v9_changes.RobotModelTests.test_fk_pose_and_joints_missing_joint_raises) ... ok
 
 ----------------------------------------------------------------------
-Ran 250 tests in 21.544s
+Ran 250 tests in 18.796s
 
 OK

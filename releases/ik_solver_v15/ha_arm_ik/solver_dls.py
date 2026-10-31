@@ -1482,7 +1482,10 @@ def _sns_clamped_core(
     all_free = n_free == n_active
     dq_clamped = None
     task_dim = err.size
-    eff_damping = damping + min(1e-3, 1e-4 * float(err @ err))
+    err_norm_sq = float(err @ err)
+    if not math.isfinite(err_norm_sq):
+        raise ValueError("non-finite task residual")
+    eff_damping = damping + min(1e-3, 1e-4 * err_norm_sq)
     use_null = z_grad is not None and null_weight > 0.0
     clamped_converged = False
     dq_total = dq_null_out = None
@@ -1671,7 +1674,10 @@ def _sns_clamped_core_reference(
     dq_clamped = np.zeros(n_active, dtype=float)
     dq_null_out = np.zeros(n_active, dtype=float)
     task_dim = err.size
-    eff_damping = damping + min(1e-3, 1e-4 * float(err @ err))
+    err_norm_sq = float(err @ err)
+    if not math.isfinite(err_norm_sq):
+        raise ValueError("non-finite task residual")
+    eff_damping = damping + min(1e-3, 1e-4 * err_norm_sq)
 
     max_passes = int(np.sum(free_mask)) + 1
     clamped_converged = False
@@ -2970,7 +2976,7 @@ def prepare_load_context(model, pin_maps, config, snapshot):
         raise ValueError(
             "model audit: " + "; ".join(pin_maps["model_audit_errors"])
         )
-    if not isinstance(snapshot, JointStateSnapshot):
+    if not (isinstance(snapshot, JointStateSnapshot) or type(snapshot).__name__ == "JointStateSnapshot"):
         raise ValueError("fresh complete JointStateSnapshot is required")
 
     max_age = float(config.get("load_state_max_age_s", 1.0))

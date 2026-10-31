@@ -2772,6 +2772,7 @@ class HAArmIKSolver:
         finally:
             if self.pin_maps is not None:
                 self._use_urdf_efforts()
+                self.joint_efforts_active = self.pin_maps["effort_limits"].copy()
             self._solve_lock.release()
 
     def _use_confirmed_efforts(self, context):
@@ -3310,13 +3311,16 @@ class HAArmIKSolver:
             candidates, q_prev
         )
         strict_load_safe_pool = []
+        T_target_pin = (
+            T_target_world if self._pin_uses_root_frame else T_target_local
+        )
         if self.load_mode == "strict":
             stale = self._stale_context_failure(per_seed)
             if stale:
                 return stale
             candidates, strict_load_safe_pool = self._filter_load_candidates(
                 candidates,
-                T_target_world,
+                T_target_pin,
                 orientation_mode,
                 tool_axis,
                 tool_cone_half_angle,
@@ -3378,7 +3382,7 @@ class HAArmIKSolver:
             if self.load_mode == "strict":
                 if not self._check_load_candidate(
                     best,
-                    T_target_world,
+                    T_target_pin,
                     orientation_mode,
                     tool_axis,
                     tool_cone_half_angle,
@@ -3405,7 +3409,7 @@ class HAArmIKSolver:
             if self.load_mode == "strict":
                 self._check_load_candidate(
                     best,
-                    T_target_world,
+                    T_target_pin,
                     orientation_mode,
                     tool_axis,
                     tool_cone_half_angle,
@@ -3710,7 +3714,12 @@ class HAArmIKSolver:
             snapshot = JointStateSnapshot.from_joint_state(
                 snapshot_or_msg, now_ros_ns=now_ros_ns
             )
-        self._latest_joint_state = snapshot
+        prev = self._latest_joint_state
+        if (
+            prev is None
+            or snapshot.received_monotonic >= prev.received_monotonic
+        ):
+            self._latest_joint_state = snapshot
         return snapshot
 
     def _load_snapshot_error(self):
@@ -3889,11 +3898,14 @@ class HAArmIKSolver:
         if not eligible:
             return ([], load_safe_pool) if return_load_safe_pool else []
         minimum = min(c["load_peak_ratio"] for c in eligible)
+        policy = self._load_context["policy"]
+        tie_limit = minimum + policy.peak_tie
+        if self._load_config.get("load_relax_tie_below_early_stop", False):
+            tie_limit = max(tie_limit, float(policy.early_stop_ratio))
         shortlist = [
             c
             for c in eligible
-            if c["load_peak_ratio"]
-            <= minimum + self._load_context["policy"].peak_tie
+            if c["load_peak_ratio"] <= tie_limit
         ]
         self.last_load_diagnostics["peak_shortlist_count"] = len(shortlist)
         if return_load_safe_pool:
@@ -4033,8 +4045,29 @@ class HAArmIKSolver:
                 tool_axis,
                 tool_cone_half_angle,
             )
+            if (
+                self._load_deadline is not None
+                and time.monotonic() > self._load_deadline
+            ):
+                self.q_prev = old_prev
+                per_seed = (
+                    result[2].per_seed
+                    if len(result) > 2 and hasattr(result[2], "per_seed")
+                    else None
+                )
+                return self._load_failure(
+                    "TIME_BUDGET_EXCEEDED",
+                    "solve deadline exceeded before final acceptance",
+                    per_seed=per_seed,
+                )
             if self.load_mode == "strict" and result[0] is not None:
-                stale = self._stale_context_failure()
+                stale = self._stale_context_failure(
+                    per_seed=(
+                        result[2].per_seed
+                        if len(result) > 2 and hasattr(result[2], "per_seed")
+                        else None
+                    )
+                )
                 if stale:
                     self.q_prev = old_prev
                     return stale

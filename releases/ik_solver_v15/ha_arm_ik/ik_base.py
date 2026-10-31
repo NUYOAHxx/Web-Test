@@ -750,8 +750,12 @@ def select_closest_bounded_branch(
             else round((ri - qi) / two_pi) + 2
         )
 
-        best_val = qi
-        best_dist = abs(qi - ri) if (li - eps <= qi <= ui + eps) else math.inf
+        if li - eps <= qi <= ui + eps:
+            best_val = float(np.clip(qi, li, ui))
+            best_dist = abs(best_val - ri)
+        else:
+            best_val = qi
+            best_dist = math.inf
         for k in range(int(k_min), int(k_max) + 1):
             cand = qi + k * two_pi
             if li - eps <= cand <= ui + eps:
@@ -1359,7 +1363,11 @@ def score_candidate(
     )
     pose_ok = (pos_err <= POS_TOL) and (ori_err <= ORI_TOL)
 
-    if np.isfinite(phi) or (not psi_ready_ok and Tq is not None):
+    if (
+        Tq is not None
+        and np.isfinite(pos_err)
+        and np.isfinite(ori_err)
+    ):
         psi_cost = W_NOM * phi * phi if np.isfinite(phi) else 0.0
         smooth_cost = W_SMOOTH * dq_prev * dq_prev
         limit_cost = W_LIMIT * limit_pen

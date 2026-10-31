@@ -1320,7 +1320,7 @@ def prepare_load_context(model, pin_maps, config, snapshot):
         raise ValueError(
             "model audit: " + "; ".join(pin_maps["model_audit_errors"])
         )
-    if not isinstance(snapshot, JointStateSnapshot):
+    if not (isinstance(snapshot, JointStateSnapshot) or type(snapshot).__name__ == "JointStateSnapshot"):
         raise ValueError("fresh complete JointStateSnapshot is required")
 
     max_age = float(config.get("load_state_max_age_s", 1.0))
@@ -2415,7 +2415,10 @@ def _sns_clamped_core(
     all_free = n_free == n_active
     dq_clamped = None
     task_dim = err.size
-    eff_damping = damping + min(1e-3, 1e-4 * float(err @ err))
+    err_norm_sq = float(err @ err)
+    if not math.isfinite(err_norm_sq):
+        raise ValueError("non-finite task residual")
+    eff_damping = damping + min(1e-3, 1e-4 * err_norm_sq)
     use_null = z_grad is not None and null_weight > 0.0
     clamped_converged = False
     dq_total = dq_null_out = None
@@ -2604,7 +2607,10 @@ def _sns_clamped_core_reference(
     dq_clamped = np.zeros(n_active, dtype=float)
     dq_null_out = np.zeros(n_active, dtype=float)
     task_dim = err.size
-    eff_damping = damping + min(1e-3, 1e-4 * float(err @ err))
+    err_norm_sq = float(err @ err)
+    if not math.isfinite(err_norm_sq):
+        raise ValueError("non-finite task residual")
+    eff_damping = damping + min(1e-3, 1e-4 * err_norm_sq)
 
     max_passes = int(np.sum(free_mask)) + 1
     clamped_converged = False
@@ -5808,6 +5814,7 @@ class HAArmIKSolver:
         finally:
             if self.pin_maps is not None:
                 self._use_urdf_efforts()
+                self.joint_efforts_active = self.pin_maps["effort_limits"].copy()
             self._solve_lock.release()
 
     def _use_confirmed_efforts(self, context):
@@ -6346,13 +6353,16 @@ class HAArmIKSolver:
             candidates, q_prev
         )
         strict_load_safe_pool = []
+        T_target_pin = (
+            T_target_world if self._pin_uses_root_frame else T_target_local
+        )
         if self.load_mode == "strict":
             stale = self._stale_context_failure(per_seed)
             if stale:
                 return stale
             candidates, strict_load_safe_pool = self._filter_load_candidates(
                 candidates,
-                T_target_world,
+                T_target_pin,
                 orientation_mode,
                 tool_axis,
                 tool_cone_half_angle,
@@ -6414,7 +6424,7 @@ class HAArmIKSolver:
             if self.load_mode == "strict":
                 if not self._check_load_candidate(
                     best,
-                    T_target_world,
+                    T_target_pin,
                     orientation_mode,
                     tool_axis,
                     tool_cone_half_angle,
@@ -6441,7 +6451,7 @@ class HAArmIKSolver:
             if self.load_mode == "strict":
                 self._check_load_candidate(
                     best,
-                    T_target_world,
+                    T_target_pin,
                     orientation_mode,
                     tool_axis,
                     tool_cone_half_angle,
@@ -6747,13 +6757,18 @@ class HAArmIKSolver:
 
     def update_joint_state(self, snapshot_or_msg, *, now_ros_ns=None):
         """Call in the existing subscriber; no ROS import/subscription is created."""
-        if isinstance(snapshot_or_msg, JointStateSnapshot):
+        if isinstance(snapshot_or_msg, JointStateSnapshot) or type(snapshot_or_msg).__name__ == "JointStateSnapshot":
             snapshot = snapshot_or_msg
         else:
             snapshot = JointStateSnapshot.from_joint_state(
                 snapshot_or_msg, now_ros_ns=now_ros_ns
             )
-        self._latest_joint_state = snapshot
+        prev = self._latest_joint_state
+        if (
+            prev is None
+            or snapshot.received_monotonic >= prev.received_monotonic
+        ):
+            self._latest_joint_state = snapshot
         return snapshot
 
     def _load_snapshot_error(self):
@@ -6932,11 +6947,14 @@ class HAArmIKSolver:
         if not eligible:
             return ([], load_safe_pool) if return_load_safe_pool else []
         minimum = min(c["load_peak_ratio"] for c in eligible)
+        policy = self._load_context["policy"]
+        tie_limit = minimum + policy.peak_tie
+        if self._load_config.get("load_relax_tie_below_early_stop", False):
+            tie_limit = max(tie_limit, float(policy.early_stop_ratio))
         shortlist = [
             c
             for c in eligible
-            if c["load_peak_ratio"]
-            <= minimum + self._load_context["policy"].peak_tie
+            if c["load_peak_ratio"] <= tie_limit
         ]
         self.last_load_diagnostics["peak_shortlist_count"] = len(shortlist)
         if return_load_safe_pool:
@@ -7076,8 +7094,29 @@ class HAArmIKSolver:
                 tool_axis,
                 tool_cone_half_angle,
             )
+            if (
+                self._load_deadline is not None
+                and time.monotonic() > self._load_deadline
+            ):
+                self.q_prev = old_prev
+                per_seed = (
+                    result[2].per_seed
+                    if len(result) > 2 and hasattr(result[2], "per_seed")
+                    else None
+                )
+                return self._load_failure(
+                    "TIME_BUDGET_EXCEEDED",
+                    "solve deadline exceeded before final acceptance",
+                    per_seed=per_seed,
+                )
             if self.load_mode == "strict" and result[0] is not None:
-                stale = self._stale_context_failure()
+                stale = self._stale_context_failure(
+                    per_seed=(
+                        result[2].per_seed
+                        if len(result) > 2 and hasattr(result[2], "per_seed")
+                        else None
+                    )
+                )
                 if stale:
                     self.q_prev = old_prev
                     return stale
@@ -7117,78 +7156,163 @@ class HAArmIKSolver:
         q_ref=None,
         posture_settle=True,
         orientation_mode="full",
+        tool_axis=None,
         cone_half_angle=TOOL_CONE_HALF_ANGLE,
         pos_tol=None,
         ori_tol=None,
         max_iter=None,
         damping=None,
         max_step=None,
-        stall_iters=None,
-        stall_rtol=None,
-        secondary_obj=None,
         margin_bounds=None,
-        check_load_during_iter=True,
     ):
         """面向对象的单种子 DLS/SNS 迭代接口，自动注入当前求解器的 pin_model, pin_data, pin_maps 及 load_context。"""
-        eff_lower = self.lower if lower is None else lower
-        eff_upper = self.upper if upper is None else upper
-        ref = self.q_ready if q_ref is None else q_ref
-        load_policy = self._load_config.get("policy") if hasattr(self, "_load_config") and isinstance(self._load_config, dict) else None
-        return pinocchio_ik_one_seed(
-            self.pin_model,
-            self.pin_data,
-            self.pin_maps,
-            target_T,
-            q_init,
-            eff_lower,
-            eff_upper,
-            q_ref=ref,
-            target_frame_id=self.pin_ee_frame_id,
-            characteristic_length=self.dls_arm_max_reach,
-            orientation_mode=orientation_mode,
-            cone_half_angle=cone_half_angle,
-            max_iter=self.dls_max_iter if max_iter is None else max_iter,
-            damping=self.dls_damping if damping is None else damping,
-            pos_tol=self.direct_pos_tol if pos_tol is None else pos_tol,
-            ori_tol=self.direct_ori_tol if ori_tol is None else ori_tol,
-            max_step=self.dls_max_step if max_step is None else max_step,
-            stall_iters=PIN_IK_STALL_ITERS if stall_iters is None else stall_iters,
-            stall_rtol=PIN_IK_STALL_RTOL if stall_rtol is None else stall_rtol,
-            secondary_obj=secondary_obj,
-            posture_settle=posture_settle,
-            margin_bounds=margin_bounds,
-            load_policy=load_policy,
-            load_context=self._load_context,
-            check_load_during_iter=check_load_during_iter,
-        )
+        if not self._solve_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "solver busy; do not share Pinocchio Data concurrently"
+            )
+        try:
+            if self.pin_model is None:
+                raise ValueError("Pinocchio model unavailable")
+            eff_lower = self.search_lower if lower is None else lower
+            eff_upper = self.search_upper if upper is None else upper
+            ref = self.q_ready if q_ref is None else q_ref
+            char_len = float(self.dls_characteristic_length or 0.5)
+            return pinocchio_ik_one_seed(
+                self.pin_model,
+                self.pin_data,
+                self.pin_maps,
+                self.pin_ee_frame_id,
+                target_T,
+                q_init,
+                eff_lower,
+                eff_upper,
+                max_iter=self.dls_max_iter if max_iter is None else max_iter,
+                damping=self.dls_damping if damping is None else damping,
+                pos_tol=min(PIN_IK_POS_TOL, POS_TOL) if pos_tol is None else pos_tol,
+                ori_tol=min(PIN_IK_ORI_TOL, ORI_TOL) if ori_tol is None else ori_tol,
+                max_step=self.dls_max_step if max_step is None else max_step,
+                orientation_mode=orientation_mode,
+                tool_axis=tool_axis,
+                tool_cone_half_angle=cone_half_angle,
+                q_ref=ref,
+                include_waist=self.include_waist,
+                waist_release=self.include_waist,
+                waist_max_reach=self.dls_waist_max_reach,
+                nullspace_gain=self.dls_nullspace_gain,
+                waist_null_gain=self.dls_waist_null_gain,
+                waist_task_weight=self.dls_waist_task_weight,
+                waist_task_weight_far=self.dls_waist_task_weight_far,
+                gravity_torque_gain=self.dls_gravity_torque_gain,
+                com_xy_gain=self.dls_com_xy_gain,
+                joint_limit_gain=self.dls_joint_limit_gain,
+                load_context=self._load_context,
+                deadline=self._load_deadline,
+                characteristic_length=char_len,
+                virtual_half_windows=self.dls_virtual_half_windows,
+                relative_gravity_gain=self.dls_relative_gravity_gain,
+                posture_use_equivalent_branch=self.dls_posture_use_equivalent_branch,
+                shoulder_joint=self.s_joint if self.include_waist else None,
+                posture_settle=posture_settle,
+                margin_bounds=margin_bounds,
+            )
+        finally:
+            self._solve_lock.release()
 
-    def query_seed_library(self, target_T, max_seeds=None, bounds=None):
+    def query_seed_library(
+        self,
+        target_T,
+        max_seeds=None,
+        bounds=None,
+        *,
+        orientation_mode="full",
+        tool_axis=None,
+        cone_half_angle=TOOL_CONE_HALF_ANGLE,
+        exclude=(),
+    ):
         """面向对象的任务空间种子库查询接口。"""
-        if self.seed_library is None:
+        if self.seed_library is None or self.pin_model is None:
             return []
-        return select_library_seeds(
-            self.seed_library,
-            target_T,
-            max_seeds=max_seeds or self.dls_seed_library_seeds,
-            bounds=bounds,
-        )
+        if not self._solve_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "solver busy; do not share Pinocchio Data concurrently"
+            )
+        try:
+            lo, hi = (
+                (self.search_lower, self.search_upper)
+                if bounds is None
+                else bounds
+            )
+            count = (
+                self.dls_seed_library_seeds
+                if max_seeds is None
+                else int(max_seeds)
+            )
+            char_len = float(self.dls_characteristic_length or 0.5)
+            T_target_base = seed_library_target(
+                self.pin_model,
+                self.pin_data,
+                self.pin_maps,
+                self.seed_library,
+                self.q_prev,
+                target_T,
+            )
+            return select_library_seeds(
+                self.seed_library,
+                T_target_base,
+                orientation_mode,
+                TOOL_AXIS_X if tool_axis is None else tool_axis,
+                normalize_cone_half_angle(cone_half_angle),
+                char_len,
+                lo,
+                hi,
+                count,
+                exclude=exclude,
+                min_separation=self.dls_seed_library_min_separation,
+            )
+        finally:
+            self._solve_lock.release()
 
-    def derive_waist_comfort_bounds(self, target_T, q_ref=None, soft_ratio=None, continuation_step=None):
+    def derive_waist_comfort_bounds(
+        self,
+        q_ref=None,
+        soft_ratio=None,
+        allowable_efforts=None,
+        gravity_free_half=None,
+        max_half=None,
+    ):
         """面向对象的腰部舒适窗自适应推导接口。"""
-        ref = self.q_ready if q_ref is None else q_ref
-        return derive_waist_comfort_bounds(
-            self.pin_model,
-            self.pin_data,
-            self.pin_maps,
-            target_T,
-            self.lower,
-            self.upper,
-            q_ref=ref,
-            target_frame_id=self.pin_ee_frame_id,
-            characteristic_length=self.dls_arm_max_reach,
-            soft_ratio=soft_ratio,
-            continuation_step=continuation_step,
-        )
+        if not self._solve_lock.acquire(blocking=False):
+            raise RuntimeError(
+                "solver busy; do not share Pinocchio Data concurrently"
+            )
+        try:
+            if self.pin_model is None:
+                raise ValueError("Pinocchio model unavailable")
+            ref = self.q_ready if q_ref is None else q_ref
+            efforts = (
+                self._load_config.get("load_allowable_efforts")
+                if allowable_efforts is None
+                else allowable_efforts
+            )
+            soft = (
+                self._load_config.get("load_soft_ratio")
+                if soft_ratio is None
+                else soft_ratio
+            )
+            return derive_waist_comfort_bounds(
+                self.pin_model,
+                self.pin_data,
+                self.pin_maps,
+                ref,
+                self.search_lower,
+                self.search_upper,
+                allowable_efforts=efforts,
+                soft_ratio=soft,
+                gravity_free_half=gravity_free_half,
+                max_half=max_half,
+            )
+        finally:
+            self._solve_lock.release()
 
 
 # =============================================================================
