@@ -14,7 +14,7 @@ import pinocchio as pin
 def main():
     suffix="pin"+pin.__version__.replace(".","_")
     counts={}
-    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes","test_v13_changes","test_v14_cleanup","test_v15_changes","test_dual_arm_ik"):
+    for name in ("test_contract_flow","test_pinocchio_numeric","test_policy_state","test_v6_constraints","test_v7_speed","test_v8_changes","test_v9_changes","test_v12_changes","test_v13_changes","test_v14_cleanup","test_v15_changes","test_dual_arm_ik","test_223_kinematics"):
         counts[name]=unittest.defaultTestLoader.loadTestsFromName("tests."+name).countTestCases()
     suite=unittest.defaultTestLoader.discover("tests",top_level_dir=".")
     with open("validation_"+suffix+".txt","w",encoding="utf-8") as out:

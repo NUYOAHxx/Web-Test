@@ -165,6 +165,7 @@ def run_unit_tests_suite():
         "test_v14_cleanup",
         "test_v15_changes",
         "test_dual_arm_ik",
+        "test_223_kinematics",
     ]
 
     suite = unittest.TestSuite()
@@ -180,7 +181,7 @@ def run_unit_tests_suite():
             return False
 
     total_expected = sum(counts.values())
-    log(f"已加载 12 个测试模块，共计 {total_expected} 个测试用例")
+    log(f"已加载 {len(test_modules)} 个测试模块，共计 {total_expected} 个测试用例")
 
     runner = unittest.TextTestRunner(verbosity=1)
     result = runner.run(suite)

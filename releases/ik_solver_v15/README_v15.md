@@ -125,6 +125,7 @@ v14 模式下 486 条都是 0 差异。脚本：`bench/v15/equiv_run_v14mode.py`
 | `ha_arm_ik/ik_candidate.py` | 未改 |
 | `ha_arm_ik/dual_arm_ik.py` | `_parse_targets`（`None` → `"hold"`，新增 `"free"`，两只都 `None` 报错）；文档；版本号 |
 | `tests/test_v15_changes.py`（新） | 16 个：静止 hold 逐位相等、v14 模式确有漂移、小步成比例、DLS `posture_settle` 语义（种子即解原样返回、贴限位继续整理、`margin_bounds` 定义与校验、零空间限幅）、刚体校验 / 链 FK / `_contiguous_range` / SNS 与 v14 写法逐位对照、版本号 |
+| `tests/test_223_kinematics.py`（新增） | 9 个：真实 2-2-3 构型运动学专项测试（肩 2 + 肘 2 轴位于肘部 + 腕 3 轴位于腕部；Notion 限位与就绪态；自运动臂角解耦；7 典型工况高精度收敛；连续跟踪） |
 | `tests/test_v6 / v8 / v9 / v13 / v14` | 涉及续算的断言改为 v15 行为，另用 `mock.patch(CONTINUATION_POSTURE_SETTLE=True)` 保留 v14 断言；版本号断言 |
 | `tests/test_dual_arm_ik.py` | hold / free / None 的新语义；`test_not_jointly_reachable_by_diagnosis` 预算 0.1 → 0.3 s |
 | `bench/v15/` | `drift.py`、`ramp.py`、`ab_coord.py` + `ab_worker.py`、`equiv_run_v14mode.py`，以及结果 `*_pin4_1_0.txt` |

@@ -1,3 +1,39 @@
+test_elbow_pitch_link4_modulates_reach (tests.test_223_kinematics.Test223ArmAngleAndSelfMotion.test_elbow_pitch_link4_modulates_reach)
+验证弯曲 LHand_Link4（肘部 Pitch）直接改变手臂伸展距离 SW ... ok
+test_elbow_roll_link3_modulates_arm_angle (tests.test_223_kinematics.Test223ArmAngleAndSelfMotion.test_elbow_roll_link3_modulates_arm_angle)
+验证旋转 LHand_Link3（肘部 Roll）改变臂角 ψ，而肩 S 和腕 W 间距保持不变 ... ok
+test_ready_pose_arm_angle (tests.test_223_kinematics.Test223ArmAngleAndSelfMotion.test_ready_pose_arm_angle)
+验证生产就绪姿态下的臂角计算为 -180°（或 π） ... ok
+test_sew_joint_constants (tests.test_223_kinematics.Test223ArmAngleAndSelfMotion.test_sew_joint_constants)
+验证 SEW 特征关节点与系统配置的一致性 ... ok
+test_223_active_joint_names_and_count (tests.test_223_kinematics.Test223KinematicTopology.test_223_active_joint_names_and_count)
+验证 9-DOF 链关节全称与顺规 ... ok
+test_223_coordinate_frame_origins_and_coincidence (tests.test_223_kinematics.Test223KinematicTopology.test_223_coordinate_frame_origins_and_coincidence)
+验证 LHand_Link3 坐标系位于肘部，且肘部两轴、腕部三轴几何原点重合 ... ok
+test_223_continuation_smoothness (tests.test_223_kinematics.Test223NotionLimitsAndWorkspaceSolve.test_223_continuation_smoothness)
+测试 2-2-3 构型在连续路点跟踪中的平滑性（无关节突变） ... ok
+test_7_production_cases_convergence_and_limits (tests.test_223_kinematics.Test223NotionLimitsAndWorkspaceSolve.test_7_production_cases_convergence_and_limits)
+测试 7 大工业场景：全收敛、高精度（<1mm）、全关节在 Notion 限位内 ... ok
+test_notion_limits_configuration (tests.test_223_kinematics.Test223NotionLimitsAndWorkspaceSolve.test_notion_limits_configuration)
+验证求解器的限位上下界严格符合 Notion 规格 ... ok
+test_1_ik_result_custom_string_status_and_reason (tests.test_audit_fixes.TestAuditFixes.test_1_ik_result_custom_string_status_and_reason)
+修复 1：非枚举字符串 status/failure_reason 不会导致 AttributeError。 ... ok
+test_2_score_candidate_decoupled_from_sew_joints (tests.test_audit_fixes.TestAuditFixes.test_2_score_candidate_decoupled_from_sew_joints)
+修复 2：chain 缺失 SEW 关节时不影响末端位姿正解与残差计算。 ... ok
+test_3_finalize_result_per_seed_none_safe (tests.test_audit_fixes.TestAuditFixes.test_3_finalize_result_per_seed_none_safe)
+修复 3：_finalize_result 当 per_seed=None 且未收敛时不抛出 TypeError。 ... ok
+test_4_q_prev_none_no_nan_cost_and_sort_stability (tests.test_audit_fixes.TestAuditFixes.test_4_q_prev_none_no_nan_cost_and_sort_stability)
+修复 4：q_prev=None 时 smooth_cost 不污染 NaN，且 candidate_sort_key 防护 NaN。 ... ok
+test_5_select_best_candidate_use_torque_false_ignores_torque_cost (tests.test_audit_fixes.TestAuditFixes.test_5_select_best_candidate_use_torque_false_ignores_torque_cost)
+修复 5：use_torque=False 时按无力矩代价排序。 ... ok
+test_6_serial_chain_bounds_continuous_joints (tests.test_audit_fixes.TestAuditFixes.test_6_serial_chain_bounds_continuous_joints)
+修复 6：SerialChain.bounds() 对 continuous 关节返回 [-inf, inf]。 ... ok
+test_7_failure_reason_for_outside_workspace (tests.test_audit_fixes.TestAuditFixes.test_7_failure_reason_for_outside_workspace)
+修复 7：failure_reason_for_status 映射 OUTSIDE_WORKSPACE 为 WORKSPACE_REJECTED。 ... ok
+test_8_solve_engine_preserves_candidate_source (tests.test_audit_fixes.TestAuditFixes.test_8_solve_engine_preserves_candidate_source)
+修复 8：solve_engine 保留实际解来源（如 ssik / direct_psi）。 ... ok
+test_9_urdf_non_world_root_link_mount_detected (tests.test_audit_fixes.TestAuditFixes.test_9_urdf_non_world_root_link_mount_detected)
+修复 9：URDF 根连杆非 world 时（如 pelvis/base），正确解析固定安装关节。 ... ok
 test_close_refuses_inflight_solve (tests.test_contract_flow.LegacyContractTests.test_close_refuses_inflight_solve) ... ok
 test_complete_state_rechecked_during_evaluate_physics (tests.test_contract_flow.LegacyContractTests.test_complete_state_rechecked_during_evaluate_physics) ... ok
 test_context_change_rejects_result (tests.test_contract_flow.LegacyContractTests.test_context_change_rejects_result) ... ok
@@ -266,6 +302,6 @@ S/E/W 兜底名与 ARM_CONFIGS 的 LHand_Link* 命名一致：链未给 s/e/w �
 test_fk_pose_and_joints_missing_joint_raises (tests.test_v9_changes.RobotModelTests.test_fk_pose_and_joints_missing_joint_raises) ... ok
 
 ----------------------------------------------------------------------
-Ran 250 tests in 18.796s
+Ran 268 tests in 9.519s
 
 OK

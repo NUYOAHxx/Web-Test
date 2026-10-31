@@ -113,3 +113,94 @@ def root_target(s,state,q=None):
     pin.forwardKinematics(s.pin_model,s.pin_data,active_q_to_pinocchio_q(s.pin_model,s.pin_maps,q))
     pin.updateFramePlacements(s.pin_model,s.pin_data)
     return np.array(s.pin_data.oMf[s.pin_ee_frame_id].homogeneous,copy=True)
+
+
+def robot_223_xml(*, other=False):
+    """真实 2-2-3 构型 URDF：
+    - 腰 2 轴: Hip_Link1(Pitch, Y), Body_Link(Yaw, Z)
+    - 肩 2 轴: LHand_Link1(Yaw, Z), LHand_Link2(Pitch, Y) - 肩中心 S
+    - 上臂段: LHand_Link2 -> LHand_Link3 (长 0.35m)，LHand_Link3 坐标系位于肘部
+    - 肘 2 轴: LHand_Link3(Roll, X), LHand_Link4(Pitch, Y) - 原点重合于肘部 E，偏置为 0
+    - 前臂段: LHand_Link4 -> LHand_Link5 (长 0.30m)
+    - 腕 3 轴: LHand_Link5(Roll, X), LHand_Link6(Pitch, Y), LHand_Link7(Yaw, Z) - 原点重合于腕部 W
+    - 末端手: LHand_Link7 -> tcp (长 0.15m)
+    - 关节限位严格遵循 Notion / limits_reference.json 规格
+    """
+    names = ["Hip_Link1", "Body_Link"] + [f"LHand_Link{i}" for i in range(1, 8)]
+    axes = [(0, 1, 0), (0, 0, 1), (0, 0, 1), (0, 1, 0), (1, 0, 0),
+            (0, 1, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)]
+    offsets = [(0, 0, .3), (0, 0, .25), (0, .2, .18), (0, .05, 0), (.35, 0, 0),
+               (0, 0, 0), (.30, 0, 0), (0, 0, 0), (0, 0, 0)]
+    limits_deg = [(-120.0, 120.0), (-360.0, 360.0), (-360.0, 360.0), (-90.0, 45.0),
+                  (-360.0, 360.0), (-120.0, 40.0), (-360.0, 360.0), (60.0, 120.0), (-30.0, 30.0)]
+    masses = [3.0, 8.0, 1.5, 2.0, 1.5, 1.2, 0.8, 0.6, 0.3]
+    parts = ['<robot name="robot_223_kinematics">',
+             f'<link name="base">{inertial(12)}</link>']
+    parent = "base"
+    for i, name in enumerate(names):
+        child = f"link_{i}"
+        lo, hi = np.deg2rad(limits_deg[i][0]), np.deg2rad(limits_deg[i][1])
+        parts.append(f'<link name="{child}">{inertial(masses[i], (.05, 0, 0))}</link>')
+        parts.append(f'<joint name="{name}" type="revolute"><parent link="{parent}"/>'
+                     f'<child link="{child}"/><origin xyz="{" ".join(map(str, offsets[i]))}"/>'
+                     f'<axis xyz="{" ".join(map(str, axes[i]))}"/>'
+                     f'<limit lower="{lo:.6f}" upper="{hi:.6f}" effort="300" velocity="2"/></joint>')
+        parent = child
+    parts += ['<link name="tcp"/>',
+              f'<joint name="tcp_fixed" type="fixed"><parent link="{parent}"/>'
+              '<child link="tcp"/><origin xyz=".15 0 0"/></joint>']
+    if other:
+        parts += [f'<link name="other_link">{inertial(3, (.2, 0, 0))}</link>',
+                  '<joint name="OtherJoint" type="revolute"><parent link="link_1"/>'
+                  '<child link="other_link"/><origin xyz="0 -.25 0"/>'
+                  '<axis xyz="0 1 0"/><limit lower="-2" upper="2" effort="100" velocity="1"/></joint>']
+    parts.append("</robot>")
+    return "".join(parts), names
+
+
+def make_223_solver(*, config=None, include_waist=True, other=False):
+    """构建真实 2-2-3 构型求解器实例与初始就绪态"""
+    if os.environ.get("HA_ARM_IK_USE_UNIFIED", "0") == "1":
+        from ha_arm_ik import single_arm_ik as module
+    else:
+        from ha_arm_ik import solver as module
+    xml, names = robot_223_xml(other=other)
+    tmp = TemporaryDirectory()
+    path = Path(tmp.name) / "robot_223.urdf"
+    path.write_text(xml)
+    # 生产真实就绪姿态: [0°, 0°, -30°, -45°, 0°, -40°, 0°, 90°, 0°]
+    q_ready_deg = [0.0, 0.0, -30.0, -45.0, 0.0, -40.0, 0.0, 90.0, 0.0]
+    qref = np.deg2rad(q_ready_deg)
+    module.ARM_CONFIGS["left"] = {
+        "base_link": "link_1",
+        "ee_link": "tcp",
+        "s_joint": "LHand_Link2",
+        "e_joint": "LHand_Link4",
+        "w_joint": "LHand_Link6",
+        "mount_xyz": np.zeros(3),
+        "mount_rpy": np.zeros(3),
+        "q_ready": qref[2:],
+    }
+    all_names = names + (["OtherJoint"] if other else [])
+    cfg = {
+        "load_allowable_efforts": {n: 300.0 for n in all_names},
+        "load_massless_links": ["tcp"],
+        "load_budget_s": 3.0,
+        "load_state_max_age_s": 20.0,
+        "load_max_seeds": 4,
+        "dls_max_iter": 100,
+        "q_ready": qref if include_waist else qref[2:],
+    }
+    cfg.update(config or {})
+    try:
+        s = module.HAArmIKSolver(path, "left", include_waist=include_waist, verbose=False, config=cfg)
+    except BaseException:
+        tmp.cleanup()
+        raise
+    s._test_tmp = tmp
+    s._test_finalize = weakref.finalize(s, tmp.cleanup)
+    state = dict(zip(names, qref))
+    if other:
+        state["OtherJoint"] = 0.4
+    return s, state, qref
+

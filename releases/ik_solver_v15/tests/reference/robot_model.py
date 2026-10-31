@@ -15,9 +15,9 @@ from ha_arm_ik.ik_base import (
     sew_angle_from_points,
 )
 
-S_JOINT = "Left_J2"
-E_JOINT = "Left_J4"
-W_JOINT = "Left_J6"
+S_JOINT = "LHand_Link2"
+E_JOINT = "LHand_Link4"
+W_JOINT = "LHand_Link6"
 REF_DIR = np.array([0.0, 0.0, 1.0], dtype=float)
 WAIST_JOINT_NAMES = ["Hip_Link1", "Body_Link"]
 
@@ -33,15 +33,7 @@ ARM_CONFIGS = {
         "mount_xyz": np.array([0.0, 0.0, 0.5087]),
         "mount_rpy": np.array([0.0, 0.0, 0.0]),
         "q_ready": np.array(
-            [
-                0,
-                -1.558843,
-                -3.865597,
-                -1.266221,
-                -2.151839,
-                1.067015,
-                -0.261056,
-            ]
+            [-0.523599, -0.785398, 0.0, -0.698132, 0.0, 1.570796, 0.0]
         ),
     },
     "right": {
@@ -53,15 +45,7 @@ ARM_CONFIGS = {
         "mount_xyz": np.array([0.0, 0.0, 0.5087]),
         "mount_rpy": np.array([0.0, 0.0, 0.0]),
         "q_ready": np.array(
-            [
-                0,
-                -1.558843,
-                3.865597,
-                -1.266221,
-                2.151839,
-                1.067015,
-                0.261056,
-            ]
+            [0.523599, -0.785398, 0.0, -0.698132, 0.0, 1.570796, 0.0]
         ),
     },
 }
