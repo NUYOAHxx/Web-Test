@@ -2279,11 +2279,24 @@ class HAArmIKSolver:
         self.w_joint = cfg["w_joint"]
         self.ref_dir = REF_DIR.copy()
 
+        mount_parent = self.urdf_root_link if self.urdf_root_link is not None else "world"
         mount_from_urdf = get_fixed_joint_origin(
             self.urdf,
-            parent_link="world",
+            parent_link=mount_parent,
             child_link=self.base_link,
         )
+        if mount_from_urdf is None and mount_parent != "world":
+            mount_from_urdf = get_fixed_joint_origin(
+                self.urdf,
+                parent_link="world",
+                child_link=self.base_link,
+            )
+        if mount_from_urdf is None and self.base_link != cfg["base_link"]:
+            mount_from_urdf = get_fixed_joint_origin(
+                self.urdf,
+                parent_link=mount_parent,
+                child_link=cfg["base_link"],
+            )
 
         if mount_from_urdf is not None:
             self.urdf_has_world_mount = True
@@ -3361,7 +3374,16 @@ class HAArmIKSolver:
             )
 
         if best is not None:
-            best["solve_engine"] = "dls"
+            engine = best.get("solve_engine")
+            if not engine:
+                src = best.get("source")
+                if src in ("ssik", "direct_psi"):
+                    engine = src
+                elif src == "pinocchio_ik":
+                    engine = "dls"
+                else:
+                    engine = src or "dls"
+            best["solve_engine"] = engine
             best["target_frame"] = frame
             best["T_target_local"] = T_target_local
             best["T_target_world"] = T_target_world
@@ -3436,10 +3458,11 @@ class HAArmIKSolver:
             )
             return self._accept(best, "APPROXIMATE", code, per_seed, update_prev)
 
+        per_seed = per_seed or []
         failure_reason = None
         if best is None:
             failure_reason = FailureReason.SEEDS_EXHAUSTED
-            errors = [s["exception"] for s in (per_seed or []) if "exception" in s]
+            errors = [s["exception"] for s in per_seed if "exception" in s]
             failure_detail = (
                 "no candidate survived any solve pass "
                 "(seed chain empty or all engines raised)"

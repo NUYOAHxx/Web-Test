@@ -197,6 +197,7 @@ class FailureReason(str, Enum):
 
 
 _VALID_STATUS_STRS = {status.value for status in Status}
+_VALID_FAILURE_REASON_STRS = {r.value for r in FailureReason}
 
 
 def status_from_str(s):
@@ -209,10 +210,13 @@ def status_from_str(s):
 
 def failure_reason_for_status(status_str):
     """为失败的公共状态字符串返回默认失败原因。"""
-    if status_str == "NO_RESULT":
+    val = status_str.value if hasattr(status_str, "value") else str(status_str)
+    if val == "NO_RESULT":
         return FailureReason.SEEDS_EXHAUSTED
-    if status_str in ("NO_VALID_POSE", "APPROXIMATE"):
+    if val in ("NO_VALID_POSE", "APPROXIMATE"):
         return FailureReason.NOT_CONVERGED
+    if val == "OUTSIDE_WORKSPACE":
+        return FailureReason.WORKSPACE_REJECTED
     return None
 
 
@@ -231,19 +235,28 @@ class IKResult(dict):
         self.status = (
             Status(status) if isinstance(status, str) and status in _VALID_STATUS_STRS else status
         )
-        self.failure_reason = failure_reason
+        self.failure_reason = (
+            FailureReason(failure_reason)
+            if isinstance(failure_reason, str) and failure_reason in _VALID_FAILURE_REASON_STRS
+            else failure_reason
+        )
         self.failure_detail = failure_detail or ""
         self.per_seed = list(per_seed) if per_seed else []
         if self.status is not None and "status" not in self:
-            self["status"] = self.status.value
+            self["status"] = (
+                self.status.value if hasattr(self.status, "value") else self.status
+            )
         self["failure_reason"] = (
-            failure_reason.value if hasattr(failure_reason, "value") else failure_reason
+            self.failure_reason.value
+            if hasattr(self.failure_reason, "value")
+            else self.failure_reason
         )
 
     @property
     def ok(self):
         """求解是否成功（含 SUCCESS 与 NEAR_LIMIT）。"""
-        return self.status in (Status.SUCCESS, Status.NEAR_LIMIT)
+        st = self.status.value if hasattr(self.status, "value") else self.status
+        return st in (Status.SUCCESS, Status.NEAR_LIMIT, "SUCCESS", "NEAR_LIMIT")
 
     @property
     def failed(self):
@@ -253,7 +266,9 @@ class IKResult(dict):
     @property
     def status_val(self):
         """状态枚举字符串值。"""
-        return self.status.value if self.status else ""
+        if not self.status:
+            return ""
+        return self.status.value if hasattr(self.status, "value") else str(self.status)
 
     @property
     def pose_ok(self):
@@ -301,10 +316,20 @@ class IKResult(dict):
         return self.get("margin")
 
     def __repr__(self):
-        parts = [f"status={self.status.value if self.status else 'NONE'}"]
+        st_val = (
+            self.status.value
+            if hasattr(self.status, "value")
+            else (str(self.status) if self.status else "NONE")
+        )
+        parts = [f"status={st_val}"]
         if self.failure_reason is not None:
-            parts.append(f"failure_reason={self.failure_reason.value}")
-        if "pos_err" in self:
+            fr_val = (
+                self.failure_reason.value
+                if hasattr(self.failure_reason, "value")
+                else str(self.failure_reason)
+            )
+            parts.append(f"failure_reason={fr_val}")
+        if "pos_err" in self and self["pos_err"] is not None and np.isfinite(self["pos_err"]):
             parts.append(f"pos_err={self['pos_err'] * 1000:.3f}mm")
         if "num_candidates" in self:
             parts.append(f"candidates={self['num_candidates']}")
@@ -1030,8 +1055,8 @@ class SerialChain:
             upper = []
             for joint in self.active_joints:
                 if joint["type"] == "continuous":
-                    lower.append(-np.pi)
-                    upper.append(np.pi)
+                    lower.append(-np.inf)
+                    upper.append(np.inf)
                 else:
                     lower.append(joint["lower"])
                     upper.append(joint["upper"])
@@ -1220,6 +1245,20 @@ def joint_origin_position_at_zero(chain, joint_name):
 # 6. 候选解评估、打分与排序
 # ==============================================================================
 
+def _non_nan_or(val, default):
+    """确保值不是 None 或 NaN；保留合法的有限浮点数及 inf / -inf，防止破坏排序全序。"""
+    if val is None:
+        return default
+    try:
+        f = float(val)
+        return default if np.isnan(f) else f
+    except (ValueError, TypeError):
+        return default
+
+
+_finite_or = _non_nan_or
+
+
 def _phi_sort_value(c):
     """提取用于排序的臂角偏离值（过滤微弱扰动）。"""
     x = c.get("phi_abs", np.inf)
@@ -1231,17 +1270,22 @@ def _phi_sort_value(c):
 phi_sort_value = _phi_sort_value
 
 
-def candidate_sort_key(c):
+def candidate_sort_key(c, use_torque=True):
     """8 级分层候选解排序键：位姿达标 > 代价 > 臂角差 > 平滑 > 余量 > 预备位距离 > 位置误差 > 姿态误差。"""
+    cost_val = (
+        c.get("cost", c.get("cost_no_torque", np.inf))
+        if use_torque
+        else c.get("cost_no_torque", c.get("cost", np.inf))
+    )
     return (
         not c.get("pose_ok", False),
-        c.get("cost", c.get("cost_no_torque", np.inf)),
+        _non_nan_or(cost_val, np.inf),
         _phi_sort_value(c),
-        c.get("dq_prev", np.inf),
-        -c.get("margin", -np.inf),
-        c.get("dq_ready", np.inf),
-        c.get("pos_err", np.inf),
-        c.get("ori_err", np.inf),
+        _non_nan_or(c.get("dq_prev"), np.inf),
+        -_non_nan_or(c.get("margin"), -np.inf),
+        _non_nan_or(c.get("dq_ready"), np.inf),
+        _non_nan_or(c.get("pos_err"), np.inf),
+        _non_nan_or(c.get("ori_err"), np.inf),
     )
 
 
@@ -1307,48 +1351,71 @@ def score_candidate(
     tool_dir_angle_err = np.nan
     tool_cone_violation = np.nan
     Tq = None
+    joint_T = None
 
     try:
         s_joint, e_joint, w_joint = get_sew_joints(chain)
         Tq, joint_T = chain.fk_pose_and_joints(q, (s_joint, e_joint, w_joint))
-
-        dp = Tq[:3, 3] - T_target[:3, 3]
-        pos_err = float(np.linalg.norm(dp))
-
-        if orientation_mode == "full":
-            _, drot = pose_error(Tq, T_target)
-            ori_err = float(np.linalg.norm(drot))
-        elif orientation_mode == "tool_dir":
-            tool_dir_angle_err = tool_direction_angle_error(
-                T_current=Tq, T_target=T_target, tool_axis=tool_axis
-            )
-            ori_err = tool_dir_angle_err
-        elif orientation_mode == "tool_cone":
-            tool_cone_violation, tool_dir_angle_err = tool_cone_angle_error(
-                T_current=Tq,
-                T_target=T_target,
-                tool_axis=tool_axis,
-                cone_half_angle=tool_cone_half_angle_val,
-            )
-            ori_err = tool_cone_violation
-
-        psi = float(sew_angle_from_points(
-            joint_T[s_joint][:3, 3],
-            joint_T[e_joint][:3, 3],
-            joint_T[w_joint][:3, 3],
-            REF_DIR,
-        ))
-        phi = float(wrap_to_pi(psi - psi_ready)) if psi_ready_ok else np.nan
     except Exception:
-        pass
+        try:
+            Tq = chain.fk(q)
+        except Exception:
+            Tq = None
+
+    if Tq is not None:
+        try:
+            dp = Tq[:3, 3] - T_target[:3, 3]
+            pos_err = float(np.linalg.norm(dp))
+
+            if orientation_mode == "full":
+                _, drot = pose_error(Tq, T_target)
+                ori_err = float(np.linalg.norm(drot))
+            elif orientation_mode == "tool_dir":
+                tool_dir_angle_err = tool_direction_angle_error(
+                    T_current=Tq, T_target=T_target, tool_axis=tool_axis
+                )
+                ori_err = tool_dir_angle_err
+            elif orientation_mode == "tool_cone":
+                tool_cone_violation, tool_dir_angle_err = tool_cone_angle_error(
+                    T_current=Tq,
+                    T_target=T_target,
+                    tool_axis=tool_axis,
+                    cone_half_angle=tool_cone_half_angle_val,
+                )
+                ori_err = tool_cone_violation
+        except Exception:
+            pos_err = np.inf
+            ori_err = np.inf
+
+    if joint_T is not None:
+        try:
+            s_joint, e_joint, w_joint = get_sew_joints(chain)
+            psi = float(sew_angle_from_points(
+                joint_T[s_joint][:3, 3],
+                joint_T[e_joint][:3, 3],
+                joint_T[w_joint][:3, 3],
+                REF_DIR,
+            ))
+            phi = float(wrap_to_pi(psi - psi_ready)) if psi_ready_ok else np.nan
+        except Exception:
+            psi = np.nan
+            phi = np.nan
 
     margin, margin_idx, margin_each = joint_margin(q, lower, upper)
-    dq_prev = joint_dist_periodic(q, q_prev, periodic_mask)
-    dq_ready = joint_dist_periodic(q, q_ready, periodic_mask)
+    dq_prev = (
+        joint_dist_periodic(q, q_prev, periodic_mask)
+        if q_prev is not None
+        else np.nan
+    )
+    dq_ready = (
+        joint_dist_periodic(q, q_ready, periodic_mask)
+        if q_ready is not None
+        else np.nan
+    )
 
     waist_dev = float("nan")
     waist_idx = _waist_indices(chain, len(q))
-    if waist_idx.size:
+    if waist_idx.size and q_ready is not None:
         waist_mask = (
             np.asarray(periodic_mask, dtype=bool)[waist_idx]
             if periodic_mask is not None
@@ -1369,7 +1436,11 @@ def score_candidate(
         and np.isfinite(ori_err)
     ):
         psi_cost = W_NOM * phi * phi if np.isfinite(phi) else 0.0
-        smooth_cost = W_SMOOTH * dq_prev * dq_prev
+        smooth_cost = (
+            W_SMOOTH * dq_prev * dq_prev
+            if np.isfinite(dq_prev)
+            else 0.0
+        )
         limit_cost = W_LIMIT * limit_pen
         waist_cost = (
             W_WAIST_RETURN * waist_dev * waist_dev
@@ -1471,11 +1542,11 @@ def select_best_candidate(candidates, use_torque=True):
             sorted(
                 candidates,
                 key=lambda c: (
-                    c.get("pos_err", np.inf),
-                    c.get("ori_err", np.inf),
+                    _non_nan_or(c.get("pos_err"), np.inf),
+                    _non_nan_or(c.get("ori_err"), np.inf),
                     _phi_sort_value(c),
-                    c.get("dq_prev", np.inf),
-                    -c.get("margin", -np.inf),
+                    _non_nan_or(c.get("dq_prev"), np.inf),
+                    -_non_nan_or(c.get("margin"), -np.inf),
                 ),
             )[0]
         )
@@ -1488,7 +1559,7 @@ def select_best_candidate(candidates, use_torque=True):
     else:
         pool = valid
 
-    pool.sort(key=candidate_sort_key)
+    pool.sort(key=lambda c: candidate_sort_key(c, use_torque=use_torque))
     best = dict(pool[0])
     best["selected_reason"] = "weighted_cost"
     best["selection_W_TORQUE"] = float(W_TORQUE)

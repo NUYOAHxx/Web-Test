@@ -3,7 +3,7 @@
 
 """ha_arm_ik.single_arm_ik —— 腰 2 + 臂 7（9 维 / 7 维）单臂逆运动学高内聚求解器。
 
-本文件整合了单臂数值逆运动学求解器的全部算法逻辑、物理模型与面向对象接口，
+本文件整合了单臂数值逆运动学求解器的全部算法逻辑、物理模型与接口，
 与双臂逆运动学模块 (dual_arm_ik.py) 共同构成标准统一的机械臂逆运动学套件。
 
 逆运动学求解约束分层体系：
@@ -5137,7 +5137,7 @@ def collect_pinocchio_candidates_and_seeds(
 
 
 # =============================================================================
-# 10.2 面向对象求解器主类 (HAArmIKSolver / SingleArmIKSolver)
+# 10.2 求解器主类 (HAArmIKSolver / SingleArmIKSolver)
 # =============================================================================
 class HAArmIKSolver:
     """腰 2 + 臂 7（9 维 / 7 维）单臂高内聚逆运动学主求解器。
@@ -5322,11 +5322,24 @@ class HAArmIKSolver:
         self.w_joint = cfg["w_joint"]
         self.ref_dir = REF_DIR.copy()
 
+        mount_parent = self.urdf_root_link if self.urdf_root_link is not None else "world"
         mount_from_urdf = get_fixed_joint_origin(
             self.urdf,
-            parent_link="world",
+            parent_link=mount_parent,
             child_link=self.base_link,
         )
+        if mount_from_urdf is None and mount_parent != "world":
+            mount_from_urdf = get_fixed_joint_origin(
+                self.urdf,
+                parent_link="world",
+                child_link=self.base_link,
+            )
+        if mount_from_urdf is None and self.base_link != cfg["base_link"]:
+            mount_from_urdf = get_fixed_joint_origin(
+                self.urdf,
+                parent_link=mount_parent,
+                child_link=cfg["base_link"],
+            )
 
         if mount_from_urdf is not None:
             self.urdf_has_world_mount = True
@@ -6410,7 +6423,16 @@ class HAArmIKSolver:
             )
 
         if best is not None:
-            best["solve_engine"] = "dls"
+            engine = best.get("solve_engine")
+            if not engine:
+                src = best.get("source")
+                if src in ("ssik", "direct_psi"):
+                    engine = src
+                elif src == "pinocchio_ik":
+                    engine = "dls"
+                else:
+                    engine = src or "dls"
+            best["solve_engine"] = engine
             best["target_frame"] = frame
             best["T_target_local"] = T_target_local
             best["T_target_world"] = T_target_world
@@ -6485,10 +6507,11 @@ class HAArmIKSolver:
             )
             return self._accept(best, "APPROXIMATE", code, per_seed, update_prev)
 
+        per_seed = per_seed or []
         failure_reason = None
         if best is None:
             failure_reason = FailureReason.SEEDS_EXHAUSTED
-            errors = [s["exception"] for s in (per_seed or []) if "exception" in s]
+            errors = [s["exception"] for s in per_seed if "exception" in s]
             failure_detail = (
                 "no candidate survived any solve pass "
                 "(seed chain empty or all engines raised)"
@@ -7149,7 +7172,7 @@ class HAArmIKSolver:
                 self.joint_efforts_active = self.pin_maps["effort_limits"].copy()
             self._solve_lock.release()
 
-    # ----- 10.2.8 面向对象高内聚公共扩展接口 (Unified OOP Methods) -----
+    # ----- 10.2.8 高内聚公共扩展接口 (Unified OOP Methods) -----
     def pinocchio_ik_one_seed(
         self,
         target_T,
@@ -7169,7 +7192,7 @@ class HAArmIKSolver:
         max_step=None,
         margin_bounds=None,
     ):
-        """面向对象的单种子 DLS/SNS 迭代接口，自动注入当前求解器的 pin_model, pin_data, pin_maps 及 load_context。"""
+        """单种子 DLS/SNS 迭代接口，自动注入当前求解器的 pin_model, pin_data, pin_maps 及 load_context。"""
         if not self._solve_lock.acquire(blocking=False):
             raise RuntimeError(
                 "solver busy; do not share Pinocchio Data concurrently"
@@ -7233,7 +7256,7 @@ class HAArmIKSolver:
         cone_half_angle=TOOL_CONE_HALF_ANGLE,
         exclude=(),
     ):
-        """面向对象的任务空间种子库查询接口。"""
+        """任务空间种子库查询接口。"""
         if self.seed_library is None or self.pin_model is None:
             return []
         if not self._solve_lock.acquire(blocking=False):
@@ -7284,7 +7307,7 @@ class HAArmIKSolver:
         gravity_free_half=None,
         max_half=None,
     ):
-        """面向对象的腰部舒适窗自适应推导接口。"""
+        """腰部舒适窗自适应推导接口。"""
         if not self._solve_lock.acquire(blocking=False):
             raise RuntimeError(
                 "solver busy; do not share Pinocchio Data concurrently"

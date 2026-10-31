@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SEW 臂角 ψ 几何定义与真实 2-2-3 关节拓扑图解</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --background: #0f172a;
+      --card: #1e293b;
+      --border: #334155;
+      --foreground: #f8fafc;
+      --muted-foreground: #94a3b8;
+    }
+    .transition-all-300 {
+      transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+  </style>
+</head>
+<body class="bg-[var(--background)] text-[var(--foreground)] antialiased p-3 sm:p-6 min-h-screen">
+  <div class="max-w-4xl mx-auto bg-[var(--card)] text-[var(--foreground)] border border-[var(--border)] rounded-2xl p-5 shadow-2xl space-y-6">
+    
+    <!-- 头部导航与标题 -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[var(--border)] pb-4">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="inline-block w-3 h-3 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50"></span>
+          <h2 class="text-xl font-bold tracking-tight text-[var(--foreground)]">
+            SEW 臂角 ψ 几何定义与真实 2-2-3 关节拓扑图解
+          </h2>
+        </div>
+        <p class="text-xs sm:text-sm text-[var(--muted-foreground)] mt-1">
+          已支持<strong>真机工况切换联动</strong>：手腕 W (Link6) 与 TCP 随末端目标实时前伸、抬升、下压与开合
+        </p>
+      </div>
+
+      <!-- 选项卡切换 -->
+      <div class="flex bg-[var(--background)] p-1 rounded-xl border border-[var(--border)] self-start sm:self-auto">
+        <button id="tab-btn-sew" onclick="switchTab('sew')" class="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all bg-[var(--card)] text-[var(--foreground)] shadow-sm">
+          1. 臂角 ψ 与手腕联动
+        </button>
+        <button id="tab-btn-chain" onclick="switchTab('chain')" class="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+          2. 真实 9 轴关节链
+        </button>
+        <button id="tab-btn-live" onclick="switchTab('live')" class="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+          3. 真实限位实测
+        </button>
+      </div>
+    </div>
+
+    <!-- 视图 1：SEW 臂角几何与手腕位置动态联动 -->
+    <div id="view-sew" class="space-y-5">
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-5 items-center">
+        <!-- SVG 互动可视化 -->
+        <div class="lg:col-span-7 bg-[var(--background)] rounded-xl border border-[var(--border)] p-4 flex flex-col items-center relative overflow-hidden shadow-inner">
+          <div class="absolute top-3 left-3 text-xs font-semibold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            SEW 几何链: S(Link2) - E(Link4/3) - W(Link6) - TCP
+          </div>
+
+          <svg id="sew-svg" viewBox="-190 -160 380 320" class="w-full max-w-[360px] h-[300px]">
+            <defs>
+              <linearGradient id="orbit-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#10b981" stop-opacity="0.15"/>
+                <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.3"/>
+              </linearGradient>
+              <marker id="arrow-ref" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 8 5 L 0 9 z" fill="#10b981" />
+              </marker>
+              <marker id="arrow-elbow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 8 5 L 0 9 z" fill="#f59e0b" />
+              </marker>
+            </defs>
+
+            <!-- 1. SW 虚拟旋转轴 (连结 S 与 动态 W) -->
+            <line id="line-sw" x1="-110" y1="20" x2="90" y2="20" stroke="#94a3b8" stroke-width="2.5" stroke-dasharray="4,4" class="transition-all-300"/>
+            <text x="-125" y="24" fill="currentColor" class="text-[12px] opacity-80 font-bold" text-anchor="end">S (肩 Link2)</text>
+
+            <!-- 2. SW 轴自运动圆环轨道 (椭圆透视，中心跟随 C 点动态位移) -->
+            <ellipse id="orbit-ellipse" cx="-10" cy="20" rx="45" ry="85" fill="none" stroke="#60a5fa" stroke-width="1.8" stroke-dasharray="3,3" opacity="0.6" class="transition-all-300"/>
+            <text id="orbit-text" x="-10" y="125" fill="#60a5fa" class="text-[12px] transition-all-300" text-anchor="middle">肘部自运动轨道面</text>
+
+            <!-- 3. SW 轴中心参考点 C (跟随 W 动态重算) -->
+            <circle id="node-c" cx="-10" cy="20" r="3.5" fill="#94a3b8" class="transition-all-300"/>
+            <text id="label-c" x="-4" y="28" fill="#94a3b8" class="text-[12px] font-mono transition-all-300">C</text>
+
+            <!-- 4. 垂直参考基准线 V_ref (从中心点 C 向上延伸，代表 ψ = 0° 基准) -->
+            <line id="line-vref" x1="-10" y1="20" x2="-10" y2="-75" stroke="#10b981" stroke-width="2" stroke-dasharray="3,3" marker-end="url(#arrow-ref)" class="transition-all-300"/>
+            <text id="label-vref" x="-2" y="-65" fill="#10b981" class="text-[12px] font-bold transition-all-300">V_ref (0° 基准)</text>
+
+            <!-- 5. 臂平面阴影 (S -> E -> W) -->
+            <polygon id="arm-triangle" points="-110,20 -10,105 90,20" fill="url(#orbit-grad)" opacity="0.5" class="transition-all-300"/>
+
+            <!-- 6. 臂角 ψ 扇面阴影与圆弧 -->
+            <path id="psi-sector" d="M -10 20 L -10 -18.25 A 20.25 38.25 0 0 0 -10 58.25 Z" fill="#f59e0b" fill-opacity="0.14" class="transition-all-300"/>
+            <path id="psi-arc" d="M -10 -18.25 A 20.25 38.25 0 0 0 -10 58.25" fill="none" stroke="#f59e0b" stroke-width="2.5" class="transition-all-300"/>
+
+            <!-- 7. 中心 C 指向肘部 E 的径向连线 (CE 矢量) -->
+            <line id="vec-elbow" x1="-10" y1="20" x2="-10" y2="105" stroke="#f59e0b" stroke-width="2.5" stroke-dasharray="4,3" marker-end="url(#arrow-elbow)" class="transition-all-300"/>
+
+            <!-- 8. 圆弧与 CE 线的交接点小珠 (确保 100% 严密贴合) -->
+            <circle id="arc-end-dot" cx="-10" cy="58.25" r="2.5" fill="#f59e0b" class="transition-all-300"/>
+
+            <!-- 9. 上臂连杆 (S -> 肘部 E) -->
+            <line id="link-se" x1="-110" y1="20" x2="-10" y2="105" stroke="#3b82f6" stroke-width="4" stroke-linecap="round" class="transition-all-300"/>
+            <!-- 10. 前臂连杆 (E -> 动态 W) -->
+            <line id="link-ew" x1="-10" y1="20" x2="90" y2="20" stroke="#8b5cf6" stroke-width="4" stroke-linecap="round" class="transition-all-300"/>
+            <!-- 11. 手腕到 TCP 工具段 (W -> TCP) -->
+            <line id="link-tcp" x1="90" y1="20" x2="114" y2="20" stroke="#a855f7" stroke-width="2.5" stroke-dasharray="2,2" class="transition-all-300"/>
+
+            <!-- 12. 动态臂角数值标签 -->
+            <text id="psi-label" x="12" y="55" fill="#10b981" class="text-[12px] font-bold transition-all-300">ψ = -180.0°</text>
+
+            <!-- 13. 各特征节点 -->
+            <!-- 肩关节 S (位置固定) -->
+            <circle cx="-110" cy="20" r="7" fill="#3b82f6" stroke="#ffffff" stroke-width="2"/>
+            
+            <!-- 腕关节 W (随工况动态平移) -->
+            <circle id="node-wrist" cx="90" cy="20" r="7" fill="#8b5cf6" stroke="#ffffff" stroke-width="2" class="transition-all-300 shadow-md"/>
+            <text id="label-wrist" x="104" y="24" fill="currentColor" class="text-[12px] opacity-80 font-bold transition-all-300">W (腕 Link6)</text>
+
+            <!-- 末端 TCP 工具点 (随工况动态平移) -->
+            <circle id="node-tcp" cx="114" cy="20" r="4.5" fill="#a855f7" stroke="#ffffff" stroke-width="1.5" class="transition-all-300"/>
+            <text id="label-tcp" x="124" y="24" fill="#a855f7" class="text-[12px] font-bold transition-all-300">TCP</text>
+
+            <!-- 肘关节 E (随臂角和工况动态移动) -->
+            <circle id="node-elbow" cx="-10" cy="105" r="9" fill="#f59e0b" stroke="#ffffff" stroke-width="2.5" class="transition-all-300 shadow-md"/>
+            <text id="node-elbow-text" x="-10" y="125" fill="currentColor" class="text-[12px] font-bold transition-all-300" text-anchor="middle">E (Link3+Link4)</text>
+          </svg>
+
+          <div class="w-full flex justify-between text-xs text-[var(--muted-foreground)] px-2 mt-2">
+            <span>S 点: <strong>肩部锚定固定</strong></span>
+            <span>W 点: <strong>随真实工况空间位移</strong></span>
+            <span>黄线/圆弧: <strong>严格对齐 CE 矢量</strong></span>
+          </div>
+        </div>
+
+        <!-- 交互控制与实时数据 -->
+        <div class="lg:col-span-5 space-y-4">
+          <!-- 真实工况切换选择器 -->
+          <div>
+            <div class="flex justify-between items-center mb-2">
+              <label class="text-xs font-semibold text-[var(--muted-foreground)] uppercase tracking-wider">
+                选择真机实测工况（观察手腕 W 空间移动）
+              </label>
+              <span id="case-badge" class="text-[12px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-bold">
+                就绪基准态
+              </span>
+            </div>
+            
+            <div class="grid grid-cols-2 gap-2 text-left">
+              <button id="btn-case-ready" onclick="selectCase('ready')" class="p-2.5 rounded-xl border border-emerald-500/50 bg-emerald-500/20 text-left transition-all ring-1 ring-emerald-500/30">
+                <div class="text-xs font-bold text-emerald-400 flex items-center justify-between">
+                  Ready 就绪姿态
+                  <span class="text-[12px] px-1 py-0.2 rounded bg-emerald-500 text-white">标准</span>
+                </div>
+                <div class="text-[12px] text-[var(--muted-foreground)] mt-1">Δ(0, 0, 0) | W在基准位</div>
+              </button>
+
+              <button id="btn-case-fwd10" onclick="selectCase('fwd10')" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--background)] hover:bg-[var(--card)] text-left transition-all">
+                <div class="text-xs font-bold text-blue-400 flex items-center justify-between">
+                  前伸 10cm
+                  <span class="text-[12px] px-1 py-0.2 rounded bg-blue-500 text-white">向前拉伸</span>
+                </div>
+                <div class="text-[12px] text-[var(--muted-foreground)] mt-1">X+10cm | W前移拉长臂</div>
+              </button>
+
+              <button id="btn-case-reach" onclick="selectCase('reach')" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--background)] hover:bg-[var(--card)] text-left transition-all">
+                <div class="text-xs font-bold text-indigo-400 flex items-center justify-between">
+                  前伸 15 + 下压 5
+                  <span class="text-[12px] px-1 py-0.2 rounded bg-indigo-500 text-white">大伸展</span>
+                </div>
+                <div class="text-[12px] text-[var(--muted-foreground)] mt-1">X+15, Z-5 | W右下大跨度</div>
+              </button>
+
+              <button id="btn-case-up" onclick="selectCase('up')" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--background)] hover:bg-[var(--card)] text-left transition-all">
+                <div class="text-xs font-bold text-purple-400 flex items-center justify-between">
+                  向上抬高 10cm
+                  <span class="text-[12px] px-1 py-0.2 rounded bg-purple-500 text-white">上抬</span>
+                </div>
+                <div class="text-[12px] text-[var(--muted-foreground)] mt-1">Z+10cm | W抬升上扬</div>
+              </button>
+
+              <button id="btn-case-down" onclick="selectCase('down')" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--background)] hover:bg-[var(--card)] text-left transition-all">
+                <div class="text-xs font-bold text-amber-500 flex items-center justify-between">
+                  向下压低 10cm
+                  <span class="text-[12px] px-1 py-0.2 rounded bg-amber-500 text-white">收拢</span>
+                </div>
+                <div class="text-[12px] text-[var(--muted-foreground)] mt-1">Z-10cm | W下沉肘收紧</div>
+              </button>
+
+              <button id="btn-case-side" onclick="selectCase('side')" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--background)] hover:bg-[var(--card)] text-left transition-all">
+                <div class="text-xs font-bold text-cyan-400 flex items-center justify-between">
+                  横向外展 10cm
+                  <span class="text-[12px] px-1 py-0.2 rounded bg-cyan-500 text-white">侧移</span>
+                </div>
+                <div class="text-[12px] text-[var(--muted-foreground)] mt-1">Y+10cm | 侧向微调</div>
+              </button>
+            </div>
+          </div>
+
+          <!-- 交互滑块（可对当前工况微调臂角自运动） -->
+          <div class="bg-[var(--background)] p-3.5 rounded-xl border border-[var(--border)] space-y-2">
+            <div class="flex justify-between items-center">
+              <span class="text-xs font-semibold text-[var(--foreground)]">当前工况下微调臂角 (ψ)</span>
+              <span id="slider-psi-val" class="text-xs font-mono font-bold text-emerald-400">-180.0°</span>
+            </div>
+            <input id="psi-slider" type="range" min="-180" max="180" step="0.5" value="-180.0" oninput="onSliderChange(this.value)" class="w-full accent-emerald-500 cursor-pointer">
+            <div class="flex justify-between text-[12px] text-[var(--muted-foreground)] font-mono">
+              <span>-180°(下)</span>
+              <span>-90°(侧)</span>
+              <span>0°(上)</span>
+              <span>+90°(侧)</span>
+              <span>+180°(下)</span>
+            </div>
+          </div>
+
+          <!-- 真实空间运动学实时数据卡片 -->
+          <div class="bg-[var(--background)] p-3.5 rounded-xl border border-[var(--border)] space-y-2 text-xs">
+            <div class="flex justify-between items-center font-mono">
+              <span class="text-[var(--muted-foreground)] font-sans">手腕 W (Link6) 三维世界坐标:</span>
+              <span id="coord-w" class="font-bold text-purple-400">[0.454, -0.062, 1.517]</span>
+            </div>
+            <div class="flex justify-between items-center font-mono">
+              <span class="text-[var(--muted-foreground)] font-sans">末端 TCP 三维目标坐标:</span>
+              <span id="coord-tcp" class="font-bold text-purple-400">[0.626, -0.162, 1.500]</span>
+            </div>
+            <div class="flex justify-between items-center font-mono border-t border-[var(--border)] pt-2">
+              <span class="text-[var(--muted-foreground)] font-sans">肩腕直线跨度 SW:</span>
+              <span id="dist-sw" class="font-bold text-blue-400">0.8942 m (伸展比 89%)</span>
+            </div>
+            <div class="flex justify-between items-center font-mono">
+              <span class="text-[var(--muted-foreground)] font-sans">肘关节屈伸开合角 (Link4):</span>
+              <span id="angle-elbow" class="font-bold text-amber-500">-40.0° (限位[-120°, 40°])</span>
+            </div>
+            <div class="flex justify-between items-center font-mono border-t border-[var(--border)] pt-2">
+              <span class="text-[var(--muted-foreground)] font-sans">臂角偏差 φ 与惩罚 Cost:</span>
+              <span id="info-phi-cost" class="font-bold text-emerald-400">φ = 0.00° | Cost = 0.0000</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 视图 2：修正后的 2-2-3 关节拓扑与标准命名表 -->
+    <div id="view-chain" class="hidden space-y-4">
+      <div class="bg-[var(--background)] rounded-xl border border-[var(--border)] p-4 space-y-4">
+        <div class="text-xs text-[var(--muted-foreground)] flex items-center justify-between border-b border-[var(--border)] pb-2">
+          <span class="font-semibold text-emerald-400">
+            ✔ 关节运动属性（Pitch/Yaw/Roll）已严格校正，100% 对应 URDF 旋转轴！
+          </span>
+          <span class="text-xs font-mono bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded">2-2-3 仿生构型</span>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <!-- 1. 腰部 (2轴) -->
+          <div class="border border-blue-500/30 rounded-xl p-3 bg-blue-500/5 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-sm text-blue-400">1. 躯干腰部 (2 轴)</span>
+              <span class="text-[12px] px-1.5 py-0.5 rounded bg-blue-500 text-white font-mono">J1 ~ J2</span>
+            </div>
+            <p class="text-[12px] text-[var(--muted-foreground)]">基座躯干运动</p>
+            <div class="space-y-1.5 text-xs font-mono">
+              <div class="p-1.5 rounded bg-[var(--card)] border border-[var(--border)] flex justify-between">
+                <span>Hip_Link1</span>
+                <span class="text-blue-400 font-sans font-bold">俯仰 (Pitch, Y轴)</span>
+              </div>
+              <div class="p-1.5 rounded bg-[var(--card)] border border-[var(--border)] flex justify-between">
+                <span>Body_Link</span>
+                <span class="text-blue-400 font-sans font-bold">偏航 (Yaw, Z轴)</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 2. 肩部 (2轴) -->
+          <div class="border border-indigo-500/30 rounded-xl p-3 bg-indigo-500/5 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-sm text-indigo-400">2. 肩关节组 (2 轴)</span>
+              <span class="text-[12px] px-1.5 py-0.5 rounded bg-indigo-500 text-white font-mono">J3 ~ J4</span>
+            </div>
+            <p class="text-[12px] text-[var(--muted-foreground)]">肩部水平偏摆与俯仰抬臂</p>
+            <div class="space-y-1.5 text-xs font-mono">
+              <div class="p-1.5 rounded bg-[var(--card)] border border-[var(--border)] flex justify-between">
+                <span>LHand_Link1</span>
+                <span class="text-indigo-400 font-sans font-bold">偏航 (Yaw, Z轴)</span>
+              </div>
+              <div class="p-1.5 rounded bg-[var(--card)] border border-[var(--border)] flex justify-between font-bold text-indigo-400">
+                <span>LHand_Link2</span>
+                <span class="font-sans">俯仰 (Pitch, S锚点)</span>
+              </div>
+            </div>
+            <div class="text-[12px] text-indigo-400 bg-indigo-500/10 p-1 rounded font-sans">
+              🔗 大臂骨架由此延伸 ~25cm 直至手肘！
+            </div>
+          </div>
+
+          <!-- 3. 肘部复合组 (2轴) -->
+          <div class="border-2 border-amber-500/60 rounded-xl p-3 bg-amber-500/10 space-y-2 ring-2 ring-amber-500/20">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-sm text-amber-500">3. 肘部复合组 (2 轴)</span>
+              <span class="text-[12px] px-1.5 py-0.5 rounded bg-amber-500 text-white font-mono">J5 ~ J6</span>
+            </div>
+            <p class="text-[12px] text-amber-300 font-medium">★ 坐标原点均在手肘！</p>
+            <div class="space-y-1.5 text-xs font-mono">
+              <div class="p-1.5 rounded bg-[var(--card)] border border-amber-500/50 flex justify-between items-center">
+                <span class="font-bold text-amber-400">LHand_Link3</span>
+                <span class="text-amber-400 font-sans font-bold">横滚 (Roll, 肘自旋)</span>
+              </div>
+              <div class="p-1.5 rounded bg-[var(--card)] border border-amber-500/50 flex justify-between items-center">
+                <span class="font-bold text-amber-400">LHand_Link4</span>
+                <span class="text-amber-400 font-sans font-bold">俯仰 (Pitch, E锚点)</span>
+              </div>
+            </div>
+            <div class="text-[12px] text-amber-300 bg-amber-500/20 p-1 rounded font-sans">
+              ✔ Link3 原点在肘部，负责旋臂；Link4 负责开合弯肘！
+            </div>
+          </div>
+
+          <!-- 4. 腕部 (3轴) -->
+          <div class="border border-purple-500/30 rounded-xl p-3 bg-purple-500/5 space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-sm text-purple-400">4. 腕部与末端 (3 轴)</span>
+              <span class="text-[12px] px-1.5 py-0.5 rounded bg-purple-500 text-white font-mono">J7 ~ J9</span>
+            </div>
+            <p class="text-[12px] text-[var(--muted-foreground)]">腕部球面微调 + 6D 工具点</p>
+            <div class="space-y-1.5 text-xs font-mono">
+              <div class="p-1.5 rounded bg-[var(--card)] border border-[var(--border)] flex justify-between">
+                <span>LHand_Link5</span>
+                <span class="text-purple-400 font-sans font-bold">横滚 (Roll, X轴)</span>
+              </div>
+              <div class="p-1.5 rounded bg-[var(--card)] border border-[var(--border)] flex justify-between font-bold text-purple-400">
+                <span>LHand_Link6</span>
+                <span class="font-sans">俯仰 (Pitch, W锚点)</span>
+              </div>
+              <div class="p-1.5 rounded bg-[var(--card)] border border-[var(--border)] flex justify-between">
+                <span>LHand_Link7</span>
+                <span class="text-purple-400 font-sans font-bold">偏航 (Yaw, Z轴)</span>
+              </div>
+            </div>
+            <div class="text-[12px] font-mono p-1 bg-purple-500/20 text-purple-600 text-center rounded">
+              🎯 TCP 6D 空间目标
+            </div>
+          </div>
+        </div>
+
+        <!-- 详细参数对照表 -->
+        <div class="overflow-x-auto pt-2">
+          <table class="w-full text-xs text-left">
+            <thead>
+              <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)] uppercase">
+                <th class="pb-2">关节代号</th>
+                <th class="pb-2">旋转轴 (URDF)</th>
+                <th class="pb-2">规范名称</th>
+                <th class="pb-2">角色 / 锚点</th>
+                <th class="pb-2">生产真实限位</th>
+                <th class="pb-2">生产 q_ready</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-[var(--border)] font-mono">
+              <tr>
+                <td class="py-2 font-bold text-blue-400">Hip_Link1</td>
+                <td class="py-2">[0, 1, 0] (Y)</td>
+                <td class="py-2 font-sans font-semibold text-blue-400">腰部俯仰 (Pitch)</td>
+                <td class="py-2 font-sans text-[var(--muted-foreground)]">躯干弯腰</td>
+                <td class="py-2">[-120°, 120°]</td>
+                <td class="py-2 font-bold text-emerald-400">0.0°</td>
+              </tr>
+              <tr>
+                <td class="py-2 font-bold text-blue-400">Body_Link</td>
+                <td class="py-2">[0, 0, 1] (Z)</td>
+                <td class="py-2 font-sans font-semibold text-blue-400">腰部偏航 (Yaw)</td>
+                <td class="py-2 font-sans text-[var(--muted-foreground)]">躯干转身</td>
+                <td class="py-2">[-360°, 360°]</td>
+                <td class="py-2 font-bold text-emerald-400">0.0°</td>
+              </tr>
+              <tr>
+                <td class="py-2 font-bold text-indigo-400">LHand_Link1</td>
+                <td class="py-2">[0, 0, 1] (Z)</td>
+                <td class="py-2 font-sans font-semibold text-indigo-400">肩部偏航 (Yaw)</td>
+                <td class="py-2 font-sans text-[var(--muted-foreground)]">水平摆臂</td>
+                <td class="py-2">[-360°, 360°]</td>
+                <td class="py-2 font-bold text-emerald-400">-30.0°</td>
+              </tr>
+              <tr class="bg-indigo-500/5">
+                <td class="py-2 font-bold text-indigo-400">LHand_Link2</td>
+                <td class="py-2">[0, 1, 0] (Y)</td>
+                <td class="py-2 font-sans font-bold text-indigo-400">肩部俯仰 (Pitch)</td>
+                <td class="py-2 font-sans font-bold text-indigo-400">★ 肩锚点 S_JOINT</td>
+                <td class="py-2 font-bold text-amber-500">[-90°, 45°]</td>
+                <td class="py-2 font-bold text-emerald-400">-45.0°</td>
+              </tr>
+              <tr class="bg-amber-500/10">
+                <td class="py-2 font-bold text-amber-500">LHand_Link3</td>
+                <td class="py-2">[1, 0, 0] (X)</td>
+                <td class="py-2 font-sans font-bold text-amber-500">肘部自旋 (Roll)</td>
+                <td class="py-2 font-sans font-bold text-amber-500">★ 坐标在肘部 (大臂转)</td>
+                <td class="py-2">[-360°, 360°]</td>
+                <td class="py-2 font-bold text-emerald-400">0.0°</td>
+              </tr>
+              <tr class="bg-amber-500/10">
+                <td class="py-2 font-bold text-amber-500">LHand_Link4</td>
+                <td class="py-2">[0, 1, 0] (Y)</td>
+                <td class="py-2 font-sans font-bold text-amber-500">肘部屈伸 (Pitch)</td>
+                <td class="py-2 font-sans font-bold text-amber-500">★ 肘锚点 E_JOINT (弯肘)</td>
+                <td class="py-2 font-bold text-amber-500">[-120°, 40°]</td>
+                <td class="py-2 font-bold text-emerald-400">-40.0°</td>
+              </tr>
+              <tr>
+                <td class="py-2 font-bold text-purple-400">LHand_Link5</td>
+                <td class="py-2">[1, 0, 0] (X)</td>
+                <td class="py-2 font-sans font-semibold text-purple-400">腕部横滚 (Roll)</td>
+                <td class="py-2 font-sans text-[var(--muted-foreground)]">小臂自旋</td>
+                <td class="py-2">[-360°, 360°]</td>
+                <td class="py-2 font-bold text-emerald-400">0.0°</td>
+              </tr>
+              <tr class="bg-purple-500/5">
+                <td class="py-2 font-bold text-purple-400">LHand_Link6</td>
+                <td class="py-2">[0, 1, 0] (Y)</td>
+                <td class="py-2 font-sans font-bold text-purple-400">腕部俯仰 (Pitch)</td>
+                <td class="py-2 font-sans font-bold text-purple-400">★ 腕锚点 W_JOINT</td>
+                <td class="py-2 font-bold text-amber-500">[60°, 120°]</td>
+                <td class="py-2 font-bold text-emerald-400">90.0°</td>
+              </tr>
+              <tr>
+                <td class="py-2 font-bold text-purple-400">LHand_Link7</td>
+                <td class="py-2">[0, 0, 1] (Z)</td>
+                <td class="py-2 font-sans font-semibold text-purple-400">腕部偏航 (Yaw)</td>
+                <td class="py-2 font-sans text-[var(--muted-foreground)]">手腕侧摆</td>
+                <td class="py-2">[-30°, 30°]</td>
+                <td class="py-2 font-bold text-emerald-400">0.0°</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- 视图 3：全工作空间实测运行报告 -->
+    <div id="view-live" class="hidden space-y-4">
+      <div class="bg-[var(--background)] rounded-xl border border-[var(--border)] p-4 overflow-x-auto">
+        <div class="text-xs text-[var(--muted-foreground)] mb-3 flex justify-between">
+          <span>基于严格生产硬件限位实测解算（全部一次收敛 SUCCESS）</span>
+          <span class="text-emerald-400 font-bold">Pinocchio DLS + 零空间导轨</span>
+        </div>
+        <table class="w-full text-xs text-left">
+          <thead>
+            <tr class="border-b border-[var(--border)] text-[var(--muted-foreground)]">
+              <th class="pb-2">工况名称</th>
+              <th class="pb-2">状态</th>
+              <th class="pb-2">臂角 ψ</th>
+              <th class="pb-2">偏离量 φ</th>
+              <th class="pb-2">肘部屈伸 Link4 (限位[-120,40])</th>
+              <th class="pb-2">腕部俯仰 Link6 (限位[60,120])</th>
+              <th class="pb-2">耗时</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-[var(--border)] font-mono">
+            <tr>
+              <td class="py-2 font-sans font-medium">Ready 就绪位姿</td>
+              <td class="py-2 text-emerald-400 font-bold">SUCCESS</td>
+              <td class="py-2">-180.00°</td>
+              <td class="py-2 text-emerald-400">+0.00°</td>
+              <td class="py-2">-40.0°</td>
+              <td class="py-2">90.0°</td>
+              <td class="py-2">7.7 ms</td>
+            </tr>
+            <tr>
+              <td class="py-2 font-sans font-medium">前伸 5cm</td>
+              <td class="py-2 text-emerald-400 font-bold">SUCCESS</td>
+              <td class="py-2">-179.67°</td>
+              <td class="py-2 text-emerald-400">+0.33°</td>
+              <td class="py-2">-34.9°</td>
+              <td class="py-2">86.1°</td>
+              <td class="py-2">9.7 ms</td>
+            </tr>
+            <tr>
+              <td class="py-2 font-sans font-medium">前伸 10cm</td>
+              <td class="py-2 text-emerald-400 font-bold">SUCCESS</td>
+              <td class="py-2">-178.35°</td>
+              <td class="py-2 text-emerald-400">+1.65°</td>
+              <td class="py-2">-17.5°</td>
+              <td class="py-2">72.1°</td>
+              <td class="py-2">8.1 ms</td>
+            </tr>
+            <tr>
+              <td class="py-2 font-sans font-medium">前伸 15cm + 下压 5cm</td>
+              <td class="py-2 text-emerald-400 font-bold">SUCCESS</td>
+              <td class="py-2">-178.43°</td>
+              <td class="py-2 text-emerald-400">+1.57°</td>
+              <td class="py-2">-27.0°</td>
+              <td class="py-2">73.6°</td>
+              <td class="py-2">3.9 ms</td>
+            </tr>
+            <tr>
+              <td class="py-2 font-sans font-medium">横向外展 10cm</td>
+              <td class="py-2 text-emerald-400 font-bold">SUCCESS</td>
+              <td class="py-2">-178.65°</td>
+              <td class="py-2 text-emerald-400">+1.35°</td>
+              <td class="py-2">-44.5°</td>
+              <td class="py-2">94.2°</td>
+              <td class="py-2">2.1 ms</td>
+            </tr>
+            <tr>
+              <td class="py-2 font-sans font-medium">抬高 10cm</td>
+              <td class="py-2 text-emerald-400 font-bold">SUCCESS</td>
+              <td class="py-2">177.95°</td>
+              <td class="py-2 text-emerald-400">-2.05°</td>
+              <td class="py-2">-11.1°</td>
+              <td class="py-2">80.2°</td>
+              <td class="py-2">14.2 ms</td>
+            </tr>
+            <tr>
+              <td class="py-2 font-sans font-medium">下压 10cm</td>
+              <td class="py-2 text-emerald-400 font-bold">SUCCESS</td>
+              <td class="py-2">-180.00°</td>
+              <td class="py-2 text-emerald-400">+0.00°</td>
+              <td class="py-2">-64.5°</td>
+              <td class="py-2">101.3°</td>
+              <td class="py-2">4.5 ms</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const psiReady = -180.0;
+    const wNom = 50.0;
+    
+    // 肩关节在 SVG 画布上的绝对坐标 S(-110, 20)
+    const Sx = -110, Sy = 20;
+    const W_base_x = 90, W_base_y = 20;
+
+    // 真实生产机器人各工况三维位姿数据
+    const CASES = {
+      'ready': {
+        name: 'Ready 就绪姿态',
+        badge: '就绪基准态 (0,0,0)',
+        W_3d: [0.4536, -0.0619, 1.5174],
+        tcp_3d: [0.6261, -0.1615, 1.5000],
+        dist_sw: 0.8942,
+        psi: -180.0,
+        elbow_pitch: -40.0,
+        wrist_pitch: 90.0,
+        cost: 0.0,
+      },
+      'fwd10': {
+        name: '前伸 10cm',
+        badge: '向前大拉伸 (X+10cm)',
+        W_3d: [0.5508, -0.0671, 1.5173],
+        tcp_3d: [0.7261, -0.1615, 1.4999],
+        dist_sw: 0.9393,
+        psi: -178.35,
+        elbow_pitch: -17.5,
+        wrist_pitch: 72.1,
+        cost: 0.0414,
+      },
+      'reach': {
+        name: '前伸 15cm + 下压 5cm',
+        badge: '极限前探 (X+15, Z-5)',
+        W_3d: [0.5998, -0.0693, 1.4673],
+        tcp_3d: [0.7761, -0.1615, 1.4500],
+        dist_sw: 0.9244,
+        psi: -178.43,
+        elbow_pitch: -27.0,
+        wrist_pitch: 73.6,
+        cost: 0.0374,
+      },
+      'up': {
+        name: '向上抬高 10cm',
+        badge: '向上抬升 (Z+10cm)',
+        W_3d: [0.4553, -0.0591, 1.6174],
+        tcp_3d: [0.6262, -0.1615, 1.6000],
+        dist_sw: 0.9457,
+        psi: 177.95,
+        elbow_pitch: -11.1,
+        wrist_pitch: 80.2,
+        cost: 0.0640,
+      },
+      'down': {
+        name: '向下压低 10cm',
+        badge: '向下压低收紧 (Z-10cm)',
+        W_3d: [0.4536, -0.0619, 1.4174],
+        tcp_3d: [0.6261, -0.1615, 1.4000],
+        dist_sw: 0.8075,
+        psi: -180.0,
+        elbow_pitch: -64.5,
+        wrist_pitch: 101.3,
+        cost: 0.0,
+      },
+      'side': {
+        name: '横向外展 10cm',
+        badge: '侧向横移 (Y+10cm)',
+        W_3d: [0.4497, 0.0304, 1.5173],
+        tcp_3d: [0.6261, -0.0615, 1.5000],
+        dist_sw: 0.8810,
+        psi: -178.65,
+        elbow_pitch: -44.5,
+        wrist_pitch: 94.2,
+        cost: 0.0276,
+      }
+    };
+
+    let activeCaseId = 'ready';
+
+    function switchTab(tab) {
+      const tabs = ['sew', 'chain', 'live'];
+      tabs.forEach(t => {
+        const view = document.getElementById(`view-${t}`);
+        const btn = document.getElementById(`tab-btn-${t}`);
+        if (t === tab) {
+          view.classList.remove('hidden');
+          btn.className = "px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all bg-[var(--card)] text-[var(--foreground)] shadow-sm";
+        } else {
+          view.classList.add('hidden');
+          btn.className = "px-3 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all text-[var(--muted-foreground)] hover:text-[var(--foreground)]";
+        }
+      });
+    }
+
+    function selectCase(cid) {
+      activeCaseId = cid;
+      const c = CASES[cid];
+      
+      // 更新按钮高亮状态
+      Object.keys(CASES).forEach(k => {
+        const btn = document.getElementById(`btn-case-${k}`);
+        if (btn) {
+          if (k === cid) {
+            btn.className = "p-2.5 rounded-xl border border-emerald-500/50 bg-emerald-500/20 text-left transition-all ring-1 ring-emerald-500/30";
+          } else {
+            btn.className = "p-2.5 rounded-xl border border-[var(--border)] bg-[var(--background)] hover:bg-[var(--card)] text-left transition-all";
+          }
+        }
+      });
+
+      document.getElementById('case-badge').innerText = c.badge;
+      document.getElementById('psi-slider').value = c.psi;
+
+      renderScene(c.psi);
+    }
+
+    function onSliderChange(val) {
+      renderScene(parseFloat(val));
+    }
+
+    function renderScene(deg) {
+      document.getElementById('slider-psi-val').innerText = deg.toFixed(1) + '°';
+      const c = CASES[activeCaseId];
+      const W0 = CASES['ready'].W_3d;
+
+      // 1. 根据真实工况三维坐标位移，计算手腕 W 在 SVG 屏幕上的实际动态投影位置 (wx, wy)
+      const dx = c.W_3d[0] - W0[0];
+      const dy = c.W_3d[1] - W0[1];
+      const dz = c.W_3d[2] - W0[2];
+
+      // 前向 X 映射为向右平移，高度 Z 映射为向上抬升（屏幕 Y 减小），侧向 Y 提供微斜视角
+      const wx = W_base_x + dx * 240 + dy * 80;
+      const wy = W_base_y - dz * 240;
+
+      // TCP 末端随 W 平行平移延展
+      const tcpx = wx + 24;
+      const tcpy = wy;
+
+      // 2. 根据 S(-110, 20) 与 动态 W(wx, wy)，重算 SW 轴中心参考点 C(cx, cy)
+      const cx = (Sx + wx) / 2.0;
+      const cy = (Sy + wy) / 2.0;
+
+      // 3. 更新 SW 连线与特征节点
+      const lineSW = document.getElementById('line-sw');
+      lineSW.setAttribute('x1', Sx);
+      lineSW.setAttribute('y1', Sy);
+      lineSW.setAttribute('x2', wx);
+      lineSW.setAttribute('y2', wy);
+
+      const nodeW = document.getElementById('node-wrist');
+      nodeW.setAttribute('cx', wx);
+      nodeW.setAttribute('cy', wy);
+
+      const labelW = document.getElementById('label-wrist');
+      labelW.setAttribute('x', wx + 12);
+      labelW.setAttribute('y', wy + 4);
+
+      const nodeTCP = document.getElementById('node-tcp');
+      nodeTCP.setAttribute('cx', tcpx);
+      nodeTCP.setAttribute('cy', tcpy);
+
+      const labelTCP = document.getElementById('label-tcp');
+      labelTCP.setAttribute('x', tcpx + 10);
+      labelTCP.setAttribute('y', tcpy + 4);
+
+      const linkTCP = document.getElementById('link-tcp');
+      linkTCP.setAttribute('x1', wx);
+      linkTCP.setAttribute('y1', wy);
+      linkTCP.setAttribute('x2', tcpx);
+      linkTCP.setAttribute('y2', tcpy);
+
+      // 更新中心点 C
+      const nodeC = document.getElementById('node-c');
+      nodeC.setAttribute('cx', cx);
+      nodeC.setAttribute('cy', cy);
+
+      const labelC = document.getElementById('label-c');
+      labelC.setAttribute('x', cx + 6);
+      labelC.setAttribute('y', cy + 8);
+
+      // 4. 自适应更新椭圆轨道与参考线 V_ref
+      const rx = 45, ry = 85;
+      const orbitEllipse = document.getElementById('orbit-ellipse');
+      orbitEllipse.setAttribute('cx', cx);
+      orbitEllipse.setAttribute('cy', cy);
+
+      const orbitText = document.getElementById('orbit-text');
+      orbitText.setAttribute('x', cx);
+      orbitText.setAttribute('y', cy + ry + 20);
+
+      const lineVref = document.getElementById('line-vref');
+      lineVref.setAttribute('x1', cx);
+      lineVref.setAttribute('y1', cy);
+      lineVref.setAttribute('x2', cx);
+      lineVref.setAttribute('y2', cy - 75);
+
+      const labelVref = document.getElementById('label-vref');
+      labelVref.setAttribute('x', cx + 8);
+      labelVref.setAttribute('y', cy - 65);
+
+      // 5. 计算肘部 E 屏幕坐标 E(ex, ey)
+      const rad = (deg * Math.PI) / 180.0;
+      const ex = cx + rx * Math.sin(rad);
+      const ey = cy - ry * Math.cos(rad);
+
+      const nodeElbow = document.getElementById('node-elbow');
+      nodeElbow.setAttribute('cx', ex);
+      nodeElbow.setAttribute('cy', ey);
+
+      const nodeText = document.getElementById('node-elbow-text');
+      nodeText.setAttribute('x', ex);
+      nodeText.setAttribute('y', ey + (ey > cy ? 22 : -14));
+
+      // 6. 更新上臂 SE、前臂 EW 与 臂三角形
+      const linkSE = document.getElementById('link-se');
+      linkSE.setAttribute('x1', Sx);
+      linkSE.setAttribute('y1', Sy);
+      linkSE.setAttribute('x2', ex);
+      linkSE.setAttribute('y2', ey);
+
+      const linkEW = document.getElementById('link-ew');
+      linkEW.setAttribute('x1', ex);
+      linkEW.setAttribute('y1', ey);
+      linkEW.setAttribute('x2', wx);
+      linkEW.setAttribute('y2', wy);
+
+      const armTriangle = document.getElementById('arm-triangle');
+      armTriangle.setAttribute('points', `${Sx},${Sy} ${ex},${ey} ${wx},${wy}`);
+
+      // 7. 【CE 连线】：中心 C 严格连接到肘部 E
+      const vecElbow = document.getElementById('vec-elbow');
+      vecElbow.setAttribute('x1', cx);
+      vecElbow.setAttribute('y1', cy);
+      vecElbow.setAttribute('x2', ex);
+      vecElbow.setAttribute('y2', ey);
+
+      // 8. 【透视圆弧】：保证 100% 严格贴合 CE 连线
+      const kArc = 0.45;
+      const arc_rx = kArc * rx;
+      const arc_ry = kArc * ry;
+      const arcEx = cx + arc_rx * Math.sin(rad);
+      const arcEy = cy - arc_ry * Math.cos(rad);
+      const largeArc = Math.abs(deg) > 180 ? 1 : 0;
+      const sweep = deg >= 0 ? 1 : 0;
+
+      const psiArc = document.getElementById('psi-arc');
+      const psiSector = document.getElementById('psi-sector');
+      const arcDot = document.getElementById('arc-end-dot');
+
+      if (Math.abs(deg) < 0.1) {
+        psiArc.setAttribute('d', 'M 0 0');
+        psiSector.setAttribute('d', 'M 0 0');
+        if (arcDot) arcDot.setAttribute('opacity', '0');
+      } else {
+        const dArc = `M ${cx} ${cy - arc_ry} A ${arc_rx} ${arc_ry} 0 ${largeArc} ${sweep} ${arcEx} ${arcEy}`;
+        const dSec = `M ${cx} ${cy} L ${cx} ${cy - arc_ry} A ${arc_rx} ${arc_ry} 0 ${largeArc} ${sweep} ${arcEx} ${arcEy} Z`;
+        psiArc.setAttribute('d', dArc);
+        psiSector.setAttribute('d', dSec);
+        if (arcDot) {
+          arcDot.setAttribute('opacity', '1');
+          arcDot.setAttribute('cx', arcEx);
+          arcDot.setAttribute('cy', arcEy);
+        }
+      }
+
+      // 9. 臂角数值标签
+      const psiLabel = document.getElementById('psi-label');
+      const midRad = rad * 0.55;
+      const lx = cx + (arc_rx + 16) * Math.sin(midRad);
+      const ly = cy - (arc_ry + 16) * Math.cos(midRad);
+      psiLabel.setAttribute('x', lx + (lx >= cx ? 4 : -35));
+      psiLabel.setAttribute('y', ly);
+      psiLabel.textContent = `ψ = ${deg.toFixed(1)}°`;
+
+      // 10. 更新数据卡片信息
+      let diffDeg = deg - psiReady;
+      while (diffDeg > 180) diffDeg -= 360;
+      while (diffDeg < -180) diffDeg += 360;
+      const phiRad = (diffDeg * Math.PI) / 180.0;
+      const cost = wNom * phiRad * phiRad;
+
+      document.getElementById('coord-w').innerText = `[${c.W_3d[0].toFixed(3)}, ${c.W_3d[1].toFixed(3)}, ${c.W_3d[2].toFixed(3)}]`;
+      document.getElementById('coord-tcp').innerText = `[${c.tcp_3d[0].toFixed(3)}, ${c.tcp_3d[1].toFixed(3)}, ${c.tcp_3d[2].toFixed(3)}]`;
+      document.getElementById('dist-sw').innerText = `${c.dist_sw.toFixed(4)} m (伸展比 ${Math.round(c.dist_sw/1.05*100)}%)`;
+      document.getElementById('angle-elbow').innerText = `${c.elbow_pitch.toFixed(1)}° (限位[-120°, 40°])`;
+      document.getElementById('info-phi-cost').innerText = `φ = ${diffDeg >= 0 ? '+' : ''}${diffDeg.toFixed(2)}° | Cost = ${cost.toFixed(4)}`;
+
+      // 颜色动态响应
+      if (Math.abs(diffDeg) > 40) {
+        nodeElbow.setAttribute('fill', '#ef4444');
+        psiLabel.setAttribute('fill', '#ef4444');
+        vecElbow.setAttribute('stroke', '#ef4444');
+        psiArc.setAttribute('stroke', '#ef4444');
+        if (arcDot) arcDot.setAttribute('fill', '#ef4444');
+      } else {
+        nodeElbow.setAttribute('fill', '#f59e0b');
+        psiLabel.setAttribute('fill', '#10b981');
+        vecElbow.setAttribute('stroke', '#f59e0b');
+        psiArc.setAttribute('stroke', '#f59e0b');
+        if (arcDot) arcDot.setAttribute('fill', '#f59e0b');
+      }
+    }
+
+    // 初始化渲染
+    selectCase('ready');
+  </script>
+</body>
+</html>
