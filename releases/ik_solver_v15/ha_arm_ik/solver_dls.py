@@ -32,7 +32,7 @@
   迭代核心    _SecondaryObjective、_sns_clamped_core、_metric_svd_step、_make_task_terms / dls_task_terms、
               pinocchio_ik_one_seed
   种子        make_scatter_seeds、build_seed_library / seed_library_target / select_library_seeds
-2πk 分支对齐 / 去重直接用 ik_common 的 select_closest_bounded_branch、bounded_joint_difference、joint_difference。
+2πk 分支对齐 / 去重直接用 ik_base 的 select_closest_bounded_branch、bounded_joint_difference、joint_difference。
 测试专用的旧入口（整函数形式的次任务梯度与 SNS 步）在 tests/dls_compat.py。版本演进见 README_v14.md 与 README_v15.md。
 """
 
@@ -70,8 +70,8 @@ from ha_arm_ik.ik_base import (
 # =============================================================================
 PIN_IK_MAX_ITER = 500
 PIN_IK_DAMPING = 1e-6
-PIN_IK_POS_TOL = 5e-4             # DLS 内部位姿容差上限；solver.py 实际取 min(本值, ik_common.POS_TOL)
-PIN_IK_ORI_TOL = 5e-4             # 同上，实际取 min(本值, ik_common.ORI_TOL)
+PIN_IK_POS_TOL = 5e-4             # DLS 内部位姿容差上限；实际取 min(本值, ik_base.POS_TOL)
+PIN_IK_ORI_TOL = 5e-4             # 同上，实际取 min(本值, ik_base.ORI_TOL)
 PIN_IK_MAX_STEP = 0.5             # 单次迭代关节步长 2-范数上限（弧度）
 PIN_IK_STALL_ITERS = 12           # 停滞检测窗口：位姿未达标时每 12 次迭代检查一次进展（v6 为 25）
 PIN_IK_STALL_RTOL = 0.025         # 窗口内主任务误差范数相对下降 < 2.5% -> 判定停滞，换下一个种子
@@ -144,7 +144,7 @@ SEED_LIBRARY_RNG_SEED = 13        # 采样随机数种子（与求解用的 RNG_
 
 
 # =============================================================================
-# 基础数值校验与数据结构（2πk 分支对齐 / 去重用 ik_common 的 select_closest_bounded_branch、
+# 基础数值校验与数据结构（2πk 分支对齐 / 去重用 ik_base 的 select_closest_bounded_branch、
 # bounded_joint_difference、joint_difference）
 # =============================================================================
 def finite_vector(value, size=None, name="vector"):

@@ -14,9 +14,7 @@
 模块分层（上层只调用下层）
   solver        本文件：配置解析与校验、搜索阶段编排、候选硬约束过滤与择优、strict 负荷保护流程
   solver_dls    数值核心：单种子 DLS/SNS 迭代、静态负荷模型、腰部舒适窗推导、任务空间种子库
-  ik_candidate  候选打分 score_candidate、择优 select_best_candidate、结果类型 IKResult / Status
-  ik_common     几何、限位、2πk 分支对齐等纯函数
-  robot_model   URDF 解析、SerialChain 正运动学、ARM_CONFIGS / WAIST_JOINT_NAMES
+  ik_base       基础模型：SerialChain、候选打分 score_candidate、几何变换与 IKResult / Status
 
 一次 solve 的数据流
   solve()                      加锁；strict：冻结关节快照 -> 负荷上下文（q 模板 + 确认的容许力矩）-> 截止时间
@@ -29,7 +27,7 @@
                                -> strict 最终复核 + 快照新鲜度 -> 近似回退 -> 失败码（_classify_empty_pool）
 
 候选约束分层（与 solver_dls 文件头一致）
-  硬约束  H1 位姿达标（ik_common.POS_TOL / ORI_TOL；full / tool_dir / tool_cone）
+  硬约束  H1 位姿达标（ik_base.POS_TOL / ORI_TOL；full / tool_dir / tool_cone）
           H2 有效限位 = URDF ∩ position_bounds ∩ dls_virtual_half_windows（迭代中由 SNS 钳制保证）
           H3 静态负荷：守护关节 |τ_g| / 容许力矩 <= 1（strict）
           H4 不绕大圈：单关节相对 q_prev 的转动量 <= max_joint_jump_rad（joint_jump_policy）
@@ -218,29 +216,27 @@ MAX_JOINT_JUMP_RAD = np.pi  # 默认“绕大圈”阈值：单关节相对 q_pr
 # v7：q_prev 的解已合格且腰部偏离 q_ready 不超过该值（rad，逐关节最大值）时跳过锁腰种子；None = v6 顺序
 LOCKED_SEED_SKIP_TOL = 0.02
 JOINT_JUMP_POLICIES = ("reject", "prefer")
-# v9：续算（目标相对 FK(q_prev) 的主任务误差在 continuation_tol 以内，即路点跟踪）时先跑续算阶段，
-# 只用与 q_prev 连续的候选（见 collect_pinocchio_candidates_and_seeds）。原因：ik_candidate 的
-# W_WAIST_RETURN（2000）远大于 W_SMOOTH（8），逐帧在全部种子里择优会在“锁腰（腰回 q_ready）”与“随动”
-# 两个分支间来回切换，造成 0.8~2.5 rad 的单步跳变；设了 max_joint_jump_rad 时切换点的跳变超限，
-# q_prev 不再更新，后续路点全部失败。False = v8 行为。
+# 续算（目标相对 FK(q_prev) 的主任务误差在 continuation_tol 以内，即路点跟踪）时先跑局部续算阶段，
+# 只用与 q_prev 连续的候选（见 collect_pinocchio_candidates_and_seeds）。
+# 原因：ik_base (score_candidate) 的 W_WAIST_RETURN（2000）远大于 W_SMOOTH（8），若逐帧在全域种子里择优，
+# 会在“锁腰（腰回 q_ready）”与“随动”两分支间剧烈切换，造成 0.8~2.5 rad 的跳变；设跳变上限时导致连续路点拒解。
 CONTINUATION_LOCAL = True
-# v9：续算阶段的单关节步长上限（rad，相对 q_prev，与 joint_jump_metrics 同一度量）：随动续算的搜索
+# 续算阶段的单关节步长上限（rad，相对 q_prev，与 joint_jump_metrics 同一度量）：随动续算的搜索
 # 范围是 q_prev ± 该值；步长更大的候选（典型：q_prev 腰部远离 q_ready 时的锁腰解）不算局部解。
-# 取值依据（bench/v9，真实 ik_candidate）：0.1~0.2 普通跟踪逐帧步长 <= 0.020、腰部不漂；0.3 时随动解
-# 在负荷容差带边界与锁腰解来回切换（单步 0.198，与 v8 相同）；0.1 时腰部斜坡跟踪在框边上反复切换
-# （单步均值 0.081，0.15 时 0.034）；腰部大幅跟踪单步上限即该值，0.15 无回退。
+# 取值依据（路点连续跟踪实测）：0.1~0.2 普通跟踪逐帧步长 <= 0.020、腰部不漂；0.3 时随动解
+# 在负荷容差带边界与锁腰解来回切换；0.1 时腰部斜坡跟踪在框边反复切换；0.15 rad 为平稳无抖动的最优单步上限。
 CONTINUATION_MAX_STEP = 0.15
-# v15：续算阶段不做达标后的姿态整理（DLS posture_settle=False：位姿达标、负荷合格且离限位 >= SAFE_MARGIN 的
-# 第一个迭代点即返回），q_prev 本身已是可接受解时原样返回、不再跑锁腰续算。v14 在续算框内照常整理：目标不动、
-# q_prev 已是解时每次调用关节仍变 0.10~0.15 rad，伺服循环里等于机器人自己在动。回中只来自收敛过程中的
-# 零空间步，与手的移动量成正比（与双臂 continuation 相同）。True = v14 行为（等价回放用）。
+# 续算阶段默认不做达标后的零空间姿态整理（DLS posture_settle=False：位姿达标、负荷合格且离限位 >= SAFE_MARGIN 的
+# 第一个迭代点即返回），且 q_prev 本身已是可接受解时原样返回（静止死区保持），不再跑锁腰续算。
+# 若在续算框内照常整理：目标不动时每次调用关节仍可能漂移 0.10~0.15 rad，导致伺服循环中机器人自发蠕动。
+# 回中只来自收敛过程中的零空间步，与末端实际移动量成正比（与双臂 continuation 相同保持对称）。
 CONTINUATION_POSTURE_SETTLE = False
-# v9：续算阶段 DLS 单步（2-范数）上限 = 该比例 × CONTINUATION_MAX_STEP：从框中心出发的首步不会越出续算框
-# （越框会被 SNS 钳制、线搜索停滞）
+# 续算阶段 DLS 单步（2-范数）上限 = 该比例 × CONTINUATION_MAX_STEP：保证从框中心出发的首步不会越出续算框
+# （越框会被 SNS 钳制、导致线搜索停滞）
 CONTINUATION_DLS_STEP_FRACTION = 0.5
-# v13：舒适阶段提前回退（dls_waist_comfort_early_fallback，默认 True）：q_prev / 锁腰 / q_ready / 种子库种子
-# 都跑完仍没有可接受候选（满足全部硬约束）时结束舒适阶段、回退到有效限位（目标需要舒适窗外的腰部时，
-# v12 要在窗内白跑满 max_seeds 个种子）。没有种子库时检查点放在第 WAIST_COMFORT_PATIENCE 个名额之后。
+# 舒适阶段提前回退（dls_waist_comfort_early_fallback，默认 True）：q_prev / 锁腰 / q_ready / 种子库种子
+# 都跑完仍没有可接受候选（满足全部硬约束）时提前结束舒适阶段、回退到有效限位（避免目标需要舒适窗外腰部时在窗内徒劳耗光配额）。
+# 没有种子库时检查点放在第 WAIST_COMFORT_PATIENCE 个名额之后。
 WAIST_COMFORT_EARLY_FALLBACK = True
 WAIST_COMFORT_PATIENCE = 4
 LIBRARY_PENDING = "library_pending"   # 搜索队列中的种子库占位（排到时展开，见 collect_pinocchio_candidates_and_seeds）
@@ -2420,8 +2416,8 @@ class HAArmIKSolver:
                 )
         self.locked_seed_skip_tol = skip_tol
 
-        # v9：q_ready 处臂角无定义（肘部伸直 / S->W 与参考方向平行 / S、E、W 关节名不在链上）时
-        # psi_ready = NaN：ik_candidate 的臂角项不参与打分（其余代价照算），并给出可见告警
+        # q_ready 处臂角无定义（肘部伸直 / S->W 与参考方向平行 / S、E、W 关节名不在链上）时
+        # psi_ready = NaN：ik_base (score_candidate) 的臂角项不参与打分（其余代价照算），并给出可见告警
         self.psi_ready_error = None
         try:
             self.psi_ready = float(self.chain.psi(self.q_ready))
@@ -3112,7 +3108,7 @@ class HAArmIKSolver:
                 "load_context": self._load_context,
                 "deadline": self._load_deadline,
                 "characteristic_length": self.dls_characteristic_length,
-                # v8：DLS 内部达标判据不宽于最终复核（ik_common.POS_TOL / ORI_TOL）
+                # DLS 内部达标判据不宽于最终复核（ik_base.POS_TOL / ORI_TOL）
                 "pos_tol": min(PIN_IK_POS_TOL, POS_TOL),
                 "ori_tol": min(PIN_IK_ORI_TOL, ORI_TOL),
             }

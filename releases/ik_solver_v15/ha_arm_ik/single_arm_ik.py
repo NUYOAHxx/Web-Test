@@ -3,20 +3,39 @@
 
 """ha_arm_ik.single_arm_ik —— 腰 2 + 臂 7（9 维 / 7 维）单臂逆运动学高内聚求解器。
 
-本文件整合了单臂数值逆运动学求解器的全部算法逻辑、数学模型与面向对象接口，
+本文件整合了单臂数值逆运动学求解器的全部算法逻辑、物理模型与面向对象接口，
 与双臂逆运动学模块 (dual_arm_ik.py) 共同构成标准统一的机械臂逆运动学套件。
 
-十层分层架构（由底层至高层，单向依赖）：
-  [1] 模块元数据与统一依赖导入 (Module Metadata & Unified Imports)
-  [2] 统一配置超参数与策略常量 (Unified Configuration & Global Constants)
-  [3] 核心数据结构与门控策略模型 (Core Data Structures: JointStateSnapshot, LoadPolicy)
-  [4] 几何变换、配置校验与工具函数 (Geometry & Config Helpers: validate_transform 等)
-  [5] Pinocchio 关节映射、元数据审计与限位窗口 (Pinocchio Mappings & Effective Bounds)
-  [6] 物理场、重力矩计算与静态载荷上下文 (Physics, Gravity Torque & Load Context)
-  [7] 任务空间种子库与腰部舒适窗推导 (Task-Space Seed Library & Waist Comfort Bounds)
-  [8] 数值 DLS/SNS 单种子迭代核心 (Numerical DLS/SNS Engine: _SecondaryObjective, _sns_clamped_core)
-  [9] 备用与历史求解算法 (Legacy Solvers: DirectPsiProblem & SSIK 兼容包装)
-  [10] 多阶段候选解流水线与 SingleArmIKSolver / HAArmIKSolver 主类 (Multi-Stage Pipeline & Unified OOP Solver)
+逆运动学求解约束分层体系：
+  【硬约束 (Hard Constraints)】不满足即拒解（非解）
+    H1 末端位姿容差：位置误差 <= POS_TOL (5e-4 m)，姿态误差 <= ORI_TOL (5e-4 rad)。
+       支持三种姿态模式：full (SE3 6D本体误差)、tool_dir (位置+工具轴方向)、tool_cone (位置+锥角)。
+    H2 关节极限保护：URDF 物理限位 ∩ 可选虚拟搜索窗。数值迭代由 SNS (饱和零空间) 钳制保证步内永不越界。
+    H3 静态载荷保护 (strict 模式)：所有守护关节静态重力矩绝对值与容许力矩之比 |tau_g| / allowable <= 1.0。
+    H4 关节跳变限幅 (joint_jump_policy)：相对 q_prev 的单关节最大转动增量 <= max_joint_jump_rad。
+
+  【偏好配置 (Preferences)】
+    P1 腰部舒适窗 (Waist Comfort Bounds)：自适应推导躯干重力偏航与俯仰舒适区间，优先在舒适窗内搜索；
+       窗内无可接受解时平滑回退到全局有效限位重试。
+
+  【软目标与择优准则 (Soft Objectives & Pareto Selection)】
+    S1 载荷峰值最小化：在满足硬约束的候选解中，按最高负载关节比例分档（带 peak_tie 容差带）。
+    S2 次任务代价综合择优：在同档候选解中，综合评估 q_ref 回中代价、关节限位安全裕度、
+       整机水平质心 (CoM) 投影偏移，以及电机静态重力矩代价。
+
+五阶段多候选解搜索流水线 (collect_pinocchio_candidates_and_seeds)：
+  1. continuation（续算阶段）：目标在 FK(q_prev) 邻域内时触发，包含局部随动（q_prev ± max_step）与就近锁腰（q_ready）两路优先探测，且不做达标后姿态整理；静止目标原样返回（零漂移）；
+  2. comfort（舒适窗搜索）：在有效限位与腰部舒适窗交集内搜索，种子顺序：q_prev -> 锁腰 -> q_ready -> 种子库 -> 扰动；
+  3. full（全局有效限位）：舒适窗内无合格解时的保底放开阶段（未启用舒适窗时为主要搜索阶段）；
+  4. jump_box（跳变框救援）：当仅因单关节跳变超限而失败时，在 q_prev ± max_joint_jump_rad 内高密度重搜；
+  5. unboxed（放开跳变重搜）：跳变框内无解且上限小于 pi 时，取消跳变限制重搜一次以确认是否有全局可行解。
+
+单种子数值迭代引擎 (pinocchio_ik_one_seed)：
+  1. 任务项装配 (_make_task_terms)：构建 6D/4D/3D 位姿残差 e 与解析几何雅可比 J；
+  2. 逆度量 D（对角阵）：手臂关节 = 1.0；腰部关节按“肩->目标距离 / 臂展”无状态平滑释放（去返程完全对称）；
+  3. 零空间次任务 (_SecondaryObjective)：计算物理回中、限位排斥、重力矩卸载与质心稳定的复合代价 H(q) 与负梯度 z；
+  4. SNS 主动集限位钳制 (_sns_clamped_core)：主动集越界关节边界投影与正交信赖域截断，保证 ||dq|| <= max_step；
+  5. 回溯线搜索与停滞逃逸：自适应步长阻尼线搜索、180° 对径奇异点逃逸与收敛判定。
 """
 
 from collections import deque
@@ -148,14 +167,14 @@ __all__ = [
 SOLVER_VERSION = "merged-v15"   # 写入 last_load_diagnostics["version"]
 
 # =============================================================================
-# 2. 统一配置超参数与策略常量 (Unified Configuration & Global Constants)
+# 2. 全局超参数与策略常量 (Global Hyperparameters & Policy Constants)
 # =============================================================================
 
-# --- 2.1 Pinocchio DLS 基础数值与收敛容差参数 (来源于 solver_dls.py) ---
+# --- 2.1 Pinocchio DLS 基础数值与收敛容差参数 ---
 PIN_IK_MAX_ITER = 500
 PIN_IK_DAMPING = 1e-6
-PIN_IK_POS_TOL = 5e-4             # DLS 内部位姿容差上限；solver.py 实际取 min(本值, ik_common.POS_TOL)
-PIN_IK_ORI_TOL = 5e-4             # 同上，实际取 min(本值, ik_common.ORI_TOL)
+PIN_IK_POS_TOL = 5e-4             # DLS 内部位姿容差上限；实际取 min(本值, ik_base.POS_TOL)
+PIN_IK_ORI_TOL = 5e-4             # 同上，实际取 min(本值, ik_base.ORI_TOL)
 PIN_IK_MAX_STEP = 0.5             # 单次迭代关节步长 2-范数上限（弧度）
 PIN_IK_STALL_ITERS = 12           # 停滞检测窗口：位姿未达标时每 12 次迭代检查一次进展（v6 为 25）
 PIN_IK_STALL_RTOL = 0.025         # 窗口内主任务误差范数相对下降 < 2.5% -> 判定停滞，换下一个种子
@@ -168,11 +187,7 @@ N_NOISE_PER_BASE = 16
 # max_seeds=10 时扰动种子几乎与 q_prev 重合，远目标成功率 97% -> v6 100%（合成基准 100 例）。
 NOISE_SCALES = [0.60, 0.30, 0.15, 0.05]
 
-# =============================================================================
-# 2. 零空间防漂移与流形稳态收敛参数
-
-# --- 2.2 零空间防漂移与流形稳态收敛参数 ---
-# =============================================================================
+# --- 2.2 零空间次任务与流形稳态收敛参数 ---
 NULLSPACE_GAIN = 0.30             # 手臂冗余关节拉向 q_ref 物理坐标的次任务增益
 WAIST_NULL_GAIN = 0.50            # 腰部关节拉向 q_ref 腰部角（默认 q_ready）的次任务增益
 NULLSPACE_ERR_SCALE = 0.06        # 零空间权重 = (达标 1.5 / 未达标 1.0) / (1 + (|e| / 0.06)^2)，
@@ -189,11 +204,7 @@ NO_SETTLE_NULL_STEP_RATIO = 2.0   # v15：posture_settle=False（续算）时未
                                   # 移动量成正比；不限幅时 1 mm 的目标移动也会让关节在收敛过程中变 0.1 rad
 LOAD_EARLY_STOP_RATIO = 0.70      # 低负荷早停阈值默认值，实际取 min(本值, soft_ratio)（v6 默认 0.60）
 
-# =============================================================================
-# 3. 无状态腰部自适应释放参数（路径无关，去返程完全对称）
-
-# --- 2.3 无状态腰部自适应释放参数（去返程完全对称） ---
-# =============================================================================
+# --- 2.3 无状态腰部自适应释放参数（路径无关，去返程完全对称） ---
 # 逆度量 D 的腰部对角元 = (1-α)/WAIST_TASK_WEIGHT + α/WAIST_TASK_WEIGHT_FAR（手臂 = 1），
 # α 为释放系数（0 = 近目标，1 = 远目标或负荷释放）。D 越小，腰部单位步长在 DLS 中越“贵”。
 WAIST_TASK_WEIGHT = 6.0           # 近目标：腰部步长代价为手臂的 6 倍（D = 1/6，不是锁死）
@@ -202,22 +213,14 @@ WAIST_RELEASE_START = 0.75        # 肩->目标距离 / 最大臂展 达到此�
 WAIST_RELEASE_END = 0.94          # 达到此比例腰完全释放
 WAIST_RETURN_RELEASE_RAD = 0.20   # 返程解锁尺度(rad)：腰偏离 q_ref 时保持释放通道以便退回
 
-# =============================================================================
-# 4. 电机重力矩卸载、重心稳定与限位保护参数
-
 # --- 2.4 电机重力矩卸载、重心稳定与限位保护参数 ---
-# =============================================================================
 GRAVITY_TORQUE_GAIN = 0.04        # 默认绝对归一化重力矩卸载增益
 RELATIVE_GRAVITY_GAIN = 0.0       # 可选的相对参考姿态重力矩保持增益
 COM_XY_GAIN = 0.12                # 零空间整机质心(CoM)水平投影稳定增益（代价 0.5 * 0.12 * |Δc|^2，Δc 单位 m）
 JOINT_LIMIT_GAIN = 0.03           # 限位排斥增益；排斥区宽度 = max(SAFE_MARGIN, 0.02) rad
 WAIST_YAW_VIRTUAL_LIM = np.deg2rad(90.0)   # v8：重力无关腰关节（偏航类）的舒适半窗，见 derive_waist_comfort_bounds
 
-# =============================================================================
-# 5. 腰部舒适窗（v8，详见 derive_waist_comfort_bounds）
-
 # --- 2.5 腰部舒适窗自适应参数 ---
-# =============================================================================
 WAIST_COMFORT_SOFT_RATIO = 0.70   # 未配置 load_soft_ratio 时的默认值（与 LoadPolicy.soft_ratio 默认一致）
 WAIST_COMFORT_MAX_HALF = 0.5 * np.pi       # 任何腰关节的舒适半窗不超过 90°（躯干最多转四分之一圈）
 WAIST_GRAVITY_FREE_COS = math.cos(math.radians(30.0))  # 关节轴与重力夹角 < 30° 视为重力无关（偏航类）
@@ -225,21 +228,14 @@ WAIST_COMFORT_EDGE_SEEDS = 1      # 舒适窗内无合格解时，取窗内主�
 WAIST_COMFORT_CONTINUATION_STEP = 0.10   # 续算判据：目标相对 FK(q_prev) 位置差 <= 0.1 × 臂展且姿态差 <= 0.1 rad
                                          # （约 0.1 rad 关节运动，雅可比线性化仍有效）时不加舒适窗
 
-# =============================================================================
-
-# --- 2.6 任务空间种子库参数 ---
-# v13：任务空间种子库（最近邻种子）
-# =============================================================================
+# --- 2.6 任务空间种子库与最近邻检索参数 ---
 SEED_LIBRARY_SIZE = 16384         # 初始化时在有效限位内均匀采样的关节角个数（建库约 150 ms、2.8 MB）；0 = 关闭
 SEED_LIBRARY_SEEDS = 3            # 每个常规搜索阶段插入的种子库种子个数（排在 q_prev / 锁腰 / q_ready 之后）
 SEED_LIBRARY_MIN_SEPARATION = 0.5 # 入选种子之间、与本阶段已排队种子之间的关节差 ∞-范数下限（rad）
 SEED_LIBRARY_POOL = 64            # 按任务空间距离预选的候选个数（再按关节差去重）
 SEED_LIBRARY_RNG_SEED = 13        # 采样随机数种子（与求解用的 RNG_SEED 无关，库内容可复现）
 
-
-# =============================================================================
-
-# --- 2.7 全局物理环境与主求解器配置 (来源于 solver.py) ---
+# --- 2.7 全局物理环境与主求解器配置 ---
 G_WORLD = np.array([0.0, 0.0, -9.81], dtype=float)
 
 # ---------------- direct-psi solve config ----------------
@@ -273,39 +269,36 @@ MAX_JOINT_JUMP_RAD = np.pi  # 默认“绕大圈”阈值：单关节相对 q_pr
 # v7：q_prev 的解已合格且腰部偏离 q_ready 不超过该值（rad，逐关节最大值）时跳过锁腰种子；None = v6 顺序
 LOCKED_SEED_SKIP_TOL = 0.02
 JOINT_JUMP_POLICIES = ("reject", "prefer")
-# v9：续算（目标相对 FK(q_prev) 的主任务误差在 continuation_tol 以内，即路点跟踪）时先跑续算阶段，
-# 只用与 q_prev 连续的候选（见 collect_pinocchio_candidates_and_seeds）。原因：ik_candidate 的
-# W_WAIST_RETURN（2000）远大于 W_SMOOTH（8），逐帧在全部种子里择优会在“锁腰（腰回 q_ready）”与“随动”
-# 两个分支间来回切换，造成 0.8~2.5 rad 的单步跳变；设了 max_joint_jump_rad 时切换点的跳变超限，
-# q_prev 不再更新，后续路点全部失败。False = v8 行为。
+# 续算（目标相对 FK(q_prev) 的主任务误差在 continuation_tol 以内，即路点跟踪）时先跑局部续算阶段，
+# 只用与 q_prev 连续的候选（见 collect_pinocchio_candidates_and_seeds）。
+# 原因：ik_base (score_candidate) 的 W_WAIST_RETURN（2000）远大于 W_SMOOTH（8），若逐帧在全域种子里择优，
+# 会在“锁腰（腰回 q_ready）”与“随动”两分支间剧烈切换，造成 0.8~2.5 rad 的跳变；设跳变上限时导致连续路点拒解。
 CONTINUATION_LOCAL = True
-# v9：续算阶段的单关节步长上限（rad，相对 q_prev，与 joint_jump_metrics 同一度量）：随动续算的搜索
+# 续算阶段的单关节步长上限（rad，相对 q_prev，与 joint_jump_metrics 同一度量）：随动续算的搜索
 # 范围是 q_prev ± 该值；步长更大的候选（典型：q_prev 腰部远离 q_ready 时的锁腰解）不算局部解。
-# 取值依据（bench/v9，真实 ik_candidate）：0.1~0.2 普通跟踪逐帧步长 <= 0.020、腰部不漂；0.3 时随动解
-# 在负荷容差带边界与锁腰解来回切换（单步 0.198，与 v8 相同）；0.1 时腰部斜坡跟踪在框边上反复切换
-# （单步均值 0.081，0.15 时 0.034）；腰部大幅跟踪单步上限即该值，0.15 无回退。
+# 取值依据（路点连续跟踪实测）：0.1~0.2 普通跟踪逐帧步长 <= 0.020、腰部不漂；0.3 时随动解
+# 在负荷容差带边界与锁腰解来回切换；0.1 时腰部斜坡跟踪在框边反复切换；0.15 rad 为平稳无抖动的最优单步上限。
 CONTINUATION_MAX_STEP = 0.15
-# v15：续算阶段不做达标后的姿态整理（DLS posture_settle=False：位姿达标、负荷合格且离限位 >= SAFE_MARGIN 的
-# 第一个迭代点即返回），q_prev 本身已是可接受解时原样返回、不再跑锁腰续算。v14 在续算框内照常整理：目标不动、
-# q_prev 已是解时每次调用关节仍变 0.10~0.15 rad，伺服循环里等于机器人自己在动。回中只来自收敛过程中的
-# 零空间步，与手的移动量成正比（与双臂 continuation 相同）。True = v14 行为（等价回放用）。
+# 续算阶段默认不做达标后的零空间姿态整理（DLS posture_settle=False：位姿达标、负荷合格且离限位 >= SAFE_MARGIN 的
+# 第一个迭代点即返回），且 q_prev 本身已是可接受解时原样返回（静止死区保持），不再跑锁腰续算。
+# 若在续算框内照常整理：目标不动时每次调用关节仍可能漂移 0.10~0.15 rad，导致伺服循环中机器人自发蠕动。
+# 回中只来自收敛过程中的零空间步，与末端实际移动量成正比（与双臂 continuation 相同保持对称）。
 CONTINUATION_POSTURE_SETTLE = False
-# v9：续算阶段 DLS 单步（2-范数）上限 = 该比例 × CONTINUATION_MAX_STEP：从框中心出发的首步不会越出续算框
-# （越框会被 SNS 钳制、线搜索停滞）
+# 续算阶段 DLS 单步（2-范数）上限 = 该比例 × CONTINUATION_MAX_STEP：保证从框中心出发的首步不会越出续算框
+# （越框会被 SNS 钳制、导致线搜索停滞）
 CONTINUATION_DLS_STEP_FRACTION = 0.5
-# v13：舒适阶段提前回退（dls_waist_comfort_early_fallback，默认 True）：q_prev / 锁腰 / q_ready / 种子库种子
-# 都跑完仍没有可接受候选（满足全部硬约束）时结束舒适阶段、回退到有效限位（目标需要舒适窗外的腰部时，
-# v12 要在窗内白跑满 max_seeds 个种子）。没有种子库时检查点放在第 WAIST_COMFORT_PATIENCE 个名额之后。
+# 舒适阶段提前回退（dls_waist_comfort_early_fallback，默认 True）：q_prev / 锁腰 / q_ready / 种子库种子
+# 都跑完仍没有可接受候选（满足全部硬约束）时提前结束舒适阶段、回退到有效限位（避免目标需要舒适窗外腰部时在窗内徒劳耗光配额）。
+# 没有种子库时检查点放在第 WAIST_COMFORT_PATIENCE 个名额之后。
 WAIST_COMFORT_EARLY_FALLBACK = True
 WAIST_COMFORT_PATIENCE = 4
 LIBRARY_PENDING = "library_pending"   # 搜索队列中的种子库占位（排到时展开，见 collect_pinocchio_candidates_and_seeds）
 COMFORT_CHECKPOINT = "comfort_checkpoint"   # 舒适阶段提前回退的检查点（不占名额）
-# v13：常规搜索只找到“跳变超限”的位姿解（其余硬约束都满足）时，在跳变框 q_prev ± max_joint_jump_rad 内
-# 重搜一次（阶段 "jump_box"）。v9 的跳变框只对 < π 的上限生效，默认 π 时 DLS 不知道跳变上限，
-# 会收敛到要转过半圈以上的解、整批被拒（JOINT_JUMP_LIMIT）。False = v12 行为。
+# 跳变超限救援（dls_jump_limit_rescue）：常规搜索只找到“跳变超限”的位姿解（其余硬约束都满足）时，
+# 在跳变框 q_prev ± max_joint_jump_rad 内重搜一次（阶段 "jump_box"），大幅减少因初猜跨解族而被整体误杀的概率。
 JUMP_LIMIT_RESCUE = True
-# v13：锁腰种子可达性检查（见 locked_arm_reach_bound）：目标超出锁腰时手臂的严格可达范围就跳过锁腰种子
-# （v12 会让它迭代到停滞，平均 37 次迭代）。False = v12 行为。
+# 锁腰种子严格几何可达性检查（见 locked_arm_reach_bound）：目标超出锁腰时手臂的严格可达范围就跳过锁腰种子，
+# 避免无法解出的几何目标徒劳迭代至停滞（平均单次省去 ~37 步无效求逆迭代）。
 LOCKED_REACH_CHECK = True
 # v13：续算类求解（目标就在 FK(q_prev) 附近，即路点跟踪）不排种子库种子。库样本是全局的，收敛到的多是离
 # q_prev 很远的分支；q_prev 附近的解只差限位裕度（NEAR_LIMIT）时，择优会换成这类远处的合格解（跟踪基准、
@@ -547,10 +540,7 @@ class LoadPolicy:
 
 
 # =============================================================================
-# 4. 几何变换、配置校验与工具函数 (Geometry & Configuration Helpers)
-# =============================================================================
-# 基础数值校验与数据结构（2πk 分支对齐 / 去重用 ik_common 的 select_closest_bounded_branch、
-# bounded_joint_difference、joint_difference）
+# 4. 几何变换、数据校验与辅助工具函数 (Geometry & Config Helpers)
 # =============================================================================
 def finite_vector(value, size=None, name="vector"):
     result = np.asarray(value, dtype=float)
@@ -662,12 +652,10 @@ def json_safe(value):
 
 
 # =============================================================================
-# 5. Pinocchio 关节映射、元数据审计与限位窗口 (Pinocchio Mappings & Bounds)
+# 5. Pinocchio 刚体动力学模型与关节映射 (Pinocchio Model, Mappings & Effective Bounds)
 # =============================================================================
 
-# =============================================================================
-# Pinocchio helpers
-# =============================================================================
+# --- 5.1 模型加载与连杆帧查询 ---
 def require_pinocchio():
     if pin is None:
         raise RuntimeError(
@@ -704,9 +692,7 @@ def get_pinocchio_frame_id(model, frame_name):
     return model.getFrameId(frame_name)
 
 
-# =============================================================================
-# Pinocchio 映射与模型物理审计
-# =============================================================================
+# --- 5.2 标量关节映射与广义坐标转换 ---
 def build_pinocchio_joint_maps(model, active_joint_names):
     """建立标量关节映射（含 continuous nq=2/nv=1 关节）。"""
     all_specs = {}
@@ -930,9 +916,7 @@ def estimate_arm_max_reach(pin_model, pin_maps, ee_frame_id, shoulder_joint=None
 
 
 
-# =============================================================================
-# Pinocchio DLS candidate orchestration
-# =============================================================================
+# --- 5.3 臂展几何估计、虚拟限位与模型元数据审计 ---
 def locked_arm_reach_bound(pin_model, pin_maps, ee_frame_id):
     """v13：(手臂首关节编号, 首关节原点 -> TCP 距离的严格上界)；腰部以外第一个活动关节为手臂首关节。
 
@@ -1203,9 +1187,10 @@ def configure_model_metadata(
 
 
 # =============================================================================
-# 6. 物理场、重力矩计算与静态载荷上下文 (Physics, Gravity & Load Context)
+# 6. 物理场、重力矩计算与静态载荷上下文 (Physics, Gravity Torque & Load Context)
 # =============================================================================
 
+# --- 6.1 整机质心 (CoM) 与静态载荷上下文构建 ---
 def model_com_with_jacobian(model, data, q_full, *, active_v=None, derivatives=True):
     """整机质心（URDF 根坐标系）及其对活跃关节的雅可比，含固定在根上的质量。
 
@@ -1433,9 +1418,7 @@ def load_physics(model, data, pin_maps, q_active, context, derivatives=False):
     )
     return result
 
-# =============================================================================
-# Torque cost helpers (Pinocchio)
-# =============================================================================
+# --- 6.2 关节静态重力矩计算与载荷指标评定 ---
 def gravity_torque_for_active_q(
     pin_model,
     pin_data,
@@ -1539,9 +1522,10 @@ def add_torque_metrics_to_candidates(
 
 
 # =============================================================================
-# 7. 任务空间种子库与腰部舒适窗推导 (Seed Management & Comfort Bounds)
+# 7. 任务空间种子库与腰部舒适窗自适应 (Task-Space Seed Library & Waist Comfort)
 # =============================================================================
 
+# --- 7.1 腰部舒适窗自适应推导 (Waist Comfort Bounds) ---
 def _comfort_edge(ok, limit, step=1e-3):
     """从 δ = 0（满足）沿正方向找 ok(δ) 首次不满足的边界，至多到 limit；返回 (边界, 是否被判据截断)。"""
     grid = np.arange(step, limit + 0.5 * step, step)
@@ -1706,6 +1690,7 @@ def derive_waist_comfort_bounds(
 
 
 
+# --- 7.2 任务空间种子库与分散采样 (Seed Library & Scatter Seeds) ---
 def make_scatter_seeds(q_prev, q_ready, lower, upper, rng, *, max_count=None):
     """生成种子序列：q_prev（就近、连续性最好）-> q_ready（标准姿态）-> 两者附近的扰动 -> 限位中点。
 
@@ -1920,9 +1905,10 @@ def select_library_seeds(
 
 
 # =============================================================================
-# 8. 数值 DLS/SNS 单种子迭代核心 (Numerical DLS/SNS Iteration Core)
+# 8. 数值 DLS/SNS 单种子迭代核心 (Numerical DLS/SNS Iteration Engine)
 # =============================================================================
 
+# --- 8.1 零空间次任务求值器 (_SecondaryObjective) ---
 class _SecondaryObjective:
     """零空间次任务 H(q) 与负梯度 z = -dH/dq 的求值器：每个种子构造一次，迭代内复用。
 
@@ -2307,6 +2293,7 @@ class _SecondaryObjective:
         return (z if self.movable_all else z * self.movable_f), cost
 
 
+# --- 8.2 饱和零空间 (SNS) 主动集步长求解核 ---
 def _metric_svd_step(J, error, z, D, damping, rank_rtol=1e-9):
     """基于加权度量 SVD 的主任务阻尼步长与精确数值度量零空间下降步。"""
     J = np.asarray(J, dtype=float)
@@ -2713,6 +2700,7 @@ def _sns_clamped_core_reference(
     return dq_total, dq_null_out, clamped_converged
 
 
+# --- 8.3 主任务项装配与解析雅可比构建 (dls_task_terms) ---
 def _antipodal_tangent(a, motion=None):
     """180° 对径死点（a 与目标方向相反、叉积为零）时选取切向，返回垂直于 a 的单位向量。
 
@@ -2893,6 +2881,7 @@ def dls_task_terms(
     return terms(q_active, jacobian=jacobian, all_frames=True, need_A=True)
 
 
+# --- 8.4 单种子全流程 DLS/SNS 迭代求解器 (pinocchio_ik_one_seed) ---
 def pinocchio_ik_one_seed(
     pin_model,
     pin_data,
@@ -3528,9 +3517,7 @@ def pinocchio_ik_one_seed(
 # 9. 备用与历史求解算法 (Legacy Solvers: Direct-Psi & SSIK)
 # =============================================================================
 
-# =============================================================================
-# Analytical Jacobian direct-psi IK
-# =============================================================================
+# --- 9.1 解析雅可比与臂角参数化求解器 (Direct-Psi) ---
 def geometric_jacobian(chain, q, fk_result=None):
     if fk_result is None:
         fk_result = chain.fk_all(q)
@@ -4199,9 +4186,7 @@ def solve_direct_psi(
     return results
 
 
-# =============================================================================
-# Seeds / SSIK
-# =============================================================================
+# --- 9.2 SSIK 求解器适配与候选解提取 (SSIK Adapter) ---
 def make_direct_local_seeds(q_prev, q_ready, lower, upper, rng):
     seeds = []
 
@@ -4334,9 +4319,10 @@ def collect_ssik_candidates_and_seeds(
 
 
 # =============================================================================
-# 10. 多阶段候选解流水线与 HAArmIKSolver 主类 (Multi-Stage Pipeline & Unified OOP Solver)
+# 10. 多阶段候选解流水线与 SingleArmIKSolver / HAArmIKSolver 主类
 # =============================================================================
 
+# --- 10.1 多阶段候选解收集流水线 (collect_pinocchio_candidates_and_seeds) ---
 def collect_pinocchio_candidates_and_seeds(
     pin_model,
     pin_data,
@@ -5151,9 +5137,21 @@ def collect_pinocchio_candidates_and_seeds(
 
 
 # =============================================================================
-# Standalone solver class
+# 10.2 面向对象求解器主类 (HAArmIKSolver / SingleArmIKSolver)
 # =============================================================================
 class HAArmIKSolver:
+    """腰 2 + 臂 7（9 维 / 7 维）单臂高内聚逆运动学主求解器。
+
+    集成 Pinocchio 刚体动力学、多阶段多种子流水线与 strict 模式静态载荷保护。
+
+    核心能力与设计契约：
+      1. 自由度支持：include_waist=True（腰 2 + 臂 7 共 9 维），include_waist=False（臂 7 维）；
+      2. 并发安全机制：内置 _solve_lock 互斥锁，保护底层共享的 C++ Pinocchio::Data 内存结构；
+      3. 静态载荷保护：strict 模式强制要求不可变 JointStateSnapshot 与实测标定容许力矩；
+      4. 统一接口契约：solve() 返回 (q 或 None, Status, IKResult)，与 DualArmIKSolver 保持对称体系。
+    """
+
+    # ----- 10.2.1 实例生命周期与模型初始化 (Lifecycle & Initialization) -----
     def __init__(
         self,
         urdf,
@@ -5462,8 +5460,8 @@ class HAArmIKSolver:
                 )
         self.locked_seed_skip_tol = skip_tol
 
-        # v9：q_ready 处臂角无定义（肘部伸直 / S->W 与参考方向平行 / S、E、W 关节名不在链上）时
-        # psi_ready = NaN：ik_candidate 的臂角项不参与打分（其余代价照算），并给出可见告警
+        # q_ready 处臂角无定义（肘部伸直 / S->W 与参考方向平行 / S、E、W 关节名不在链上）时
+        # psi_ready = NaN：ik_base (score_candidate) 的臂角项不参与打分（其余代价照算），并给出可见告警
         self.psi_ready_error = None
         try:
             self.psi_ready = float(self.chain.psi(self.q_ready))
@@ -5577,6 +5575,7 @@ class HAArmIKSolver:
         if self.verbose:
             self.print_info()
 
+    # ----- 10.2.2 任务空间种子库与腰部舒适窗配置 (Seed Library & Waist Comfort) -----
     def _shared_seed_library(self):
         """v13：建种子库；同一模型（URDF 内容、活动关节、末端帧、有效限位、q_ready、舒适窗、库大小）的实例共享。"""
         comfort = (
@@ -5675,6 +5674,7 @@ class HAArmIKSolver:
         if np.any(lo > self.search_lower) or np.any(hi < self.search_upper):
             self.waist_comfort_lower, self.waist_comfort_upper = lo, hi
 
+    # ----- 10.2.3 关节跳变策略与周期性处理 (Jump Policies & Periodic Masks) -----
     def _resolve_joint_jump_limits(self, value):
         """解析 max_joint_jump_rad：None = 不限；正标量 = 所有关节同一上限；
         {关节名: rad 或 None} = 逐关节设置，未列出的关节取默认 MAX_JOINT_JUMP_RAD（π）。"""
@@ -5770,6 +5770,7 @@ class HAArmIKSolver:
             "No candidate passed bounds and confirmed static-load gates",
         )
 
+    # ----- 10.2.4 模型物理审计与静态载荷评定 (Model Physics & Static Load) -----
     def _check_model(self):
         if self.pin_maps is not None:
             missing = [
@@ -5900,6 +5901,7 @@ class HAArmIKSolver:
         )
         print("")
 
+    # ----- 10.2.5 坐标系变换与工作空间绝对几何预检 (Workspace Diagnostics) -----
     def target_to_local(self, T_target, frame="local"):
         if self._solve_T_root_base is not None:
             T = validate_transform(T_target)
@@ -6095,6 +6097,7 @@ class HAArmIKSolver:
 
         return info["ok"], info
 
+    # ----- 10.2.6 多阶段候选解收集、筛选与终验 (Portfolio Collection & Filtering) -----
     def _collect_portfolio(
         self,
         T_target_local,
@@ -6154,7 +6157,7 @@ class HAArmIKSolver:
                 "load_context": self._load_context,
                 "deadline": self._load_deadline,
                 "characteristic_length": self.dls_characteristic_length,
-                # v8：DLS 内部达标判据不宽于最终复核（ik_common.POS_TOL / ORI_TOL）
+                # DLS 内部达标判据不宽于最终复核（ik_base.POS_TOL / ORI_TOL）
                 "pos_tol": min(PIN_IK_POS_TOL, POS_TOL),
                 "ori_tol": min(PIN_IK_ORI_TOL, ORI_TOL),
             }
@@ -6577,6 +6580,7 @@ class HAArmIKSolver:
                 and np.all(q <= self.waist_comfort_upper + 1e-9)
             )
 
+    # ----- 10.2.7 逆运动学主求解调度流水线 (Main Solve Pipeline) -----
     def _solve_impl(
         self,
         T_target,
@@ -7145,7 +7149,7 @@ class HAArmIKSolver:
                 self.joint_efforts_active = self.pin_maps["effort_limits"].copy()
             self._solve_lock.release()
 
-    # ---------------- 面向对象高内聚扩展接口 (Unified OOP Methods) ----------------
+    # ----- 10.2.8 面向对象高内聚公共扩展接口 (Unified OOP Methods) -----
     def pinocchio_ik_one_seed(
         self,
         target_T,
