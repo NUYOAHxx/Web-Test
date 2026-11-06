@@ -1,0 +1,99 @@
+在你的 ha_arm_ik 求解器（目前 last_load_diagnostics["collision_check"] 标记为 "NOT_PERFORMED"）中引入避障功能，核心在于处理好“自碰撞（双臂互撞、手臂撞躯干）”与“环境碰撞（擦拭时肘部/前臂撞平台边缘）”，同时守住你现有的 0.3～0.8 ms 毫秒级实时性能。
+结合你当前的代码架构（Pinocchio DLS + _SecondaryObjective 零空间次任务 + 多种子候选池筛选）以及正在推进的 MoveIt / cuMotion 联调，下面从技术方案对比、在代码中的嵌入方式、以及必然遇到的五大工程问题与解法为你做完整梳理。
+一、四种主流 IK 避障技术方案对比
+| 技术方案 | 核心原理 | 在 ha_arm_ik 中的嵌入位置 | 单次耗时增加 | 优缺点与适用阶段 |
+|---|---|---|---|---|
+| 1. 几何基元（球/胶囊体）+ 零空间斥力 + 候选硬过滤
+(最推荐优先落地) | 用球序列（Sphere）或胶囊体（Capsule）包络双臂与躯干，台面用平面/包围盒表示；线段距离与梯度有闭式解析解 | ① solver_dls._SecondaryObjective 加碰撞势场梯度
+② solver._filter_load_candidates 与 dual_arm_ik._candidate 加最小距离硬门控 | 极低
+（+0.05～0.15 ms，纯 NumPy 向量化即可） | 优点：无需额外 C++ 库、梯度平滑、速度极快，与 cuMotion 球包络思想完全一致
+缺点：需为连杆配置胶囊体/球半径参数 |
+| 2. Pinocchio + HPP-FCL 精确网格/凸包碰撞检测 | 加载 URDF 的 <collision> 网格，调用 pin.computeCollisions 判交或 pin.computeDistances 算最近点雅可比 | 在 HAArmIKSolver.__init__ 构建 GeometryModel；仅在种子收敛后的候选复核阶段调用 | 中等
+（仅复核候选 +0.2～0.8 ms；若每步迭代都调则 +5～20 ms） | 优点：直接复用 URDF 碰撞模型，精度高
+缺点：网格最近点在迭代中易跳变，不适合放进每步 DLS 内部循环 |
+| 3. 速度阻尼器（Velocity Damper）+ QP 硬约束 IK | 将距离约束写成一阶微分不等式 J_d \Delta q \ge -\xi (d - d_{\text{stop}})，每步用微型二次规划（QP）求解 \Delta q | 替换 solver_dls._sns_clamped_core 与 dual_arm_ik 的阻尼最小二乘步计算 | 较高
+（每种子 +2～8 ms，依赖 OSQP / ProxQP） | 优点：避障优先级高于零空间，接近障碍物时绝对不穿透
+缺点：耗时翻倍，破坏当前无第三方求解器依赖的轻量架构 |
+| 4. 外部回调过滤 + 多样性候选池输出
+(联调快捷方案) | solve() 接受外部 collision_checker(q) -> bool 回调，或一次性返回 Top-K 个不同分支的候选解交由 MoveIt/cuMotion 复核 | 在 solver._filter_load_candidates 中调用外部传入的 MoveIt PlanningScene 或 cuMotion SDF 校验函数 | 取决于外部校验器（通常 +0.5～2 ms） | 优点：改动最小（约 20 行代码），直接复用 MoveIt 现有环境障碍物
+缺点：只能“淘汰碰撞解”，无法在迭代中主动把肘部推离障碍物 |
+二、最契合你当前代码架构的落地路径（两级混合避障）
+针对你的单臂（solver.py / solver_dls.py）和双臂（dual_arm_ik.py）架构，最理想的工程方案是“方案 1（迭代内胶囊体/球零空间排斥）+ 方案 4（候选池硬门控过滤）”的组合：
+ * 第一级：DLS 迭代内的零空间排斥势场（主动推开肘部与双臂）
+   * 几何建模：为前臂、大臂、手腕定义 6～8 个关键包络球（局部坐标固定在对应连杆帧上，你在 pin.forwardKinematics 后直接由 pin_data.oMi[jid] 算出球心世界坐标 p_i(q)），前方擦拭平台简化为带边界的平面或长方体 SDF。
+   * 平滑斥力代价（直接复用你代码里的 _smoothstep）：设定安全影响阈值 d_{\text{safe}}（如 8 cm）与硬极限 d_{\text{min}}（如 2 cm）。当距离 d < d_{\text{safe}} 时，在 _SecondaryObjective.__call__ 中叠加碰撞代价：
+     
+   * 作用效果：当机器人在擦拭台面时，如果肘部过低逼近台面边缘，或者双臂协同作业时左右手肘部靠得太近，零空间梯度 z 会自然地通过改变臂角（\psi）把肘部往上抬或往外拨，而不影响手部末端的擦拭精度。
+ * 第二级：候选池硬门控拦截（兜底安全红线）
+   * 在 solver._filter_load_candidates（单臂）与 dual_arm_ik._candidate（双臂）中，检验收敛解 q 的最小净空距离 d_{\min}(q) \ge d_{\text{margin}}（同时支持传入外部 collision_fn(q) 回调）。
+   * 若某个种子收敛到了穿过桌面或左右手交叉相撞的姿态，直接从候选池剔除，自动采用种子库（4096 样本）中另一个无碰撞同伦分支的解，并将 last_load_diagnostics["collision_check"] 更新为 "PASSED" 或失败码 "COLLISION_REJECTED"。
+三、在 IK 中做避障必然遇到的 5 个典型问题与应对策略
+1. 局部极小值死锁（障碍物挡在种子与目标之间）
+ * 问题现象：单一种子在迭代时，主任务拉着手往目标走，障碍物斥力把手臂往回推，两者抵消导致 DLS 停滞（触发 STALLED_NO_PROGRESS）。
+ * 应对策略：直接发挥你已有的 4096 样本离线种子库（Seed Library）优势。局部势场法最大的弱点就是单起点陷入死点，而你的求解器天然具备多起点（q_prev、q_ready、种子库 Top-K 分散样本、随机扰动）：可以在 select_library_seeds 选种阶段就先用胶囊体距离筛掉初始就严重碰撞的种子，确保不同种子从障碍物不同侧绕行收敛。
+2. 擦拭任务的“合法接触”被误判为“碰撞”
+ * 问题现象：机器人在擦拭前方平台时，抹布/末端工具本来就要贴在台面上（距离为 0）；如果简单地对全身所有连杆开启对台面避障，末端一靠近台面就会被斥力推开或被硬门控拒绝，导致擦拭任务永远无解。
+ * 应对策略：引入碰撞豁免规则（ACM，Allowed Collision Matrix）：
+   * 自碰撞豁免：相邻连杆（父子关节）以及物理结构上不可能相撞的连杆对直接排除，只查“左臂 ↔ 右臂”、“左/右前臂与手腕 ↔ 躯干/腰部”。
+   * 作业接触豁免：将末端工具连杆（ee_link / tcp）与作业目标台面的碰撞检测豁免（或仅限制不能穿透台面法向以下），而对腕部关节、前臂、肘部、大臂严格保持高于台面 3～5 cm 的安全距离。
+3. 零空间优先级低于主任务，极限位置无法阻止碰撞
+ * 问题现象：在你的 _sns_clamped_core 中，零空间步长是投影在主任务零空间 (I - J^+ J) 内的。当机械臂伸展到接近奇异边界（如 1.77 m 极限边界）或目标位姿本身就迫使前臂穿过桌子时，零空间维度坍缩，零空间斥力失效。
+ * 应对策略：
+   * 任务松弛联动：在擦拭场景下开启你已实现的 tool_cone / tool_dir 模式，多释放出 1～2 个冗余自由度给零空间避障使用。
+   * 硬门控兜底：绝不能只靠零空间软代价避障，必须在 _finalize_result 中保留硬碰撞检测门控——一旦零空间没能推开障碍物，硬门控必须拒绝该解并返回明确的 [NO_COLLISION_FREE_SOLUTION] 诊断码，绝不下发撞机指令。
+4. 最近点跳变引起的连续擦拭轨迹抖动（Chattering）
+ * 问题现象：在连续轨迹跟踪（如直线擦拭）中，连杆与台面边缘的“唯一最近点”可能在两个几何顶点之间来回跳变，导致碰撞雅可比方向发生突变，机械臂在擦拭过程中出现高频抖动。
+ * 应对策略：
+   * 多控制点平滑叠加：不要只取连杆上唯一的一个最近点，而是在大臂、肘部、前臂上均匀布置固定球心（Sphere Approximation），所有进入 d < d_{\text{safe}} 的球心同时贡献平滑梯度，消除最近点跳变。
+   * 与 v15 续算防漂移兼容：在连续跟踪模式下，只有当 d < d_{\text{safe}}（确实出现碰撞风险）时才激活避障零空间项；当全身处于安全净空区（d \ge d_{\text{safe}}）时碰撞梯度严格为 0，完全保留你 v15 的 continuation_hold 零漂移特性。
+5. 单步 IK 避障 vs 轨迹规划器（MoveIt / cuMotion）避障的分工问题
+ * 问题现象：即便 IK 求出的终点构型 q_{\text{goal}} 无碰撞，从当前构型 q_{\text{start}} 移动到 q_{\text{goal}} 的中间过程仍可能扫过障碍物。
+ * 应对策略：按工况明确分工：
+   * 小步连续笛卡尔跟踪（如在线平台擦拭、视觉伺服）：相邻两帧间距极小（毫米级），直接在 ha_arm_ik 内开启“球包络零空间斥力 + 跳变盒约束 + 硬碰撞门控”即可保证整条擦拭轨迹实时避障。
+   * 大跨度点到点运动（如从准备姿态伸手到抓取点）：由 ha_arm_ik 结合碰撞门控快速算出无碰撞且低力矩的目标构型 q_{\text{goal}}，再将 (q_{\text{start}}, q_{\text{goal}}) 交给 MoveIt / cuMotion 进行中间路径的全局避障规划。
+如果你接下来打算在代码里实际加上避障模块，我们可以先从“自碰撞（双臂互撞 + 手臂撞躯干）与前方平台高度安全约束的球/胶囊体包络模型”开始，直接集成进你的 solver_dls.py 和 dual_arm_ik.py 中。需要我帮你规划具体的接口设计或写原型代码吗？
+
+
+
+
+
+
+结论先行：只建议在“最终候选解过滤（硬门控）”阶段接入 FCL；千万不要在 DLS 的每步迭代（内层循环）里直接调 MoveIt 的 FCL。
+而且既然你的求解器本身就是基于 Pinocchio 写的，同时你又在联调 MoveIt / cuMotion，这里面有三种完全不同的接入方式，性能和开发难度差距极大：
+一、三种接入方案对比：MoveIt FCL vs Pinocchio 内置 FCL vs 球/胶囊体
+| 对比维度 | 方案 A：调 MoveIt 的 FCL
+(通过 PlanningScene 接口) | 方案 B：用 Pinocchio 自带的 hpp-fcl
+(直接读取 MoveIt 的 URDF + SRDF) | 方案 C：球/胶囊体解析距离
+(cuMotion 同款思路，纯 NumPy/C) |
+|---|---|---|---|
+| 调用链路 | ha_arm_ik → ROS 服务或 moveit_py → PlanningScene → FCL 网格检测 | ha_arm_ik → pin.computeCollisions → C++ hpp-fcl（与 pin_data 同内存） | ha_arm_ik 直接取 pin_data.oMi 连杆坐标算线段/球距离与解析梯度 |
+| 单次检测耗时 | 慢（0.5～5 ms / 次）
+跨语言/跨进程及 RobotState 同步开销大 | 快（0.05～0.2 ms / 次）
+C++ 内部直连，零通信开销 | 极快（< 0.01 ms / 次）
+仅几个三维向量加减乘除 |
+| 能否放进 DLS 每步迭代算梯度？ | 绝对不行：1 个种子迭代 50 步 × 4 个种子 = 200 次调用，耗时直接飙到 100 ms+，且网格最近点跳变会导致严重抖动 | 不建议对精细网格算迭代梯度：STL 网格算最近点（computeDistances）在棱角处梯度不连续，只适合做布尔判交 | 非常适合：距离函数处处光滑可导，零空间梯度丝滑，不破坏 v15 续算防漂移特性 |
+| 能否复用 MoveIt 配置？ | 直接共享 MoveIt 场景中的动态障碍物（如点云 OctoMap、桌面物体） | 可直接加载 MoveIt 的 .srdf 文件（自动继承相邻连杆免检矩阵 ACM） | 需为大臂/前臂/台面配几个球心与半径参数（与 cuMotion 球配置通用） |
+| 最适合承担的角色 | 外层终审（Environment Gate）：对排名前 1～3 的收敛候选解做最终环境避障一票否决 | 内建硬门控（Self & Table Gate）：不依赖 ROS 节点，在求解器内部毫秒级筛除自碰撞与撞桌候选解 | 迭代内主动推开（Nullspace Repulsion）：在擦拭过程中主动抬肘避开台面、推开双臂 |
+二、为什么不能把 MoveIt FCL 直接塞进 DLS 迭代内层？
+ * 实时性会被彻底拖垮：
+   你的单臂求解目前只需 0.3 ms、双臂只需 0.8 ms。这得益于每次求解的几百步矩阵运算都在内存里微秒级完成。如果在每步迭代里去调 MoveIt 的 PlanningScene（哪怕只查一次碰撞），单次 solve() 耗时就会退化几十倍，根本无法用于在线连续擦拭跟踪。
+ * 网格模型的“最近点跳变”会毁掉连续擦拭的平滑度：
+   URDF 里的 <collision> 往往是三角网格（STL/DAE）。当手臂移动时，FCL 算出的“网格上离桌子最近的顶点”会在不同三角形顶点之间跳跃，导致避障雅可比方向一帧一变，反映到关节上就是擦拭走直线时手臂高频抽搐抖动。
+ * 你正在用的 cuMotion 本身也抛弃了 FCL：
+   英伟达开发 cuMotion（Curobo）的核心原因之一就是 MoveIt 的 FCL 无法提供平滑梯度且难以并行加速，因此 cuMotion 全部改用连杆球包络（Collision Spheres）+ 有符号距离场（SDF）。
+三、针对你项目的最佳工程落地方案（两步走）
+结合你目前正在做 MoveIt / cuMotion 仿真联调的现状，最省力且效果最好的做法是“内外分工”：
+第一步：用“候选池回调钩子”接入 MoveIt FCL / Pinocchio FCL（做硬门控，1 天即可跑通）
+不需要改动 DLS 内部迭代逻辑，充分利用你现有的多候选解池（candidates）与 4096 种子库：
+ * 怎么接：
+   * 如果进程内有 MoveIt：在 solve(..., collision_check_fn=...) 中增加一个可选回调函数。当 _collect_portfolio 算出几个达标候选解后，在 _filter_load_candidates（单臂）或 _candidate（双臂）里对达标解调一次 collision_check_fn(q)（内部调 MoveIt 的 planning_scene.isStateValid）。这样一次 solve() 最多只调 1～3 次 MoveIt FCL，耗时仅增加约 0.5 ms，如果第 1 个种子撞了，自动选种子库算出的第 2 个不撞的解。
+   * 如果想让 ha_arm_ik 独立具备 FCL 自碰撞与桌面碰撞检查：直接在 HAArmIKSolver.__init__ 中用 Pinocchio 自带的 FCL 接口加载 MoveIt 配置包里的 .srdf：
+     # Pinocchio 原生集成 hpp-fcl，直接读取 URDF 碰撞体与 MoveIt 的 SRDF 免检表
+geom_model = pin.buildGeomFromUrdf(self.pin_model, str(self.urdf), pin.GeometryType.COLLISION)
+pin.removeCollisionPairs(self.pin_model, geom_model, str(srdf_path))
+geom_data = geom_model.createData()
+
+     在候选解收敛后调一次 pin.computeCollisions(self.pin_model, self.pin_data, geom_model, geom_data, q_full, stop_at_first_collision=True)，发现碰撞立刻剔除（单次仅需 ~0.05 ms）。
+总结建议
+ * 想快速在 MoveIt 仿真里防撞：不要在迭代里调 MoveIt FCL，而是在 ha_arm_ik 的候选解筛选层（_filter_load_candidates）接 Pinocchio 原生 hpp-fcl（读 MoveIt 的 .srdf）或外部 MoveIt isStateValid 回调，一次求解只查收敛的那 1～3 个候选解。
+ * 想让手臂在擦拭平台时主动抬肘避让台面、双臂主动互让：在 DLS 的 _SecondaryObjective 零空间项里，用 3～5 个关键球/胶囊体（肘部、腕部、前臂）对台面平面和另一只手算解析距离梯度，既丝滑不抖动，又能把耗时控制在 0.1 ms 以内。
