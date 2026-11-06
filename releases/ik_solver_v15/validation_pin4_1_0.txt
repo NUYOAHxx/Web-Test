@@ -34,6 +34,14 @@ test_8_solve_engine_preserves_candidate_source (tests.test_audit_fixes.TestAudit
 修复 8：solve_engine 保留实际解来源（如 ssik / direct_psi）。 ... ok
 test_9_urdf_non_world_root_link_mount_detected (tests.test_audit_fixes.TestAuditFixes.test_9_urdf_non_world_root_link_mount_detected)
 修复 9：URDF 根连杆非 world 时（如 pelvis/base），正确解析固定安装关节。 ... ok
+test_chained_class_initialization_and_steer (tests.test_chained_ik.Chained9DofArmAngleSolverTests.test_chained_class_initialization_and_steer)
+测试 Chained9DofArmAngleSolver 类封装并测试不同臂角下的末端一致性。 ... ok
+test_fast_nullspace_steer_standalone (tests.test_chained_ik.Chained9DofArmAngleSolverTests.test_fast_nullspace_steer_standalone)
+测试 fast_nullspace_steer_elbow 独立步进函数的高速高精特性。 ... ok
+test_solve_9dof_tracking_continuous_trajectory (tests.test_chained_ik.Chained9DofArmAngleSolverTests.test_solve_9dof_tracking_continuous_trajectory)
+测试 9 轴一体化解析加权 LM 连续轨迹跟踪模式（100 路点无缝连续，中位耗时 < 1ms）。 ... ok
+test_solve_9dof_with_arm_angle_function (tests.test_chained_ik.Chained9DofArmAngleSolverTests.test_solve_9dof_with_arm_angle_function)
+测试函数接口 solve_9dof_with_arm_angle 能精确指定臂角。 ... ok
 test_close_refuses_inflight_solve (tests.test_contract_flow.LegacyContractTests.test_close_refuses_inflight_solve) ... ok
 test_complete_state_rechecked_during_evaluate_physics (tests.test_contract_flow.LegacyContractTests.test_complete_state_rechecked_during_evaluate_physics) ... ok
 test_context_change_rejects_result (tests.test_contract_flow.LegacyContractTests.test_context_change_rejects_result) ... ok
@@ -302,6 +310,6 @@ S/E/W 兜底名与 ARM_CONFIGS 的 LHand_Link* 命名一致：链未给 s/e/w �
 test_fk_pose_and_joints_missing_joint_raises (tests.test_v9_changes.RobotModelTests.test_fk_pose_and_joints_missing_joint_raises) ... ok
 
 ----------------------------------------------------------------------
-Ran 268 tests in 9.519s
+Ran 272 tests in 7.441s
 
 OK

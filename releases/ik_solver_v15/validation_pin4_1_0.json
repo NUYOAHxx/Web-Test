@@ -3,7 +3,7 @@
   "numpy": "2.5.3",
   "scipy": "1.18.1",
   "pinocchio": "4.1.0",
-  "tests_run": 268,
+  "tests_run": 272,
   "failures": 0,
   "errors": 0,
   "skipped": 0,
