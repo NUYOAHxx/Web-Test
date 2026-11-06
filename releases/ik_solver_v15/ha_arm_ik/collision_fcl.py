@@ -601,3 +601,4 @@ class CollisionAwareIKSolver:
                     best_q = q_cand.copy()
 
         return best_q
+

@@ -152,3 +152,4 @@ python3 -m unittest tests/test_collision_fcl.py
 3. 全身自碰撞极速检测；
 4. 面前 Box 空间穿透与距离连续测距；
 5. 闭环零空间流形主动避障（初态碰撞 -> 翻肘脱困且末端误差 $<0.5\text{mm}$）。
+
