@@ -21,7 +21,8 @@ ha_arm_ik/
 └── docs/                         # 内部技术规范与评测报告目录
     ├── architecture/             # 架构设计规范文档
     │   ├── HA_ARM_IK_CORE_ENGINE_ARCHITECTURE_SPEC.md
-    │   └── CHAINED_9DOF_DIRECT_PSI_ARCHITECTURE_SPEC.md
+    │   ├── CHAINED_9DOF_DIRECT_PSI_ARCHITECTURE_SPEC.md
+    │   └── COLLISION_AVOIDANCE_AND_SECONDARY_TASK_FLOW.md
     └── reports/                  # 性能评测与优化验证报告
         ├── BENCHMARK_REPORT_DIRECT_PSI_VS_BASELINE.md
         └── V15_OPTIMIZATION_REPORT.md
@@ -50,6 +51,8 @@ ha_arm_ik/
    - **内容**：深度剖析 `single_arm_ik.py` 与 `ik_base.py` 内部端到端控制流水线、李代数 $\text{log}_6$ 任务残差、腰部逆度量释放、四合一次任务势场（回中/限位/重力矩/CoM）、SNS 钳制、8 级 Pareto 选解及全局超参数标定表。
 2. **[`CHAINED_9DOF_DIRECT_PSI_ARCHITECTURE_SPEC.md`](docs/architecture/CHAINED_9DOF_DIRECT_PSI_ARCHITECTURE_SPEC.md)**
    - **内容**：详解“阶段一 9 轴宏观定位 + 胸腔坐标系降维桥接 + 阶段二 7 轴 Direct-Psi 微观定肘 + 阶段三整机安全闭环回退”的两阶段级联架构与状态机设计。
+3. **[`COLLISION_AVOIDANCE_AND_SECONDARY_TASK_FLOW.md`](docs/architecture/COLLISION_AVOIDANCE_AND_SECONDARY_TASK_FLOW.md)**
+   - **内容**：沉淀防碰撞整体双模工作流框图、单种子每步迭代的见证点雅可比与 $C^1$ 连续排斥梯度微观计算流，以及内层次任务（`_SecondaryObjective`）与外层候选选解（`score_candidate`）口径对齐方案。
 
 ### 3.2 性能评测与优化报告 (`docs/reports/`)
 1. **[`BENCHMARK_REPORT_DIRECT_PSI_VS_BASELINE.md`](docs/reports/BENCHMARK_REPORT_DIRECT_PSI_VS_BASELINE.md)**

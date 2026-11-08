@@ -1,7 +1,8 @@
 diff --git a/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py b/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
+index c271af0..f2f4e91 100644
 --- a/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
 +++ b/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
-@@ -1968,6 +1968,7 @@ class _SecondaryObjective:
+@@ -1941,6 +1941,7 @@ class _SecondaryObjective:
          load_context=None,
          relative_gravity_gain=0.0,
          posture_use_equivalent_branch=False,
@@ -9,19 +10,18 @@ diff --git a/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py b/releases/ik_sol
      ):
          self.model = pin_model
          self.data = pin_data
-@@ -1982,6 +1983,7 @@ class _SecondaryObjective:
-         self.limit_gain = float(joint_limit_gain)
-         self.margin = max(SAFE_MARGIN, 0.02)
-         self.context = load_context
+@@ -1951,6 +1952,7 @@ class _SecondaryObjective:
+         self.ns_gain = ns_gain
+         self.neg_ns_gain = -ns_gain
+         self.movable = movable_mask
 +        self.collision_manager = collision_manager
-         self.b_low = self.lower + self.margin
-         self.b_high = self.upper - self.margin
-         self.b_low_list = self.b_low.tolist()
+ 
+         # 姿态回中：默认真实编码器坐标差（仅无界 continuous 关节做周期折叠）
+         self.multi_turn = None
 @@ -2180,6 +2182,16 @@ class _SecondaryObjective:
-             if need_z:
                  z += dz
              cost += c_lim
-+
+ 
 +        # 1b. 零空间碰撞排斥次任务项（可选挂载 RobotCollisionManager）
 +        c_col = 0.0
 +        if self.collision_manager is not None:
@@ -31,36 +31,117 @@ diff --git a/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py b/releases/ik_sol
 +            if need_z:
 +                z += z_col
 +            cost += c_col
- 
++
          model, data = self.model, self.data
          if self.context is not None:
-@@ -2282,6 +2294,7 @@ class _SecondaryObjective:
+             # 2a. 严格负荷模式：与 load_physics + LoadPolicy.evaluate/cost_gradient 同序
+@@ -2281,6 +2293,8 @@ class _SecondaryObjective:
          if components is not None:
              components["posture"] = posture
              components["joint_limit"] = c_lim
-+            components["collision"] = c_col
++            if self.collision_manager is not None:
++                components["collision"] = c_col
              components["absolute_load"] = abs_load
              components["excess_load"] = excess_load
              components["relative_load"] = rel_load
-@@ -6886,6 +6899,14 @@ class SingleArmIKSolver:
+@@ -2924,6 +2938,7 @@ def pinocchio_ik_one_seed(
+     shoulder_joint=None,
+     posture_settle=True,
+     margin_bounds=None,
++    collision_manager=None,
+ ):
+     """单种子 DLS IK：主任务为末端位姿，零空间次任务为回中 / 限位裕度 / 负荷 / 质心。
+ 
+@@ -3147,6 +3162,7 @@ def pinocchio_ik_one_seed(
+         load_context=context,
+         relative_gravity_gain=rel_grav_gain,
+         posture_use_equivalent_branch=posture_use_equivalent_branch,
++        collision_manager=collision_manager,
+     )
+     terms = _make_task_terms(
+         pin_model,
+@@ -4398,6 +4414,12 @@ def collect_pinocchio_candidates_and_seeds(
+     """
+     params = dict(dls_params or {})
+     continuation_reach = params.pop("continuation_reach", None)  # 只用于求解类别判据，不传给 DLS
++    sync_secondary_cost = bool(params.pop("sync_secondary_cost", False))
++    w_com = float(params.pop("w_com", 100.0))
++    w_collision = float(params.pop("w_collision", 500.0))
++    if sync_secondary_cost and include_waist and params.get("waist_null_gain") is None:
++        # 对齐内层零空间腰回中增益与外层 W_WAIST_RETURN 偏好，消除内外层腰部回正口径倒挂
++        params["waist_null_gain"] = 2.0
+     q_prev = np.asarray(q_prev, dtype=float)
+     q_ready = np.asarray(q_ready, dtype=float)
+     search = dict(load_search or {})
+@@ -4700,6 +4722,19 @@ def collect_pinocchio_candidates_and_seeds(
+                     tool_cone_half_angle=tool_cone_half_angle,
+                     apply_waist_return=include_waist,
+                 )
++                sec_parts = diag.get("secondary_components") or {}
++                com_cost_val = float(sec_parts.get("com", 0.0))
++                col_cost_val = float(sec_parts.get("collision", 0.0))
++                info["com_cost"] = com_cost_val
++                if "collision" in sec_parts:
++                    info["collision_cost"] = col_cost_val
++                if (
++                    sync_secondary_cost or params.get("collision_manager") is not None
++                ) and np.isfinite(info.get("cost_no_torque", np.inf)):
++                    # 将内层零空间整理的水平质心偏移代价 (com) 与防碰撞排斥代价 (collision) 同步并入外层候选打分
++                    sec_extra = w_com * com_cost_val + w_collision * col_cost_val
++                    info["cost_no_torque"] = float(info["cost_no_torque"] + sec_extra)
++                    info["cost"] = float(info["cost"] + sec_extra)
+                 info.update(
+                     source="pinocchio_ik",
+                     solve_method="pinocchio_damped_ls_ik",
+@@ -5291,6 +5326,13 @@ class HAArmIKSolver:
+         )
+         # 主任务位置误差的特征长度（m）：DLS 与 strict 最终复核同一口径
+         self.dls_characteristic_length = cfg_tune.get("dls_characteristic_length", 0.5)
++        self.collision_manager = cfg_tune.get("collision_manager", None)
++        self.collision_safety_margin = float(cfg_tune.get("collision_safety_margin", 0.02))
++        self.sync_secondary_cost = bool(
++            cfg_tune.get("sync_secondary_cost", self.collision_manager is not None)
++        )
++        self.w_com = float(cfg_tune.get("w_com", 100.0))
++        self.w_collision = float(cfg_tune.get("w_collision", 500.0))
+         self.seed_library = None
+         self.dls_locked_reach = None
+ 
+@@ -6175,6 +6217,12 @@ class HAArmIKSolver:
+                 "ori_tol": min(PIN_IK_ORI_TOL, ORI_TOL),
+             }
+             dls_params["continuation_reach"] = self.dls_arm_max_reach
++            if getattr(self, "collision_manager", None) is not None:
++                dls_params["collision_manager"] = self.collision_manager
++            if getattr(self, "sync_secondary_cost", False):
++                dls_params["sync_secondary_cost"] = True
++                dls_params["w_com"] = getattr(self, "w_com", 100.0)
++                dls_params["w_collision"] = getattr(self, "w_collision", 500.0)
+             if self.include_waist:
+                 dls_params["shoulder_joint"] = self.s_joint
+                 dls_params["waist_max_reach"] = self.dls_waist_max_reach
+@@ -6886,6 +6934,15 @@ class HAArmIKSolver:
              and pos_err <= POS_TOL
              and ori_violation <= ORI_TOL
          )
 +        collision_ok = True
 +        if getattr(self, "collision_manager", None) is not None:
 +            col_rep = self.collision_manager.check_collision(
-+                q, stop_at_first=True, safety_margin=getattr(self, "collision_safety_margin", 0.02)
++                q,
++                stop_at_first=True,
++                safety_margin=getattr(self, "collision_safety_margin", 0.02),
 +            )
 +            collision_ok = not col_rep.is_collision
 +            candidate["collision_ok"] = collision_ok
-+
          cache = self._load_context.get("_physics_cache") if filtering else None
          physical = None if cache is None else cache.get(q_bytes)
          if physical is None:
-@@ -6914,7 +6935,7 @@ class SingleArmIKSolver:
+@@ -6914,7 +6971,7 @@ class HAArmIKSolver:
              load_final_pos_err=pos_err,
              load_final_ori_violation=ori_violation,
          )
 -        return bool(bounds_ok and pose_ok and physical["load_ok"])
 +        return bool(bounds_ok and pose_ok and physical["load_ok"] and collision_ok)
-
+ 
+     def _filter_load_candidates(
+         self,

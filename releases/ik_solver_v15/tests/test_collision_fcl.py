@@ -170,6 +170,37 @@ class CollisionFCLTests(unittest.TestCase):
         # 清理
         self.col_mgr.remove_obstacle("obstacle_box")
 
+    def test_7_native_secondary_task_and_cost_sync(self):
+        """测试将 RobotCollisionManager 原生挂载至 SingleArmIKSolver 时，单种子零空间防碰撞次任务与内外层代价同步。"""
+        from ha_arm_ik.single_arm_ik import SingleArmIKSolver
+        s_uni = SingleArmIKSolver(
+            self.s9.urdf,
+            "left",
+            include_waist=True,
+            verbose=False,
+            config={
+                "load_mode": "off",
+                "dls_seed_library_size": 0,
+                "collision_manager": self.col_mgr,
+                "sync_secondary_cost": True,
+            },
+        )
+        self.col_mgr.add_box_obstacle(
+            name="sync_box",
+            size=[0.18, 0.18, 0.18],
+            position=[0.32, 0.44, 0.85],
+            frame="base",
+        )
+        try:
+            T_target = s_uni.chain.fk(s_uni.q_ready)
+            q_sol, status, res = s_uni.solve(T_target, q_prev=s_uni.q_ready)
+            self.assertIn(status, ("SUCCESS", "NEAR_LIMIT"))
+            self.assertIsNotNone(q_sol)
+            self.assertIn("com_cost", res)
+            self.assertIn("collision_cost", res)
+        finally:
+            self.col_mgr.remove_obstacle("sync_box")
+
 
 if __name__ == "__main__":
     unittest.main()

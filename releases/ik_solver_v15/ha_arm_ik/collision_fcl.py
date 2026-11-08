@@ -820,10 +820,21 @@ class RobotCollisionManager:
                     J2 = self._point_jacobian(gid2, p2, fk_cache)
                     grad_d += J2.T @ u_away_2
 
-                u_pen = (pair_inf - d) / pair_inf
-                boost = 3.0 if d < threshold else 1.0
-                cost_col += 0.5 * repulsion_gain * boost * (u_pen * u_pen)
-                z_col += (repulsion_gain * boost / pair_inf) * u_pen * grad_d
+                # C¹ 连续双层单侧二次排斥势场：
+                #   1. 外层缓冲势垒 (d < pair_inf)：平滑引导连杆远离障碍物影响区；
+                #   2. 内层安全势垒 (d < threshold)：当侵入安全裕度时平滑叠加高刚度排斥项（在 d == threshold 处函数值与导数均连续为 0，无跳变振颤）。
+                u_outer = (pair_inf - d) / pair_inf
+                cost_col += 0.5 * repulsion_gain * (u_outer * u_outer)
+                grad_coeff = (repulsion_gain / pair_inf) * u_outer
+
+                if d < threshold:
+                    scale_inner = max(threshold, 0.01)
+                    u_inner = (threshold - d) / scale_inner
+                    inner_gain = 2.0 * repulsion_gain
+                    cost_col += 0.5 * inner_gain * (u_inner * u_inner)
+                    grad_coeff += (inner_gain / scale_inner) * u_inner
+
+                z_col += grad_coeff * grad_d
 
         report = CollisionReport(
             is_collision=(has_self or has_obs),
