@@ -160,10 +160,12 @@ class CollisionFCLTests(unittest.TestCase):
         rep_safe = self.col_mgr.check_collision(q_safe)
         self.assertFalse(rep_safe.is_collision)
 
-        # 验证末端位姿毫厘不差 (<0.5mm)
+        # 验证末端 6D 位姿毫厘不差（位置 < 0.5mm 且 姿态 < 0.0005 rad / 0.0286°）
+        from ha_arm_ik.ik_base import pose_error
         T_actual = self.s9.chain.fk(q_safe)
-        pos_err = np.linalg.norm(T_actual[:3, 3] - T_target[:3, 3])
-        self.assertLess(pos_err, 5e-4)
+        dp, drot = pose_error(T_actual, T_target)
+        self.assertLess(np.linalg.norm(dp), 5e-4)
+        self.assertLess(np.linalg.norm(drot), 5e-4)
 
         # 清理
         self.col_mgr.remove_obstacle("obstacle_box")

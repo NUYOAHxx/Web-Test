@@ -1,0 +1,55 @@
+diff --git a/releases/ik_solver_v15/ha_arm_ik/ik_base.py b/releases/ik_solver_v15/ha_arm_ik/ik_base.py
+--- a/releases/ik_solver_v15/ha_arm_ik/ik_base.py
++++ b/releases/ik_solver_v15/ha_arm_ik/ik_base.py
+@@ -47,6 +47,8 @@ W_SMOOTH = 8.0
+ W_LIMIT = 10.0
+ W_WAIST_RETURN = 2000.0
+ W_TORQUE = 500.0
++W_MANIP = 15.0
++SIGMA_MIN_SAFE = 0.08
+ 
+ # 姿态控制模式常量
+ ORIENTATION_MODES = ("full", "tool_dir", "tool_cone")
+@@ -1220,6 +1222,22 @@ def joint_limit_penalty(q, lower, upper, safe_margin=SAFE_MARGIN, margin_each=No
+     return float(np.sum(viol * viol))
+ 
+ 
++def manipulability_penalty(chain, q, characteristic_length=0.5, sigma_safe=SIGMA_MIN_SAFE):
++    """计算归一化几何雅可比的 Yoshikawa 可操作度 w(q) 与最小奇异值 σ_min(q) 软惩罚项。"""
++    try:
++        fk_res = chain.fk_all(q)
++        J = chain.jacobian(q, fk_res) if hasattr(chain, "jacobian") else None
++        if J is None:
++            return 0.0, np.nan, np.nan
++        J_s = np.asarray(J, dtype=float).copy()
++        J_s[:3, :] /= float(characteristic_length)
++        sv = np.linalg.svd(J_s, compute_uv=False)
++        sigma_min = float(sv[-1]) if sv.size else 0.0
++        yoshikawa = float(np.prod(sv)) if sv.size else 0.0
++        hinge = max(0.0, 1.0 - sigma_min / max(sigma_safe, 1e-6))
++        return float(hinge * hinge), yoshikawa, sigma_min
++    except Exception:
++        return 0.0, np.nan, np.nan
++
++
+ def _non_nan_or(val, default):
+     """若 val 为 None 或 NaN，则返回 default，否则返回 float(val)。"""
+     if val is None:
+@@ -1447,7 +1465,9 @@ def score_candidate(
+             if apply_waist_return and np.isfinite(waist_dev)
+             else 0.0
+         )
+-        cost_no_torque = psi_cost + smooth_cost + limit_cost + waist_cost
++        manip_pen, yoshikawa, sigma_min = manipulability_penalty(chain, q)
++        manip_cost = W_MANIP * manip_pen
++        cost_no_torque = psi_cost + smooth_cost + limit_cost + waist_cost + manip_cost
+     else:
+         psi_cost = np.inf
+         smooth_cost = np.inf
+         limit_cost = np.inf
+         waist_cost = np.inf
++        manip_cost = np.inf
++        yoshikawa = np.nan
++        sigma_min = np.nan
+         cost_no_torque = np.inf
+

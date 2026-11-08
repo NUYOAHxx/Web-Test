@@ -1,0 +1,66 @@
+diff --git a/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py b/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
+--- a/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
++++ b/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
+@@ -1968,6 +1968,7 @@ class _SecondaryObjective:
+         load_context=None,
+         relative_gravity_gain=0.0,
+         posture_use_equivalent_branch=False,
++        collision_manager=None,
+     ):
+         self.model = pin_model
+         self.data = pin_data
+@@ -1982,6 +1983,7 @@ class _SecondaryObjective:
+         self.limit_gain = float(joint_limit_gain)
+         self.margin = max(SAFE_MARGIN, 0.02)
+         self.context = load_context
++        self.collision_manager = collision_manager
+         self.b_low = self.lower + self.margin
+         self.b_high = self.upper - self.margin
+         self.b_low_list = self.b_low.tolist()
+@@ -2180,6 +2182,16 @@ class _SecondaryObjective:
+             if need_z:
+                 z += dz
+             cost += c_lim
++
++        # 1b. 零空间碰撞排斥次任务项（可选挂载 RobotCollisionManager）
++        c_col = 0.0
++        if self.collision_manager is not None:
++            z_col, c_col, _ = self.collision_manager.compute_collision_repulsion_gradient(
++                q_active
++            )
++            if need_z:
++                z += z_col
++            cost += c_col
+ 
+         model, data = self.model, self.data
+         if self.context is not None:
+@@ -2282,6 +2294,7 @@ class _SecondaryObjective:
+         if components is not None:
+             components["posture"] = posture
+             components["joint_limit"] = c_lim
++            components["collision"] = c_col
+             components["absolute_load"] = abs_load
+             components["excess_load"] = excess_load
+             components["relative_load"] = rel_load
+@@ -6886,6 +6899,14 @@ class SingleArmIKSolver:
+             and pos_err <= POS_TOL
+             and ori_violation <= ORI_TOL
+         )
++        collision_ok = True
++        if getattr(self, "collision_manager", None) is not None:
++            col_rep = self.collision_manager.check_collision(
++                q, stop_at_first=True, safety_margin=getattr(self, "collision_safety_margin", 0.02)
++            )
++            collision_ok = not col_rep.is_collision
++            candidate["collision_ok"] = collision_ok
++
+         cache = self._load_context.get("_physics_cache") if filtering else None
+         physical = None if cache is None else cache.get(q_bytes)
+         if physical is None:
+@@ -6914,7 +6935,7 @@ class SingleArmIKSolver:
+             load_final_pos_err=pos_err,
+             load_final_ori_violation=ori_violation,
+         )
+-        return bool(bounds_ok and pose_ok and physical["load_ok"])
++        return bool(bounds_ok and pose_ok and physical["load_ok"] and collision_ok)
+
