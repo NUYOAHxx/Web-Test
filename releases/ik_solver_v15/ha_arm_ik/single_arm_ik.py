@@ -40,9 +40,11 @@
 from collections import deque
 from collections.abc import Mapping
 import copy
+import copyreg
 from dataclasses import dataclass, field, replace
 import hashlib
 import math
+import multiprocessing as mp
 from pathlib import Path
 import threading
 import time
@@ -50,6 +52,13 @@ from types import MappingProxyType
 from typing import Mapping as TypingMapping, Sequence
 import warnings
 import xml.etree.ElementTree as ET
+
+
+def _make_mappingproxy(d):
+    return MappingProxyType(d)
+
+
+copyreg.pickle(MappingProxyType, lambda m: (_make_mappingproxy, (dict(m),)))
 
 import numpy as np
 from scipy.linalg import lapack as _lapack
@@ -4269,6 +4278,69 @@ def collect_ssik_candidates_and_seeds(
 # 10. 多阶段候选解流水线与 SingleArmIKSolver / HAArmIKSolver 主类
 # =============================================================================
 
+# --- 10.0 多核 CPU 并发多种子求解引擎 (Multi-core Parallel Seed Engine) ---
+_PARALLEL_WORKER_MODEL = None
+_PARALLEL_WORKER_MAPS = None
+_PARALLEL_WORKER_FID = None
+_PARALLEL_WORKER_DATA = None
+
+
+def _parallel_worker_init(pin_model, pin_maps, ee_frame_id):
+    """子进程初始化函数：绑定共享模型并创建各进程隔离的 Pinocchio::Data 空间。"""
+    global _PARALLEL_WORKER_MODEL, _PARALLEL_WORKER_MAPS, _PARALLEL_WORKER_FID, _PARALLEL_WORKER_DATA
+    _PARALLEL_WORKER_MODEL = pin_model
+    _PARALLEL_WORKER_MAPS = pin_maps
+    _PARALLEL_WORKER_FID = ee_frame_id
+    if pin_model is not None:
+        _PARALLEL_WORKER_DATA = pin_model.createData()
+
+
+def _parallel_worker_seed(task):
+    """多核工作进程单个种子迭代体。
+
+    task 结构:
+    (seed, fixed, kind, lo_s, hi_s, T_target_pin, weights, q_ready,
+     include_waist, released, orientation_mode, tool_axis, tool_cone_half_angle,
+     stage_params)
+    """
+    global _PARALLEL_WORKER_MODEL, _PARALLEL_WORKER_MAPS, _PARALLEL_WORKER_FID, _PARALLEL_WORKER_DATA
+    (
+        seed, fixed, kind, lo_s, hi_s, T_target_pin, weights, q_ready,
+        include_waist, released, orientation_mode, tool_axis, tool_cone_half_angle,
+        stage_params,
+    ) = task
+    try:
+        t0 = time.monotonic()
+        data = _PARALLEL_WORKER_DATA
+        if data is None and _PARALLEL_WORKER_MODEL is not None:
+            data = _PARALLEL_WORKER_MODEL.createData()
+            _PARALLEL_WORKER_DATA = data
+
+        q, diag = pinocchio_ik_one_seed(
+            _PARALLEL_WORKER_MODEL,
+            data,
+            _PARALLEL_WORKER_MAPS,
+            _PARALLEL_WORKER_FID,
+            T_target_pin,
+            seed,
+            lo_s,
+            hi_s,
+            orientation_mode=orientation_mode,
+            tool_axis=tool_axis,
+            tool_cone_half_angle=tool_cone_half_angle,
+            joint_weights=weights,
+            q_ref=q_ready,
+            include_waist=include_waist,
+            fixed_joint_mask=fixed,
+            waist_release=include_waist,
+            waist_load_release=released,
+            **stage_params,
+        )
+        return (seed, fixed, kind, q, diag, (time.monotonic() - t0) * 1000.0, None)
+    except Exception as exc:
+        return (seed, fixed, kind, None, None, 0.0, f"{type(exc).__name__}: {exc}")
+
+
 # --- 10.1 多阶段候选解收集流水线 (collect_pinocchio_candidates_and_seeds) ---
 def collect_pinocchio_candidates_and_seeds(
     pin_model,
@@ -4297,6 +4369,7 @@ def collect_pinocchio_candidates_and_seeds(
     continuation_local=False,
     seed_library=None,
     locked_reach=None,
+    parallel_pool=None,
 ):
     """多阶段、多种子 DLS 搜索；返回 (候选列表, direct-psi 种子, per_seed 诊断)。
 
@@ -4582,6 +4655,278 @@ def collect_pinocchio_candidates_and_seeds(
         n_stage = len(candidates)
         ran = []
 
+        def process_seed(seed, fixed, kind, q, diag, elapsed, err):
+            nonlocal slots, unlocked, locked_done, locked_skipped, prev_rerun_queued
+            nonlocal prev_info, seed_errors, first_seed_error, stop, released, queue
+            seed_idx = len(per_seed)
+            slots += 1
+            if fixed is None:
+                unlocked += 1
+            else:
+                locked_done = True
+
+            if err is not None:
+                seed_errors += 1
+                if first_seed_error is None:
+                    first_seed_error = err
+                per_seed.append(
+                    {
+                        "seed_idx": seed_idx,
+                        "seed_kind": kind,
+                        "search_stage": stage,
+                        "converged": False,
+                        "fixed_waist": fixed is not None,
+                        "exception": err,
+                        "stop_reason": "VISIBLE_SEED_ERROR",
+                        "elapsed_ms": elapsed,
+                    }
+                )
+                return False
+
+            q_seed_out = q
+            q = select_closest_bounded_branch(
+                q, q_prev, lo_s, hi_s, multi_turn_mask=multi_turn
+            )
+            info = score_candidate(
+                chain,
+                q,
+                T_target_local,
+                psi_ready,
+                q_prev,
+                q_ready,
+                eff_lower,
+                eff_upper,
+                orientation_mode=orientation_mode,
+                tool_axis=tool_axis,
+                tool_cone_half_angle=tool_cone_half_angle,
+                apply_waist_return=include_waist,
+            )
+            info.update(
+                source="pinocchio_ik",
+                solve_method="pinocchio_damped_ls_ik",
+                fallback_used=True,
+                seed_used=seed_idx,
+                converged=bool(diag["converged"]),
+            )
+            sec_parts = diag.get("secondary_components") or {}
+            if sec_parts:
+                info["com_cost"] = float(sec_parts.get("com", 0.0))
+                if "collision" in sec_parts:
+                    info["collision_cost"] = float(sec_parts["collision"])
+                if "collision_ok" in sec_parts:
+                    info["collision_ok"] = bool(sec_parts["collision_ok"])
+                if sync_secondary_cost and np.isfinite(
+                    info.get("cost_no_torque", np.inf)
+                ):
+                    sec_extra = w_com * float(sec_parts.get("com", 0.0))
+                    if "collision" in sec_parts:
+                        sec_extra += w_collision * float(sec_parts["collision"])
+                    info["cost_no_torque"] = float(
+                        info["cost_no_torque"] + sec_extra
+                    )
+                    info["cost"] = float(info["cost"] + sec_extra)
+            jump_max, jump_idx, jump_ok = joint_jump_metrics(
+                q, q_prev, periodic, jump_limits
+            )
+            info.update(
+                joint_jump_max_rad=jump_max,
+                joint_jump_joint=pin_maps["active_names"][jump_idx],
+                joint_jump_ok=jump_ok,
+            )
+
+            if strict:
+                physical = load_physics(
+                    pin_model, pin_data, pin_maps, q, context, False
+                )
+                info.update(
+                    load_ok=physical["load_ok"],
+                    load_peak_ratio=physical["peak_ratio"],
+                    load_peak_joint=physical["peak_joint"],
+                )
+                q_bytes = q.tobytes()
+                context.setdefault("_physics_cache", {})[q_bytes] = physical
+                if np.array_equal(q, q_seed_out):
+                    context.setdefault("_task_cache", {})[(q_bytes, id(T_target_pin))] = (
+                        float(diag["final_pos_err"]),
+                        float(diag["final_ori_violation"]),
+                    )
+                if (
+                    fixed is not None
+                    and physical["peak_ratio"] > context["policy"].soft_ratio
+                ):
+                    released = True
+
+            duplicate = any(
+                np.linalg.norm(
+                    bounded_joint_difference(
+                        q, old, eff_lower, eff_upper, multi_turn_mask=multi_turn
+                    )
+                )
+                < 1e-5
+                for old in unique
+            )
+            if not duplicate:
+                unique.append(q.copy())
+                candidates.append(info)
+
+            per_seed.append(
+                {
+                    "seed_idx": seed_idx,
+                    "seed_kind": kind,
+                    "search_stage": stage,
+                    **diag,
+                    "fixed_waist": fixed is not None,
+                    "pose_ok": bool(info["pose_ok"]),
+                    "margin": float(info["margin"]),
+                    "joint_jump_max_rad": jump_max,
+                    "joint_jump_ok": jump_ok,
+                    "duplicate": duplicate,
+                    "elapsed_ms": elapsed,
+                }
+            )
+            if stage == "comfort" and not diag["converged"]:
+                merit = 0.5 * (
+                    (float(diag["final_pos_err"]) / char_len) ** 2
+                    + float(diag["final_ori_violation"]) ** 2
+                )
+                if math.isfinite(merit):
+                    edge_pool.append((merit, seed_idx, q.copy()))
+
+            if kind == "q_prev":
+                prev_info = info
+                if q_prev_first and not locked_done and qualified(info):
+                    waist_dev = float(
+                        np.max(np.abs(q[waist_mask] - q_ready[waist_mask]))
+                    )
+                    if waist_dev <= skip_tol:
+                        queue = deque(e for e in queue if e[2] != "locked")
+                        slots += 1
+                        locked_done = True
+                        locked_skipped = True
+            elif (
+                kind == "locked"
+                and q_prev_first
+                and released
+                and release_rerun
+                and not prev_rerun_queued
+            ):
+                queue.appendleft((q_prev_seed, None, "q_prev_release"))
+                prev_rerun_queued = True
+
+            if strict:
+                low = [c for c in candidates if qualified(c)]
+                if (
+                    slots >= min_seeds
+                    and (
+                        not include_waist
+                        or (unlocked >= min_unlocked and locked_done)
+                    )
+                    and low
+                    and min(c["load_peak_ratio"] for c in low)
+                    <= early_stop_ratio
+                ):
+                    stop = "LOW_LOAD_AFTER_REQUIRED_COMPARISON"
+                    return True
+            elif (
+                slots >= 2
+                and locked_done
+                and qualified(prev_info if kind == "locked" else info)
+            ):
+                stop = "LEGACY_POSE_EARLY_STOP"
+                return True
+            return False
+
+        # 多核 CPU 并发优化策略：
+        # 1. 队首若为 q_prev 种子，先在本地执行：q_prev 达标早停概率极高（连续跟踪时），命中时可 1.0 ms 极速退出
+        if parallel_pool is not None and queue and queue[0][2] == "q_prev" and slots < max_seeds:
+            seed, fixed, kind = queue.popleft()
+            ran.append(seed)
+            started = time.monotonic()
+            try:
+                q, diag = pinocchio_ik_one_seed(
+                    pin_model,
+                    pin_data,
+                    pin_maps,
+                    ee_frame_id,
+                    T_target_pin,
+                    seed,
+                    lo_s,
+                    hi_s,
+                    orientation_mode=orientation_mode,
+                    tool_axis=tool_axis,
+                    tool_cone_half_angle=tool_cone_half_angle,
+                    joint_weights=weights,
+                    q_ref=q_ready,
+                    include_waist=include_waist,
+                    fixed_joint_mask=fixed,
+                    waist_release=include_waist,
+                    waist_load_release=released,
+                    **stage_params,
+                )
+                elapsed = (time.monotonic() - started) * 1000.0
+                if process_seed(seed, fixed, kind, q, diag, elapsed, None):
+                    return {
+                        "name": stage,
+                        "stop": stop,
+                        "slots": slots,
+                        "locked_skipped": locked_skipped,
+                    }
+            except Exception as exc:
+                if process_seed(seed, fixed, kind, None, None, 0.0, f"{type(exc).__name__}: {exc}"):
+                    return {
+                        "name": stage,
+                        "stop": stop,
+                        "slots": slots,
+                        "locked_skipped": locked_skipped,
+                    }
+
+        # 2. 若 q_prev 未命中早停，队列中剩余的多种子批处理任务（locked, q_ready, scatter 等）由多进程池并发加速
+        if parallel_pool is not None and len(queue) > 1 and stage != "continuation":
+            batch_tasks = []
+            while queue and (slots + len(batch_tasks)) < max_seeds:
+                seed, fixed, kind = queue.popleft()
+                if kind == LIBRARY_PENDING:
+                    queue.extendleft(reversed(library_entries(lo_s, hi_s, ran)))
+                    continue
+                if kind == COMFORT_CHECKPOINT:
+                    if not any(acceptable(c) for c in candidates[n_stage:]):
+                        stop = "COMFORT_PATIENCE"
+                        break
+                    continue
+                if kind == "locked" and locked_unreachable(seed):
+                    slots += 1
+                    locked_done = True
+                    locked_skipped = True
+                    reach_skips += 1
+                    continue
+                ran.append(seed)
+                batch_tasks.append(
+                    (
+                        seed, fixed, kind, lo_s, hi_s, T_target_pin, weights, q_ready,
+                        include_waist, released, orientation_mode, tool_axis,
+                        tool_cone_half_angle, stage_params,
+                    )
+                )
+
+            if batch_tasks:
+                try:
+                    parallel_results = parallel_pool.map(_parallel_worker_seed, batch_tasks)
+                except Exception:
+                    parallel_results = None
+
+                if parallel_results is not None:
+                    for seed, fixed, kind, q, diag, elapsed, err in parallel_results:
+                        if process_seed(seed, fixed, kind, q, diag, elapsed, err):
+                            break
+                    if stop != "SEED_LIMIT":
+                        return {
+                            "name": stage,
+                            "stop": stop,
+                            "slots": slots,
+                            "locked_skipped": locked_skipped,
+                        }
+
+        # 顺序执行剩余任务（包含续算阶段、单种子阶段或重跑队列）
         while queue and slots < max_seeds:
             deadline = params.get("deadline")
             if deadline is not None and time.monotonic() >= deadline:
@@ -4597,19 +4942,12 @@ def collect_pinocchio_candidates_and_seeds(
                     break
                 continue
             if kind == "locked" and locked_unreachable(seed):
-                # 目标超出锁腰时的手臂可达范围：视为等价跳过（占名额、标记锁腰阶段完成）
                 slots += 1
                 locked_done = True
                 locked_skipped = True
                 reach_skips += 1
                 continue
             ran.append(seed)
-            seed_idx = len(per_seed)
-            slots += 1
-            if fixed is None:
-                unlocked += 1
-            else:
-                locked_done = True
 
             started = time.monotonic()
             try:
@@ -4633,183 +4971,12 @@ def collect_pinocchio_candidates_and_seeds(
                     waist_load_release=released,
                     **stage_params,
                 )
-                q_seed_out = q
-                # 在本阶段搜索限位内对齐至最接近当前关节角 q_prev 的合法 2πk 分支
-                q = select_closest_bounded_branch(
-                    q, q_prev, lo_s, hi_s, multi_turn_mask=multi_turn
-                )
-
-                # 限位裕度按有效限位评估（舒适窗不是物理限位）
-                info = score_candidate(
-                    chain,
-                    q,
-                    T_target_local,
-                    psi_ready,
-                    q_prev,
-                    q_ready,
-                    eff_lower,
-                    eff_upper,
-                    orientation_mode=orientation_mode,
-                    tool_axis=tool_axis,
-                    tool_cone_half_angle=tool_cone_half_angle,
-                    apply_waist_return=include_waist,
-                )
-                info.update(
-                    source="pinocchio_ik",
-                    solve_method="pinocchio_damped_ls_ik",
-                    fallback_used=True,
-                    seed_used=seed_idx,
-                    converged=bool(diag["converged"]),
-                )
-                sec_parts = diag.get("secondary_components") or {}
-                if sec_parts:
-                    info["com_cost"] = float(sec_parts.get("com", 0.0))
-                    if "collision" in sec_parts:
-                        info["collision_cost"] = float(sec_parts["collision"])
-                    if "collision_ok" in sec_parts:
-                        info["collision_ok"] = bool(sec_parts["collision_ok"])
-                    if sync_secondary_cost and np.isfinite(
-                        info.get("cost_no_torque", np.inf)
-                    ):
-                        # 内层零空间整理代价（com/collision）同步并入外层候选打分，
-                        # 使择优口径与迭代过程中的软偏好一致
-                        sec_extra = w_com * float(sec_parts.get("com", 0.0))
-                        if "collision" in sec_parts:
-                            sec_extra += w_collision * float(sec_parts["collision"])
-                        info["cost_no_torque"] = float(
-                            info["cost_no_torque"] + sec_extra
-                        )
-                        info["cost"] = float(info["cost"] + sec_extra)
-                jump_max, jump_idx, jump_ok = joint_jump_metrics(
-                    q, q_prev, periodic, jump_limits
-                )
-                info.update(
-                    joint_jump_max_rad=jump_max,
-                    joint_jump_joint=pin_maps["active_names"][jump_idx],
-                    joint_jump_ok=jump_ok,
-                )
-
-                if strict:
-                    physical = load_physics(
-                        pin_model, pin_data, pin_maps, q, context, False
-                    )
-                    info.update(
-                        load_ok=physical["load_ok"],
-                        load_peak_ratio=physical["peak_ratio"],
-                        load_peak_joint=physical["peak_joint"],
-                    )
-                    q_bytes = q.tobytes()
-                    context.setdefault("_physics_cache", {})[q_bytes] = physical
-                    if np.array_equal(q, q_seed_out):
-                        context.setdefault("_task_cache", {})[(q_bytes, id(T_target_pin))] = (
-                            float(diag["final_pos_err"]),
-                            float(diag["final_ori_violation"]),
-                        )
-                    if (
-                        fixed is not None
-                        and physical["peak_ratio"] > context["policy"].soft_ratio
-                    ):
-                        released = True
-
-                # 候选去重使用考虑合法 2πk 等价分支的关节差
-                duplicate = any(
-                    np.linalg.norm(
-                        bounded_joint_difference(
-                            q, old, eff_lower, eff_upper, multi_turn_mask=multi_turn
-                        )
-                    )
-                    < 1e-5
-                    for old in unique
-                )
-                if not duplicate:
-                    unique.append(q.copy())
-                    candidates.append(info)
-
-                per_seed.append(
-                    {
-                        "seed_idx": seed_idx,
-                        "seed_kind": kind,
-                        "search_stage": stage,
-                        **diag,
-                        "fixed_waist": fixed is not None,
-                        "pose_ok": bool(info["pose_ok"]),
-                        "margin": float(info["margin"]),
-                        "joint_jump_max_rad": jump_max,
-                        "joint_jump_ok": jump_ok,
-                        "duplicate": duplicate,
-                        "elapsed_ms": (time.monotonic() - started) * 1000.0,
-                    }
-                )
-                if stage == "comfort" and not diag["converged"]:
-                    merit = 0.5 * (
-                        (float(diag["final_pos_err"]) / char_len) ** 2
-                        + float(diag["final_ori_violation"]) ** 2
-                    )
-                    if math.isfinite(merit):
-                        edge_pool.append((merit, seed_idx, q.copy()))
-
-                if kind == "q_prev":
-                    prev_info = info
-                    # 若 q_prev 解已合格且腰部已处于 q_ready 附近，则后续锁腰种子等价，直接跳过
-                    if q_prev_first and not locked_done and qualified(info):
-                        waist_dev = float(
-                            np.max(np.abs(q[waist_mask] - q_ready[waist_mask]))
-                        )
-                        if waist_dev <= skip_tol:
-                            queue = deque(e for e in queue if e[2] != "locked")
-                            slots += 1
-                            locked_done = True
-                            locked_skipped = True
-                elif (
-                    kind == "locked"
-                    and q_prev_first
-                    and released
-                    and release_rerun
-                    and not prev_rerun_queued
-                ):
-                    # 锁腰种子触发腰部释放：下一个种子以释放状态重新运行 q_prev
-                    queue.appendleft((q_prev_seed, None, "q_prev_release"))
-                    prev_rerun_queued = True
-
-                if strict:
-                    low = [c for c in candidates if qualified(c)]
-                    if (
-                        slots >= min_seeds
-                        and (
-                            not include_waist
-                            or (unlocked >= min_unlocked and locked_done)
-                        )
-                        and low
-                        and min(c["load_peak_ratio"] for c in low)
-                        <= early_stop_ratio
-                    ):
-                        stop = "LOW_LOAD_AFTER_REQUIRED_COMPARISON"
-                        break
-                elif (
-                    slots >= 2
-                    and locked_done
-                    and qualified(prev_info if kind == "locked" else info)
-                ):
-                    # 宽松模式早停规则：至少比较 2 个种子后，以 q_prev 及之后种子的合格解早停
-                    stop = "LEGACY_POSE_EARLY_STOP"
+                elapsed = (time.monotonic() - started) * 1000.0
+                if process_seed(seed, fixed, kind, q, diag, elapsed, None):
                     break
             except Exception as exc:
-                # 种子异常不中断搜索，但必须可见：计数并保留首个异常，失败时写入失败码详情
-                seed_errors += 1
-                if first_seed_error is None:
-                    first_seed_error = f"{type(exc).__name__}: {exc}"
-                per_seed.append(
-                    {
-                        "seed_idx": seed_idx,
-                        "seed_kind": kind,
-                        "search_stage": stage,
-                        "converged": False,
-                        "fixed_waist": fixed is not None,
-                        "exception": f"{type(exc).__name__}: {exc}",
-                        "stop_reason": "VISIBLE_SEED_ERROR",
-                        "elapsed_ms": (time.monotonic() - started) * 1000.0,
-                    }
-                )
+                if process_seed(seed, fixed, kind, None, None, 0.0, f"{type(exc).__name__}: {exc}"):
+                    break
         return {
             "name": stage,
             "stop": stop,
@@ -5139,6 +5306,13 @@ class HAArmIKSolver:
         self.load_mode = str(cfg_tune.get("load_mode", "strict"))
         if self.load_mode not in ("strict", "off"):
             raise ValueError("load_mode must be strict or explicitly off")
+
+        p_workers = cfg_tune.get("parallel_workers", 1)
+        if p_workers in ("auto", 0, None):
+            self.parallel_workers = max(1, min(mp.cpu_count() or 4, 8))
+        else:
+            self.parallel_workers = max(1, int(p_workers))
+        self._parallel_pool = None
 
         self._solve_lock = threading.Lock()
         self._latest_joint_state = None
@@ -5676,6 +5850,28 @@ class HAArmIKSolver:
                 _SEED_LIBRARY_CACHE.pop(next(iter(_SEED_LIBRARY_CACHE)))
             library = _SEED_LIBRARY_CACHE.setdefault(key, library)
         return library
+
+    def _ensure_parallel_pool(self):
+        """懒加载创建并管理多核并发进程池。"""
+        if self.parallel_workers <= 1 or self.pin_model is None:
+            return None
+        if self._parallel_pool is None:
+            ctx = mp.get_context("fork")
+            self._parallel_pool = ctx.Pool(
+                processes=self.parallel_workers,
+                initializer=_parallel_worker_init,
+                initargs=(self.pin_model, self.pin_maps, self.pin_ee_frame_id),
+            )
+        return self._parallel_pool
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
     def _configure_waist_comfort(self, cfg_tune):
         """解析 dls_waist_comfort，计算舒适窗 [waist_comfort_lower, waist_comfort_upper]（不收窄时保持 None）。"""
@@ -6291,6 +6487,7 @@ class HAArmIKSolver:
                     continuation_local=self.dls_continuation_local,
                     seed_library=self.seed_library,
                     locked_reach=self.dls_locked_reach,
+                    parallel_pool=self._ensure_parallel_pool(),
                 )
             )
             local_used = bool(comfort_info.get("continuation_local_used"))
@@ -6849,6 +7046,16 @@ class HAArmIKSolver:
         if not self._solve_lock.acquire(blocking=False):
             raise RuntimeError("cannot close while solve/evaluate is in flight")
         try:
+            # 停止并清理多核并发进程池
+            pool = getattr(self, "_parallel_pool", None)
+            if pool is not None:
+                self._parallel_pool = None
+                try:
+                    pool.terminate()
+                    pool.join()
+                except Exception:
+                    pass
+
             # 场景感知后台线程先停 (持有 manager 引用, 需在模型拆除前退出)
             try:
                 from ha_arm_ik.collision_fcl import shutdown as collision_shutdown
