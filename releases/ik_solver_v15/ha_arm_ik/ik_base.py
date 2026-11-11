@@ -38,6 +38,11 @@ __all__ = [
     "W_TORQUE",
     "PHI_TIE_TOL",
     "ARM_CONFIGS",
+    "URDF_NAME",
+    "URDF_CANDIDATES",
+    "URDF_SEARCH_ROOT",
+    "resolve_urdf",
+    "get_tool_config",
     # 状态与结果类型
     "Status",
     "FailureReason",
@@ -53,6 +58,7 @@ __all__ = [
     "roty",
     "rotz",
     "rpy_to_R",
+    "R_to_rpy",
     "rot_axis",
     "make_T",
     "T_origin",
@@ -84,11 +90,13 @@ __all__ = [
     "select_closest_bounded_branch",
     "bounded_joint_difference",
     "multi_turn_mask_from_chain",
+    "periodic_capable_mask",
     "shift_to_nearest_branch",
     "joint_margin",
     "joint_range_scale",
     "joint_center_from_bounds",
     "joint_limit_penalty",
+    "chain_geometric_jacobian",
     "unique_seed_list",
     # URDF 模型与串联链
     "get_sew_joints",
@@ -105,6 +113,7 @@ __all__ = [
     "has_valid_torque",
     "update_candidate_final_cost_with_torque",
     "select_best_candidate",
+    "rank_topk_candidates",
     "phi_sort_value",
     "evaluate_config_quality",
     "finalize_ik_result",
@@ -152,7 +161,9 @@ ARM_CONFIGS = {
         "w_joint": "LHand_Link6",
         "mount_xyz": np.array([0.0, 0.0, 0.5087]),
         "mount_rpy": np.array([0.0, 0.0, 0.0]),
-        "q_ready": np.array([-0.523599, -0.785398, 0.0, -0.698132, 0.0, 1.570796, 0.0]),
+        # (0°, -22.5°, 0, -40°, 0, 90°, 0)：肘微弯（SEW 不共线，psi_ready 有定义），
+        # 肩前伸、腕俯仰 90°。
+        "q_ready": np.array([0.0, -0.392699, 0.0, -0.698132, 0.0, 1.570796, 0.0]),
     },
     "right": {
         "base_link": "Body_Link",
@@ -162,10 +173,77 @@ ARM_CONFIGS = {
         "w_joint": "RHand_Link6",
         "mount_xyz": np.array([0.0, 0.0, 0.5087]),
         "mount_rpy": np.array([0.0, 0.0, 0.0]),
-        # 左臂镜像：奇数关节反号，偶数关节同号
-        "q_ready": np.array([0.523599, -0.785398, 0.0, -0.698132, 0.0, 1.570796, 0.0]),
+        # 左臂镜像：奇数关节反号，偶数关节同号（本姿态奇数位全 0，镜像同值）
+        "q_ready": np.array([0.0, -0.392699, 0.0, -0.698132, 0.0, 1.570796, 0.0]),
     },
 }
+
+# 侧别 -> MoveIt planning group (ARM_CONFIGS 只描述几何, 规划组按 ROS 侧约定)
+_PLANNING_GROUPS = {"left": "l_arm", "right": "r_arm"}
+
+# 人形臂 URDF 候选路径与搜索根 (容器布局可能二选一存在)
+URDF_NAME = "tsmc_humanoid_robot_with_dg3f_m.urdf"
+URDF_CANDIDATES = (
+    "/workspaces/isaac_ros-dev/src/lam_pm_cad/lam_description/"
+    "tsmc_humanoid_robot/urdf/" + URDF_NAME,
+    "/workspaces/isaac_ros-dev/src/lam_pm_cad/URDF/"
+    "tsmc_humanoid_robot/urdf/" + URDF_NAME,
+)
+URDF_SEARCH_ROOT = "/workspaces/isaac_ros-dev/src/lam_pm_cad"
+
+
+def resolve_urdf():
+    """解析人形臂 URDF 路径: HA_ARM_IK_URDF 环境变量 > 候选路径 > 递归搜索。
+    客户端/测试工具 (examples, tests/moveit_bridge) 共用, 避免各处硬编码
+    不同容器布局。找不到时抛 RuntimeError。
+    """
+    import os
+    from pathlib import Path
+
+    override = os.environ.get("HA_ARM_IK_URDF")
+    if override:
+        override = Path(override).expanduser().resolve()
+        if not override.is_file():
+            raise RuntimeError(f"HA_ARM_IK_URDF does not exist: {override}")
+        return str(override)
+
+    for candidate in URDF_CANDIDATES:
+        if Path(candidate).is_file():
+            return candidate
+
+    root = Path(URDF_SEARCH_ROOT)
+    if root.is_dir():
+        found = sorted(root.rglob(URDF_NAME))
+        if found:
+            return str(found[0])
+
+    raise RuntimeError(
+        f"TSMC humanoid URDF not found. Set HA_ARM_IK_URDF or place {URDF_NAME} "
+        f"under {URDF_SEARCH_ROOT}"
+    )
+
+
+def get_tool_config(side="left"):
+    """返回客户端/测试工具共用的侧别配置 (从 ARM_CONFIGS 派生)。
+    返回 dict: side / urdf / planning_group / base_frame / ee_link / base_link。
+    URDF 解析失败时 urdf=None (调用方自行决定是否致命)。
+    """
+    side = str(side).lower()
+    if side not in ARM_CONFIGS:
+        raise ValueError(f"side must be 'left' or 'right', got: {side}")
+    try:
+        urdf = resolve_urdf()
+    except RuntimeError:
+        urdf = None
+    return {
+        "side": side,
+        "urdf": urdf,
+        "planning_group": _PLANNING_GROUPS[side],
+        # base_frame = URDF 根 (整机基座); base_link = 臂链求解基座 (躯干)
+        "base_frame": "base_Base",
+        "base_link": ARM_CONFIGS[side]["base_link"],
+        "ee_link": ARM_CONFIGS[side]["ee_link"],
+    }
 
 
 # ==============================================================================
@@ -180,6 +258,7 @@ class Status(str, Enum):
     NO_VALID_POSE = "NO_VALID_POSE"
     NO_RESULT = "NO_RESULT"
     OUTSIDE_WORKSPACE = "OUTSIDE_WORKSPACE"
+    COLLISION = "COLLISION"
 
 
 class FailureReason(str, Enum):
@@ -419,6 +498,22 @@ def rpy_to_R(rpy):
     """URDF RPY 约定：R = Rz(yaw) @ Ry(pitch) @ Rx(roll)。"""
     roll, pitch, yaw = rpy
     return rotz(yaw) @ roty(pitch) @ rotx(roll)
+
+
+def R_to_rpy(Rm):
+    """把 URDF 固定轴 XYZ 旋转矩阵转换回 [roll, pitch, yaw]。
+    当 pitch 接近 ±90 度时 roll/yaw 不唯一，这里固定 yaw=0，并返回等效欧拉角。
+    """
+    Rm = np.asarray(Rm, dtype=float)
+    sy = math.hypot(Rm[0, 0], Rm[1, 0])
+    pitch = math.atan2(-Rm[2, 0], sy)
+    if sy < 1e-12:
+        roll = math.atan2(-Rm[1, 2], Rm[1, 1])
+        yaw = 0.0
+    else:
+        roll = math.atan2(Rm[2, 1], Rm[2, 2])
+        yaw = math.atan2(Rm[1, 0], Rm[0, 0])
+    return np.array([roll, pitch, yaw], dtype=float)
 
 
 def rot_axis(axis, theta):
@@ -820,6 +915,13 @@ def multi_turn_mask_from_chain(chain, lower, upper):
     return mask
 
 
+def periodic_capable_mask(lower, upper, min_span_rad=PERIODIC_MIN_SPAN_RAD):
+    """span >= min_span_rad 的关节可在限位内做一次 ±2π 等价平移。"""
+    return (
+        np.asarray(upper, dtype=float) - np.asarray(lower, dtype=float)
+    ) >= min_span_rad
+
+
 def shift_to_nearest_branch(q, anchor, lower, upper, periodic_mask):
     """对周期关节做限位内等价角分支归一，返回距 anchor 最近的表示。"""
     q = np.asarray(q, dtype=float)
@@ -867,6 +969,33 @@ def joint_limit_penalty(q, lower, upper, safe_margin=SAFE_MARGIN, margin_each=No
         _, _, margin_each = joint_margin(q, lower, upper)
     x = np.maximum(0.0, safe_margin - margin_each) / safe_margin
     return float(np.sum(x * x))
+
+
+def chain_geometric_jacobian(chain, q, fk_result=None):
+    """末端 6×n 几何雅可比（基座系）。
+    上 3 行为线速度（J_v = z_i × (p_ee - p_i)），下 3 行为角速度（J_w = z_i）。
+    fk_result 可传 chain.fk_all(q) 的结果以复用正运动学。
+    """
+    if fk_result is None:
+        fk_result = chain.fk_all(q)
+    link_T, joint_origin_T = fk_result
+
+    T_ee = link_T[chain.ee_link]
+    p_ee = T_ee[:3, 3]
+
+    n = len(chain.active_joints)
+    J = np.zeros((6, n))
+    for i, aj in enumerate(chain.active_joints):
+        T_j = joint_origin_T[aj["name"]]
+        z_i = T_j[:3, :3] @ np.asarray(aj["axis"], dtype=float)
+        p_i = T_j[:3, 3]
+        if aj["type"] in ("revolute", "continuous"):
+            J[:3, i] = np.cross(z_i, p_ee - p_i)
+            J[3:, i] = z_i
+        elif aj["type"] == "prismatic":
+            J[:3, i] = z_i
+
+    return J
 
 
 def unique_seed_list(seeds, tol=1e-8):
@@ -1108,6 +1237,10 @@ class SerialChain:
             link_T[joint["child"]] = T.copy()
 
         return link_T, joint_origin_T
+
+    def jacobian(self, q, fk_result=None):
+        """末端 6×n 几何雅可比（详见 chain_geometric_jacobian）。"""
+        return chain_geometric_jacobian(self, q, fk_result)
 
     def _origin_T(self, joint):
         """按 (xyz, rpy) 字节缓存关节原点变换矩阵。"""
@@ -1567,6 +1700,46 @@ def select_best_candidate(candidates, use_torque=True):
         use_torque and has_valid_torque(best)
     )
     return best, candidate_status(best)
+
+
+def rank_topk_candidates(candidates, k, use_torque=True):
+    """从已过硬约束的候选池中选出按排序的统一解列表（第 0 个即 best 解）。
+
+    排序复用 candidate_sort_key（与 select_best_candidate 同一排序键），
+    因此列表的质量梯度与主解一致：第 1 名是 best，其后只是代价略高，
+    而非畸形态。仅返回 pose_ok 的候选，并以关节角阈值去重（8 级排序下
+    同构型候选通常被 dq_prev/dq_ready 区分，去重兜底防伪备选）。
+
+    Parameters
+    ----------
+    k : int or None
+        输出上限；None = 不设上限，输出全部去重后的合格候选（按排序）。
+
+    Returns
+    -------
+    list[dict]
+        排序后的候选字典副本（含 "q"），第 0 个为 best，最多 k 个；
+        k <= 0 或池空时为 []。
+    """
+    if (k is not None and k <= 0) or not candidates:
+        return []
+    valid = [c for c in candidates if c.get("pose_ok", False) and "q" in c]
+    if not valid:
+        return []
+    pool = sorted(valid, key=lambda c: candidate_sort_key(c, use_torque=use_torque))
+    selected = []
+    for c in pool:
+        q = np.asarray(c["q"], dtype=float)
+        # 与已选解保持关节角最小差异，避免输出同构型重复解
+        if any(np.all(np.abs(q - s["q"]) <= 1e-3) for s in selected):
+            continue
+        item = dict(c)
+        # 剥离内部缓存与负荷复核键（与 _accept 对主解的剥离口径一致）
+        item.pop("_load_checked_q_bytes", None)
+        selected.append(item)
+        if k is not None and len(selected) >= k:
+            break
+    return selected
 
 
 def evaluate_config_quality(pin_model, pin_data, pin_maps, q, ee_frame_id):

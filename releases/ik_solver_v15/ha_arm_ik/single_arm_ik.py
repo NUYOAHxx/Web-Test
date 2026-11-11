@@ -3,8 +3,7 @@
 
 """ha_arm_ik.single_arm_ik —— 腰 2 + 臂 7（9 维 / 7 维）单臂逆运动学高内聚求解器。
 
-本文件整合了单臂数值逆运动学求解器的全部算法逻辑、物理模型与接口，
-与双臂逆运动学模块 (dual_arm_ik.py) 共同构成标准统一的机械臂逆运动学套件。
+整合单臂数值逆运动学求解器的全部算法逻辑、物理模型与接口，与双臂逆运动学模块 (dual_arm_ik.py) 共同构成统一的机械臂逆运动学套件。
 
 逆运动学求解约束分层体系：
   【硬约束 (Hard Constraints)】不满足即拒解（非解）
@@ -86,6 +85,7 @@ from ha_arm_ik.ik_base import (
     W_TORQUE,
     bounded_joint_difference,
     candidate_sort_key,
+    chain_geometric_jacobian,
     clip_to_bounds,
     closest_direction_on_cone,
     estimate_chain_max_reach_from_joint,
@@ -106,6 +106,7 @@ from ha_arm_ik.ik_base import (
     normalize,
     normalize_cone_half_angle,
     pose_error,
+    rank_topk_candidates,
     rpy_to_R,
     score_candidate,
     select_best_candidate,
@@ -171,11 +172,17 @@ SOLVER_VERSION = "merged-v15"   # 写入 last_load_diagnostics["version"]
 # =============================================================================
 
 # --- 2.1 Pinocchio DLS 基础数值与收敛容差参数 ---
-PIN_IK_MAX_ITER = 500
+# 500 -> 250：停滞检测（12 迭代 / 2.5%）实际在 ~130 迭代内掐掉坏种子，p99=130、
+# max=251（strat 60 目标实测），250 为 p99 的两倍余量；跑满 500 的种子为零。
+# 150 会提前掐断个别可收敛种子，早停补偿性多跑种子反而更慢（实测 +3ms）。
+PIN_IK_MAX_ITER = 250
 PIN_IK_DAMPING = 1e-6
 PIN_IK_POS_TOL = 5e-4             # DLS 内部位姿容差上限；实际取 min(本值, ik_base.POS_TOL)
 PIN_IK_ORI_TOL = 5e-4             # 同上，实际取 min(本值, ik_base.ORI_TOL)
 PIN_IK_MAX_STEP = 0.5             # 单次迭代关节步长 2-范数上限（弧度）
+# 回溯线搜索试探步数上限（默认 12 -> 8）：首轮试探基本即被接受，减的是陡峭
+# 误差面上的备选试探；strat 60 目标 A/B 实测与 bt12 成功率一致、尾部 max 更低
+PIN_IK_BACKTRACK_STEPS = 8
 PIN_IK_STALL_ITERS = 12           # 停滞检测窗口：位姿未达标时每 12 次迭代检查一次进展（v6 为 25）
 PIN_IK_STALL_RTOL = 0.025         # 窗口内主任务误差范数相对下降 < 2.5% -> 判定停滞，换下一个种子
                                   # （v6 为每 25 次迭代 5%；v7 窗口减半、阈值减半，判定速率与 v6 相当但检查更频繁。
@@ -194,8 +201,9 @@ NULLSPACE_ERR_SCALE = 0.06        # 零空间权重 = (达标 1.5 / 未达标 1.
                                   # e 为位置按 characteristic_length(0.5 m) 缩放后的主任务误差：
                                   # |e| = 0.06 时权重减半（约 30 mm 或 3.4°），误差越小越接近全功率
 POSTURE_SETTLE_TOL = 1e-4         # 末端收敛后，零空间步长小于此阈值(rad)才算稳态收敛
-MAX_SETTLE_EXTRA_ITERS = 50       # 末端达标后继续在零空间整理姿态的安全上限（v8 恢复 v6 取值；v7 的 15
-                                  # 在收敛前截断：tool_dir 的 SETTLE_LIMIT 次数 2 -> 8、次任务代价平均 +1.9%）
+MAX_SETTLE_EXTRA_ITERS = 25       # 末端达标后继续在零空间整理姿态的安全上限（v8/v6 为 50；50 -> 25：
+                                  # strat 60 目标 A/B 成功率/候选数/主解代价均不变（cost mean +0.04%），
+                                  # solve mean -7ms；SETTLE_LIMIT 尾部种子（56 个）是达标后整理的耗时主体）
 SETTLE_COST_RTOL = 1e-3           # 姿态整理阶段：单步次任务代价相对下降 < 0.1% 记为“慢步”
 SETTLE_PATIENCE = 3               # 连续 3 个慢步即视为已收敛（收敛判据，v8 恢复 v6 取值；v7 为 2）
 POSE_PEAK_BAND_FRACTION = 0.25    # 单种子内择优的峰值容差带 = 0.25 * LoadPolicy.peak_tie（默认 0.005）
@@ -1941,7 +1949,12 @@ class _SecondaryObjective:
         load_context=None,
         relative_gravity_gain=0.0,
         posture_use_equivalent_branch=False,
+        band_lower=None,
+        band_upper=None,
         collision_manager=None,
+        collision_influence=0.09,
+        collision_margin=0.005,
+        collision_gain=0.35,
     ):
         self.model = pin_model
         self.data = pin_data
@@ -1952,7 +1965,11 @@ class _SecondaryObjective:
         self.ns_gain = ns_gain
         self.neg_ns_gain = -ns_gain
         self.movable = movable_mask
+        # 零空间碰撞排斥次任务（可选挂载 RobotCollisionManager；None = 关闭）
         self.collision_manager = collision_manager
+        self.collision_influence = float(collision_influence)
+        self.collision_margin = float(collision_margin)
+        self.collision_gain = float(collision_gain)
 
         # 姿态回中：默认真实编码器坐标差（仅无界 continuous 关节做周期折叠）
         self.multi_turn = None
@@ -2182,11 +2199,18 @@ class _SecondaryObjective:
                 z += dz
             cost += c_lim
 
-        # 1b. 零空间碰撞排斥次任务项（可选挂载 RobotCollisionManager）
+        # 1b. 零空间碰撞排斥次任务项：compute_collision_repulsion_gradient 返回的
+        #     z_col 已是 -∇H_col，与 z 通道“负梯度”口径一致，直接累加。
+        #     cost-only 评估（need_z=False，如回线搜索/尾评估）不付见证点雅可比开销。
         c_col = 0.0
+        col_rep = None
         if self.collision_manager is not None:
-            z_col, c_col, _ = self.collision_manager.compute_collision_repulsion_gradient(
-                q_active
+            z_col, c_col, col_rep = self.collision_manager.compute_collision_repulsion_gradient(
+                q_active,
+                influence_distance=self.collision_influence,
+                safety_margin=self.collision_margin,
+                repulsion_gain=self.collision_gain,
+                compute_gradient=need_z,
             )
             if need_z:
                 z += z_col
@@ -2295,6 +2319,8 @@ class _SecondaryObjective:
             components["joint_limit"] = c_lim
             if self.collision_manager is not None:
                 components["collision"] = c_col
+                if col_rep is not None:
+                    components["collision_ok"] = not col_rep.is_collision
             components["absolute_load"] = abs_load
             components["excess_load"] = excess_load
             components["relative_load"] = rel_load
@@ -2931,14 +2957,18 @@ def pinocchio_ik_one_seed(
     deadline=None,
     waist_load_release=False,
     characteristic_length=0.5,
-    backtrack_steps=12,
+    backtrack_steps=PIN_IK_BACKTRACK_STEPS,
     virtual_half_windows=None,
     relative_gravity_gain=None,
     posture_use_equivalent_branch=False,
     shoulder_joint=None,
     posture_settle=True,
     margin_bounds=None,
+    band_bounds=None,
     collision_manager=None,
+    collision_influence=0.09,
+    collision_margin=0.005,
+    collision_gain=0.35,
 ):
     """单种子 DLS IK：主任务为末端位姿，零空间次任务为回中 / 限位裕度 / 负荷 / 质心。
 
@@ -3141,6 +3171,7 @@ def pinocchio_ik_one_seed(
     has_waist_dof = bool(np.any(waist_movable))
     target_p = np.array(target[:3, 3], dtype=float)
 
+    band_lower, band_upper = (None, None) if band_bounds is None else band_bounds
     # 每种子构造一次的求值器（与 dls_task_terms / tests/dls_compat 的 v6 形式入口同一实现）
     objective = _SecondaryObjective(
         pin_model,
@@ -3162,7 +3193,12 @@ def pinocchio_ik_one_seed(
         load_context=context,
         relative_gravity_gain=rel_grav_gain,
         posture_use_equivalent_branch=posture_use_equivalent_branch,
+        band_lower=band_lower,
+        band_upper=band_upper,
         collision_manager=collision_manager,
+        collision_influence=collision_influence,
+        collision_margin=collision_margin,
+        collision_gain=collision_gain,
     )
     terms = _make_task_terms(
         pin_model,
@@ -3272,6 +3308,8 @@ def pinocchio_ik_one_seed(
     def settle_free(values, parts_val):
         """posture_settle=False 的停止条件：负荷合格且可动关节离限位 >= SAFE_MARGIN（无界关节不计）。"""
         if context is not None and not parts_val.get("load_ok", True):
+            return False
+        if parts_val.get("collision_ok") is False or parts_val.get("collision", 0.0) > 0.0:
             return False
         gap = np.minimum(values - margin_lo, margin_hi - values)[movable]
         gap = gap[np.isfinite(gap)]
@@ -3534,28 +3572,7 @@ def pinocchio_ik_one_seed(
 # =============================================================================
 
 # --- 9.1 解析雅可比与臂角参数化求解器 (Direct-Psi) ---
-def geometric_jacobian(chain, q, fk_result=None):
-    if fk_result is None:
-        fk_result = chain.fk_all(q)
-
-    link_T, joint_origin_T = fk_result
-
-    T_ee = link_T[chain.ee_link]
-    p_ee = T_ee[:3, 3]
-
-    n = len(chain.active_joints)
-    J = np.zeros((6, n))
-    for i, aj in enumerate(chain.active_joints):
-        T_j = joint_origin_T[aj["name"]]
-        z_i = T_j[:3, :3] @ np.asarray(aj["axis"], dtype=float)
-        p_i = T_j[:3, 3]
-        if aj["type"] in ("revolute", "continuous"):
-            J[:3, i] = np.cross(z_i, p_ee - p_i)
-            J[3:, i] = z_i
-        elif aj["type"] == "prismatic":
-            J[:3, i] = z_i
-
-    return J
+geometric_jacobian = chain_geometric_jacobian  # 兼容别名 (实现已移至 ik_base.chain_geometric_jacobian)
 
 
 def joint_position_jacobian(chain, joint_name, joint_origin_T):
@@ -3869,7 +3886,7 @@ class DirectPsiProblem:
     def jacobian_task(self, q):
         try:
             fk_result = self._fk(q)
-            J_geom = geometric_jacobian(self.chain, q, fk_result)
+            J_geom = chain_geometric_jacobian(self.chain, q, fk_result)
             Jv = J_geom[:3, :]
             Jw = J_geom[3:, :]
 
@@ -4569,11 +4586,12 @@ def collect_pinocchio_candidates_and_seeds(
 
     # ---- 候选判据（共用“位姿达标 + 限位裕度足够 + strict 下负荷合格”，只在跳变 / 峰值上区分）----
     def feasible_but_jump(cand):
-        """H1-H3：位姿达标、限位裕度 >= SAFE_MARGIN；strict 下静态负荷合格。不看跳变。"""
+        """H1-H3：位姿达标、限位裕度 >= SAFE_MARGIN；strict 下静态负荷合格；无碰撞（若启用）。不看跳变。"""
         return bool(
             cand.get("pose_ok")
             and cand.get("margin", -np.inf) >= SAFE_MARGIN
             and (not strict or cand.get("load_ok"))
+            and cand.get("collision_ok", True)
         )
 
     def acceptable(cand):
@@ -4722,19 +4740,6 @@ def collect_pinocchio_candidates_and_seeds(
                     tool_cone_half_angle=tool_cone_half_angle,
                     apply_waist_return=include_waist,
                 )
-                sec_parts = diag.get("secondary_components") or {}
-                com_cost_val = float(sec_parts.get("com", 0.0))
-                col_cost_val = float(sec_parts.get("collision", 0.0))
-                info["com_cost"] = com_cost_val
-                if "collision" in sec_parts:
-                    info["collision_cost"] = col_cost_val
-                if (
-                    sync_secondary_cost or params.get("collision_manager") is not None
-                ) and np.isfinite(info.get("cost_no_torque", np.inf)):
-                    # 将内层零空间整理的水平质心偏移代价 (com) 与防碰撞排斥代价 (collision) 同步并入外层候选打分
-                    sec_extra = w_com * com_cost_val + w_collision * col_cost_val
-                    info["cost_no_torque"] = float(info["cost_no_torque"] + sec_extra)
-                    info["cost"] = float(info["cost"] + sec_extra)
                 info.update(
                     source="pinocchio_ik",
                     solve_method="pinocchio_damped_ls_ik",
@@ -4742,6 +4747,25 @@ def collect_pinocchio_candidates_and_seeds(
                     seed_used=seed_idx,
                     converged=bool(diag["converged"]),
                 )
+                sec_parts = diag.get("secondary_components") or {}
+                if sec_parts:
+                    info["com_cost"] = float(sec_parts.get("com", 0.0))
+                    if "collision" in sec_parts:
+                        info["collision_cost"] = float(sec_parts["collision"])
+                    if "collision_ok" in sec_parts:
+                        info["collision_ok"] = bool(sec_parts["collision_ok"])
+                    if sync_secondary_cost and np.isfinite(
+                        info.get("cost_no_torque", np.inf)
+                    ):
+                        # 内层零空间整理代价（com/collision）同步并入外层候选打分，
+                        # 使择优口径与迭代过程中的软偏好一致
+                        sec_extra = w_com * float(sec_parts.get("com", 0.0))
+                        if "collision" in sec_parts:
+                            sec_extra += w_collision * float(sec_parts["collision"])
+                        info["cost_no_torque"] = float(
+                            info["cost_no_torque"] + sec_extra
+                        )
+                        info["cost"] = float(info["cost"] + sec_extra)
                 jump_max, jump_idx, jump_ok = joint_jump_metrics(
                     q, q_prev, periodic, jump_limits
                 )
@@ -5239,6 +5263,12 @@ class HAArmIKSolver:
         self.dls_max_iter = cfg_tune.get("dls_max_iter", PIN_IK_MAX_ITER)
         self.dls_damping = cfg_tune.get("dls_damping", PIN_IK_DAMPING)
         self.dls_max_step = cfg_tune.get("dls_max_step", PIN_IK_MAX_STEP)
+        # 回溯线搜索试探步数上限 (模块默认 PIN_IK_BACKTRACK_STEPS): 每次迭代
+        # 最多这么多次 FK 试探; 调小减少尾迭代成本, 代价是少数陡峭误差面上
+        # 接受更差的中间点
+        self.dls_backtrack_steps = cfg_tune.get(
+            "dls_backtrack_steps", PIN_IK_BACKTRACK_STEPS
+        )
 
         # 可选的零空间、物理负载与逐关节虚拟搜索窗参数
         self.dls_nullspace_gain = cfg_tune.get("dls_nullspace_gain", None)
@@ -5326,13 +5356,75 @@ class HAArmIKSolver:
         )
         # 主任务位置误差的特征长度（m）：DLS 与 strict 最终复核同一口径
         self.dls_characteristic_length = cfg_tune.get("dls_characteristic_length", 0.5)
-        self.collision_manager = cfg_tune.get("collision_manager", None)
-        self.collision_safety_margin = float(cfg_tune.get("collision_safety_margin", 0.02))
+        # ---- 防碰撞（环境障碍物）----
+        # collision_avoidance（默认 True = 不写即开，自动构建胶囊体 manager）：
+        #   - True = 开启（环境障碍物防碰；自碰归 MoveIt, 本包不检测）；
+        #   - RobotCollisionManager 实例 = 开启并直接使用该实例（mesh/
+        #     预加障碍物口径，manager.enabled 可运行时开关）；
+        #   - False / None = 关闭，solve() 无任何碰撞开销（仅基线对照用）。
+        # 开启后两道防线生效：
+        #   1. 软排斥：DLS 迭代零空间次任务，把连杆推离障碍物影响区
+        #      （collision_influence_distance，默认 9cm）——软引导不判碰，
+        #      在硬判碰线之前把解推走；
+        #   2. 硬门槛：终检 strict / off 均生效——解净空 <
+        #      collision_safety_margin（默认 5mm）即拒绝整个 solve()。
+        #      对真实 mesh 表面的等效缓冲 = margin 5mm（胶囊包络为实测最大
+        #      半径，不加裕度）。
+        # True 自动构建默认走 mesh 模式（URDF 真实碰撞网格逐连杆凸包化，
+        # 与 MoveIt 同口径，整机全连杆覆盖）；capsule 模式（4 骨段解析几何，
+        # ~0.5ms 全量复核可进 DLS 内层 per-iteration——mesh 全量复核 ~47ms
+        # 会拖爆 strict 0.5s 预算，实测单种子 671ms）需显式
+        # collision_geometry="capsule" 降档（胶囊表只覆盖臂部 4 骨段，
+        # 躯干/头/另一侧臂/夹爪手指无包络）。
+        # 环境障碍物来源（collision_scene_sync，默认 True）：后台探测 MoveIt
+        #   /get_planning_scene——探测到 move_group 则常驻自动同步规划场景
+        #   障碍物（box/sphere/cylinder）进 manager，用户在 RViz/MoveIt 侧
+        #   增删障碍物 IK 自动跟随；探测不到（无 MoveIt / 无 ROS / rclpy
+        #   未装）则静默退化，环境防线仅剩手动 add_obstacle。探测在后台
+        #   线程，不阻塞求解器构造；solver.close() 时停止线程并回收资源。
+        col_mgr_explicit = cfg_tune.get("collision_manager", None)
+        if col_mgr_explicit is not None:
+            self.collision_avoidance = col_mgr_explicit
+            self.collision_manager = col_mgr_explicit
+        else:
+            self.collision_avoidance = cfg_tune.get("collision_avoidance", True)
+            if self.collision_avoidance is False or self.collision_avoidance is None:
+                self.collision_manager = None
+            elif self.collision_avoidance is True:
+                self.collision_manager = True  # 占位，pin_model 就绪后构建（见 _check_model 前）
+            else:
+                try:
+                    from ha_arm_ik.collision_fcl import RobotCollisionManager
+
+                    valid_instance = isinstance(
+                        self.collision_avoidance, RobotCollisionManager
+                    )
+                except ImportError:
+                    valid_instance = False
+                if not valid_instance:
+                    raise ValueError(
+                        "collision_avoidance must be True, False, None, or a "
+                        "RobotCollisionManager instance"
+                    )
+                self.collision_manager = self.collision_avoidance  # manager 实例
+        self.collision_safety_margin = float(cfg_tune.get("collision_safety_margin", 0.005))
+        self.collision_influence = float(cfg_tune.get("collision_influence_distance", 0.09))
+        self.collision_gain = float(cfg_tune.get("collision_repulsion_gain", 0.35))
+        # 开启防碰撞时默认把内层 com/collision 次任务代价同步进外层候选打分
         self.sync_secondary_cost = bool(
             cfg_tune.get("sync_secondary_cost", self.collision_manager is not None)
         )
         self.w_com = float(cfg_tune.get("w_com", 100.0))
         self.w_collision = float(cfg_tune.get("w_collision", 500.0))
+        # 统一解列表：solve() 成功结果附带 info["solutions"] =
+        # [best, 备选, ...] 按排序输出的已过硬约束（跳变/限位/位姿/负荷）的
+        # 有序解，供客户端在 MoveIt 目标碰撞时直接遍历重试。
+        # 0 = 关闭（默认最优解）；None = 输出全部合格候选；k = 上限 k 个。
+        n_alt = cfg_tune.get("num_alternates", 0)
+        if n_alt is None:
+            self.num_alternates = None
+        else:
+            self.num_alternates = int(n_alt)
         self.seed_library = None
         self.dls_locked_reach = None
 
@@ -5625,6 +5717,29 @@ class HAArmIKSolver:
             if self.use_pinocchio_ik and self.dls_seed_library_size > 0:
                 self.seed_library = self._shared_seed_library()
 
+        # 防碰撞自动构建：pin_model/chain/maps/T_world_from_base 全部就绪后
+        # （collision_avoidance=True 时把占位 True 换成真 manager；构建编排
+        # 全在 collision.auto_mount——geometry 档位 / 场景感知挂载是碰撞域
+        # 内部决策，solver 只负责调用）
+        if self.collision_manager is True:
+            try:
+                from ha_arm_ik.collision_fcl import auto_mount
+            except ImportError:
+                try:
+                    from ha_arm_ik.collision import auto_mount
+                except ImportError:
+                    auto_mount = None
+            if auto_mount is not None:
+                self.collision_manager = auto_mount(self, cfg_tune)
+                if self.verbose:
+                    print(
+                        f"[HAArmIKSolver] collision_avoidance=True: 已自动构建 "
+                        f"{getattr(self.collision_manager, 'geometry', 'mesh')} "
+                        f"碰撞管理器（{self.collision_manager.geom_model.ngeoms} geoms）"
+                    )
+            else:
+                self.collision_manager = None
+
         self._check_model()
 
         if self.verbose:
@@ -5822,7 +5937,8 @@ class HAArmIKSolver:
             )
         return (
             "NO_LOAD_SAFE_SOLUTION",
-            "No candidate passed bounds and confirmed static-load gates",
+            "No candidate passed bounds, confirmed static-load gates"
+            " and the collision safety margin",
         )
 
     # ----- 10.2.4 模型物理审计与静态载荷评定 (Model Physics & Static Load) -----
@@ -6199,6 +6315,7 @@ class HAArmIKSolver:
                 "max_iter": self.dls_max_iter,
                 "damping": self.dls_damping,
                 "max_step": self.dls_max_step,
+                "backtrack_steps": self.dls_backtrack_steps,
                 "nullspace_gain": self.dls_nullspace_gain,
                 "waist_null_gain": self.dls_waist_null_gain,
                 "waist_task_weight": self.dls_waist_task_weight,
@@ -6219,10 +6336,13 @@ class HAArmIKSolver:
             dls_params["continuation_reach"] = self.dls_arm_max_reach
             if getattr(self, "collision_manager", None) is not None:
                 dls_params["collision_manager"] = self.collision_manager
+                dls_params["collision_influence"] = self.collision_influence
+                dls_params["collision_margin"] = self.collision_safety_margin
+                dls_params["collision_gain"] = self.collision_gain
             if getattr(self, "sync_secondary_cost", False):
                 dls_params["sync_secondary_cost"] = True
-                dls_params["w_com"] = getattr(self, "w_com", 100.0)
-                dls_params["w_collision"] = getattr(self, "w_collision", 500.0)
+                dls_params["w_com"] = self.w_com
+                dls_params["w_collision"] = self.w_collision
             if self.include_waist:
                 dls_params["shoulder_joint"] = self.s_joint
                 dls_params["waist_max_reach"] = self.dls_waist_max_reach
@@ -6457,10 +6577,33 @@ class HAArmIKSolver:
                 joint_efforts_active=self.joint_efforts_active,
             )
 
+        # direct_psi / ssik 候选不做 per-candidate H_col 同步：单次
+        # compute_collision_repulsion_gradient（cost-only）实测 ~0.5s/次
+        # （全对 broad-phase + GJK 主导，见证点雅可比占比极小），乘以候选数
+        # 必然爆 strict 预算。安全语义不缺口——落进安全裕度的候选随后会被
+        # strict 终检 / off 模式碰撞门槛（与 load_mode 解耦）拒绝；排序偏差
+        # 只剩“贴障碍（净空 < 9cm 影响半径）的 direct_psi/ssik 候选不受
+        # w_collision 惩罚”，属于有界的择优偏差，不牺牲安全性。DLS 候选的
+        # H_col 已在 collector 内同步（零额外开销）。
+        if self.sync_secondary_cost and self.collision_manager is not None:
+            for c in candidates:
+                if "collision_cost" not in c:
+                    c["collision_cost"] = 0.0
+
         best, status = select_best_candidate(
             candidates,
             use_torque=self.use_torque_cost,
         )
+        # 成功时从同一合格池中取统一有序解列表（第 0 个即 best，
+        # 详见 rank_topk_candidates）；写入 info["solutions"]
+        solutions = None
+        if best is not None and is_valid_status(status) and self.num_alternates != 0:
+            solutions = rank_topk_candidates(
+                candidates,
+                self.num_alternates,
+                use_torque=self.use_torque_cost,
+            )
+
         self._record_comfort_selection(best, per_seed)
 
         if best is not None and "joint_jump_max_rad" in best:
@@ -6494,6 +6637,16 @@ class HAArmIKSolver:
             best["approximate_accepted"] = False
 
         if best is not None and is_valid_status(status):
+            # 碰撞硬门槛只取决于是否挂载 manager，与 load_mode 解耦：
+            # off 模式的解同样保证无碰（strict 另含负荷门）。
+            if self.collision_manager is not None and self.load_mode != "strict":
+                ok, _ = self._check_collision_gate(best["q"], candidate=best)
+                if not ok:
+                    return self._load_failure(
+                        "FINAL_RECHECK_FAILED",
+                        "Selected candidate violated collision safety margin",
+                        per_seed,
+                    )
             if self.load_mode == "strict":
                 if not self._check_load_candidate(
                     best,
@@ -6513,6 +6666,8 @@ class HAArmIKSolver:
                 code = "ACCEPTED"
             else:
                 code = "ACCEPTED_WITH_LOAD_PROTECTION_OFF"
+            if solutions is not None:
+                best["solutions"] = solutions
             return self._accept(best, status, code, per_seed, update_prev)
 
         if (
@@ -6529,6 +6684,15 @@ class HAArmIKSolver:
                     tool_axis,
                     tool_cone_half_angle,
                 )
+                # 近似接受同样受碰撞硬门槛约束（与精确路径同一 manager 口径）
+                if self.collision_manager is not None and not best.get(
+                    "collision_ok", False
+                ):
+                    return self._load_failure(
+                        "NO_LOAD_SAFE_APPROXIMATE_SOLUTION",
+                        "Approximate candidate violated collision safety margin",
+                        per_seed,
+                    )
                 if not (
                     best.get("load_bounds_ok", False)
                     and best.get("load_ok", False)
@@ -6543,6 +6707,15 @@ class HAArmIKSolver:
                     return stale
                 code = "APPROXIMATE_ACCEPTED_LOAD_SAFE"
             else:
+                # off 模式近似回退同样保证无碰（硬门槛与 load_mode 解耦）
+                if self.collision_manager is not None:
+                    ok, _ = self._check_collision_gate(best["q"], candidate=best)
+                    if not ok:
+                        return self._load_failure(
+                            "NO_LOAD_SAFE_APPROXIMATE_SOLUTION",
+                            "Approximate candidate violated collision safety margin",
+                            per_seed,
+                        )
                 code = "APPROXIMATE_WITH_LOAD_PROTECTION_OFF"
 
             best["approximate"] = True
@@ -6551,7 +6724,8 @@ class HAArmIKSolver:
             best["status"] = "APPROXIMATE"
             best["approximate_policy"] = (
                 "allow_approximate=True: use best candidate by pose error "
-                "(strict bounds and static-load gates enforced when load_mode='strict')"
+                "(strict bounds and static-load gates enforced when load_mode='strict'; "
+                "collision gate enforced when collision avoidance is on)"
             )
             return self._accept(best, "APPROXIMATE", code, per_seed, update_prev)
 
@@ -6790,6 +6964,16 @@ class HAArmIKSolver:
         if not self._solve_lock.acquire(blocking=False):
             raise RuntimeError("cannot close while solve/evaluate is in flight")
         try:
+            # 场景感知后台线程先停 (持有 manager 引用, 需在模型拆除前退出)
+            try:
+                from ha_arm_ik.collision_fcl import shutdown as collision_shutdown
+            except ImportError:
+                try:
+                    from ha_arm_ik.collision import shutdown as collision_shutdown
+                except ImportError:
+                    collision_shutdown = None
+            if collision_shutdown is not None:
+                collision_shutdown(self)
             self.pin_model = None
             self.pin_data = None
             self.pin_maps = None
@@ -6894,6 +7078,36 @@ class HAArmIKSolver:
                     return f"CONTEXT_CHANGED:{name}"
         return None
 
+    def _check_collision_gate(self, q, candidate=None):
+        """碰撞硬门槛辅助 (solve 流程四处 check_collision 的统一口径)。
+
+        Args:
+            q: 待验关节角。
+            candidate: 可选字典, 传入时把 collision_ok / collision_min_distance
+                写入该字典 (终检写 best、负荷复核写 candidate 两种用法统一)。
+        Returns:
+            (collision_ok, min_distance): ok = 净空 >= margin; min_distance
+            仅距离查询路径有效 (布尔路径 inf, 调用方以 np.isfinite 守卫)。
+        """
+        if getattr(self, "collision_manager", None) is None:
+            if candidate is not None:
+                candidate["collision_ok"] = True
+            return True, float("inf")
+        col_rep = self.collision_manager.check_collision(
+            q, safety_margin=self.collision_safety_margin,
+        )
+        ok = not col_rep.is_collision
+        min_d = (
+            float(col_rep.min_obstacle_distance)
+            if hasattr(col_rep, "min_obstacle_distance") and np.isfinite(col_rep.min_obstacle_distance)
+            else float("inf")
+        )
+        if candidate is not None:
+            candidate["collision_ok"] = ok
+            if np.isfinite(min_d):
+                candidate["collision_min_distance"] = min_d
+        return ok, min_d
+
     def _check_load_candidate(
         self, candidate, T_target_world, orientation_mode, tool_axis, cone
     ):
@@ -6934,15 +7148,7 @@ class HAArmIKSolver:
             and pos_err <= POS_TOL
             and ori_violation <= ORI_TOL
         )
-        collision_ok = True
-        if getattr(self, "collision_manager", None) is not None:
-            col_rep = self.collision_manager.check_collision(
-                q,
-                stop_at_first=True,
-                safety_margin=getattr(self, "collision_safety_margin", 0.02),
-            )
-            collision_ok = not col_rep.is_collision
-            candidate["collision_ok"] = collision_ok
+        collision_ok, _ = self._check_collision_gate(q, candidate=candidate)
         cache = self._load_context.get("_physics_cache") if filtering else None
         physical = None if cache is None else cache.get(q_bytes)
         if physical is None:
@@ -7009,6 +7215,10 @@ class HAArmIKSolver:
                                 "bounds_ok": c["load_bounds_ok"],
                                 "peak_ratio": c["load_peak_ratio"],
                                 "overloaded_joints": c["load_overloaded_joints"],
+                                "collision_ok": c.get("collision_ok"),
+                                "collision_min_distance": c.get(
+                                    "collision_min_distance"
+                                ),
                             }
                         )
                 except Exception as exc:
@@ -7204,6 +7414,10 @@ class HAArmIKSolver:
                 if stale:
                     self.q_prev = old_prev
                     return stale
+            # 纯求解耗时 (不含 strict 上下文准备/复核与 solve() 外壳开销)，写入
+            # info 供客户端直接读取；与 last_load_diagnostics["elapsed_ms"] 同源。
+            if result[0] is not None and hasattr(result[2], "__setitem__"):
+                result[2]["solve_ms"] = round((time.monotonic() - start) * 1000.0, 1)
             return result
         except Exception as exc:
             self.q_prev = old_prev
@@ -7248,6 +7462,7 @@ class HAArmIKSolver:
         damping=None,
         max_step=None,
         margin_bounds=None,
+        fixed_joint_mask=None,
     ):
         """单种子 DLS/SNS 迭代接口，自动注入当前求解器的 pin_model, pin_data, pin_maps 及 load_context。"""
         if not self._solve_lock.acquire(blocking=False):
@@ -7261,15 +7476,9 @@ class HAArmIKSolver:
             eff_upper = self.search_upper if upper is None else upper
             ref = self.q_ready if q_ref is None else q_ref
             char_len = float(self.dls_characteristic_length or 0.5)
-            return pinocchio_ik_one_seed(
-                self.pin_model,
-                self.pin_data,
-                self.pin_maps,
-                self.pin_ee_frame_id,
-                target_T,
-                q_init,
-                eff_lower,
-                eff_upper,
+            # 与 solve() 的 dls_params 注入同口径：公共单种子入口的配置
+            # 必须与 solve() 一致，否则同一配置两个入口给出不同解
+            one_seed_kwargs = dict(
                 max_iter=self.dls_max_iter if max_iter is None else max_iter,
                 damping=self.dls_damping if damping is None else damping,
                 pos_tol=min(PIN_IK_POS_TOL, POS_TOL) if pos_tol is None else pos_tol,
@@ -7298,6 +7507,27 @@ class HAArmIKSolver:
                 shoulder_joint=self.s_joint if self.include_waist else None,
                 posture_settle=posture_settle,
                 margin_bounds=margin_bounds,
+                band_bounds=(self.search_lower, self.search_upper),
+                fixed_joint_mask=fixed_joint_mask,
+                backtrack_steps=self.dls_backtrack_steps,
+            )
+            if getattr(self, "collision_manager", None) is not None:
+                one_seed_kwargs.update(
+                    collision_manager=self.collision_manager,
+                    collision_influence=self.collision_influence,
+                    collision_margin=self.collision_safety_margin,
+                    collision_gain=self.collision_gain,
+                )
+            return pinocchio_ik_one_seed(
+                self.pin_model,
+                self.pin_data,
+                self.pin_maps,
+                self.pin_ee_frame_id,
+                target_T,
+                q_init,
+                eff_lower,
+                eff_upper,
+                **one_seed_kwargs,
             )
         finally:
             self._solve_lock.release()

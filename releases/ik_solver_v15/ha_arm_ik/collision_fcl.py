@@ -740,6 +740,7 @@ class RobotCollisionManager:
         repulsion_gain: float = 0.25,
         check_self: bool = True,
         check_obstacles: bool = True,
+        compute_gradient: bool = True,
     ) -> Tuple[np.ndarray, float, CollisionReport]:
         """计算零空间碰撞排斥次任务负梯度 z_col = -∇_q H_col(q)、势能代价 H_col 及完整碰撞报告。
 
@@ -812,29 +813,32 @@ class RobotCollisionManager:
                     u_away_1 = (diff / dn) if dn > 1e-9 else np.array([0.0, 0.0, 1.0])
                 u_away_2 = -u_away_1
 
-                grad_d = np.zeros(n_act, dtype=float)
-                if gid1 not in obs_gids:
-                    J1 = self._point_jacobian(gid1, p1, fk_cache)
-                    grad_d += J1.T @ u_away_1
-                if gid2 not in obs_gids:
-                    J2 = self._point_jacobian(gid2, p2, fk_cache)
-                    grad_d += J2.T @ u_away_2
+                if compute_gradient:
+                    grad_d = np.zeros(n_act, dtype=float)
+                    if gid1 not in obs_gids:
+                        J1 = self._point_jacobian(gid1, p1, fk_cache)
+                        grad_d += J1.T @ u_away_1
+                    if gid2 not in obs_gids:
+                        J2 = self._point_jacobian(gid2, p2, fk_cache)
+                        grad_d += J2.T @ u_away_2
 
                 # C¹ 连续双层单侧二次排斥势场：
                 #   1. 外层缓冲势垒 (d < pair_inf)：平滑引导连杆远离障碍物影响区；
                 #   2. 内层安全势垒 (d < threshold)：当侵入安全裕度时平滑叠加高刚度排斥项（在 d == threshold 处函数值与导数均连续为 0，无跳变振颤）。
                 u_outer = (pair_inf - d) / pair_inf
                 cost_col += 0.5 * repulsion_gain * (u_outer * u_outer)
-                grad_coeff = (repulsion_gain / pair_inf) * u_outer
+                grad_coeff = (repulsion_gain / pair_inf) * u_outer if compute_gradient else 0.0
 
                 if d < threshold:
                     scale_inner = max(threshold, 0.01)
                     u_inner = (threshold - d) / scale_inner
                     inner_gain = 2.0 * repulsion_gain
                     cost_col += 0.5 * inner_gain * (u_inner * u_inner)
-                    grad_coeff += (inner_gain / scale_inner) * u_inner
+                    if compute_gradient:
+                        grad_coeff += (inner_gain / scale_inner) * u_inner
 
-                z_col += grad_coeff * grad_d
+                if compute_gradient:
+                    z_col += grad_coeff * grad_d
 
         report = CollisionReport(
             is_collision=(has_self or has_obs),

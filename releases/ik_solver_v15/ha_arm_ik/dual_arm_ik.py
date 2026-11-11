@@ -88,7 +88,7 @@ NULLSPACE_ERR_SCALE = 0.06      # 零空间权重 = (达标 1.5 / 未达标 1.0)
 POSTURE_SETTLE_TOL = 1e-4       # 姿态整理：步长小于此值（rad）即收敛
 SETTLE_COST_RTOL = 1e-3         # 姿态整理：回中代价相对下降 < 0.1% 记为慢步
 SETTLE_PATIENCE = 3             # 连续 3 个慢步即收敛
-MAX_SETTLE_ITERS = 50           # solver_dls.MAX_SETTLE_EXTRA_ITERS
+MAX_SETTLE_ITERS = 25           # solver_dls.MAX_SETTLE_EXTRA_ITERS
 WAIST_TASK_WEIGHT = 6.0         # 近目标：腰部步长代价为手臂的 6 倍（逆度量 1/6）
 WAIST_TASK_WEIGHT_FAR = 1.0     # 远目标：腰部与手臂同价
 WAIST_RELEASE_START = 0.75      # 肩 -> 目标距离 / 臂展 达到此比例开始放腰
@@ -207,8 +207,8 @@ class DualArmLayout:
     left_shoulder: str = "LHand_Link2"      # 单臂 s_joint：腰部释放用的臂展从这里起算
     right_shoulder: str = "RHand_Link2"
     q_ready_waist: tuple = (0.0, 0.0)
-    q_ready_left: tuple = (-0.523599, -0.785398, 0.0, -0.698132, 0.0, 1.570796, 0.0)
-    q_ready_right: tuple = (0.523599, -0.785398, 0.0, -0.698132, 0.0, 1.570796, 0.0)
+    q_ready_left: tuple = (0.0, -0.392699, 0.0, -0.698132, 0.0, 1.570796, 0.0)
+    q_ready_right: tuple = (0.0, -0.392699, 0.0, -0.698132, 0.0, 1.570796, 0.0)
 
     @property
     def joint_names(self):
