@@ -1958,10 +1958,13 @@ class _SecondaryObjective:
 
         # 单侧安全裕度排斥项的缓冲边界
         self.margin = max(float(SAFE_MARGIN), 0.02)
+        self.inv_margin = 1.0 / self.margin
         self.limit_gain = limit_gain
         if limit_gain > 0.0:
             self.b_low = np.minimum(q_ref, lower + self.margin)
             self.b_high = np.maximum(q_ref, upper - self.margin)
+            self.gain_div_margin = self.limit_gain * self.inv_margin
+            self.half_limit_gain = 0.5 * self.limit_gain
 
         # 静态重力矩与质心
         self.context = load_context
@@ -2075,15 +2078,14 @@ class _SecondaryObjective:
 
     def _limit_terms(self, q_active, need_z):
         """单侧安全裕度排斥项：返回 (z 增量或 None, c_lim)。"""
-        margin, gain = self.margin, self.limit_gain
         under = np.maximum(0.0, self.b_low - q_active)
         over = np.maximum(0.0, q_active - self.b_high)
         if not np.any(under) and not np.any(over):
             return (0.0 if need_z else None), 0.0
-        u = under / margin
-        o = over / margin
-        c_lim = 0.5 * gain * float(np.dot(u * u + o * o, self.movable_f))
-        dz = (gain / margin) * (u - o) if need_z else None
+        u = under * self.inv_margin
+        o = over * self.inv_margin
+        c_lim = self.half_limit_gain * float(np.dot(u * u + o * o, self.movable_f))
+        dz = self.gain_div_margin * (u - o) if need_z else None
         return dz, c_lim
 
     def _raise_nonfinite(self, com, Jcom, tau, ratios, dtau, g_load, c_load, cost, z, derivatives, need_z):
@@ -2426,13 +2428,20 @@ def _sns_clamped_core(
         dq_null_free = None
         try:
             chol_fac = _chol_factor(A)
-            rhs = _chol_solve(chol_fac, err_rem)
-            dq_task_free = d_free * (J_free.T @ rhs)
             if use_null:
                 # 度量一致的零空间下降步：w (D z - D J^T A^-1 J D z)
+                # 融合双 RHS 求解与反向投影，由单个底层 LAPACK 调用与单次 GEMM 完成
                 Dz = d_free * (z_grad if all_free else z_grad[free_mask])
-                JT_inv = J_free.T @ _chol_solve(chol_fac, J_free @ Dz)
-                dq_null_free = null_weight * (Dz - d_free * JT_inv)
+                B = np.empty((task_dim, 2), dtype=float, order="F")
+                B[:, 0] = err_rem
+                B[:, 1] = J_free @ Dz
+                sol = _chol_solve(chol_fac, B)
+                JT_sol = J_free.T @ sol
+                dq_task_free = d_free * JT_sol[:, 0]
+                dq_null_free = null_weight * (Dz - d_free * JT_sol[:, 1])
+            else:
+                rhs = _chol_solve(chol_fac, err_rem)
+                dq_task_free = d_free * (J_free.T @ rhs)
         except (np.linalg.LinAlgError, ValueError):
             dq_task_free, sec_free = _metric_svd_step(
                 J_free,
@@ -2474,13 +2483,11 @@ def _sns_clamped_core(
 
         # 越界检查：viol_i = max(0, lo_i - q_i', q_i' - hi_i)（仅自由关节），取首个最大者钳制
         q_trial = q_active_cur + dq_total
-        under_amt = np.where(
-            free_mask, np.maximum(0.0, eff_lower - q_trial), 0.0
-        )
-        over_amt = np.where(
-            free_mask, np.maximum(0.0, q_trial - eff_upper), 0.0
-        )
+        under_amt = np.maximum(0.0, eff_lower - q_trial)
+        over_amt = np.maximum(0.0, q_trial - eff_upper)
         viol_amt = np.maximum(under_amt, over_amt)
+        if not all_free:
+            viol_amt[~free_mask] = 0.0
         if viol_amt.max() <= 1e-12:
             clamped_converged = True
             break
@@ -2698,6 +2705,7 @@ def _make_task_terms(
     v_range = _contiguous_range(v_idx)
     v_slice = None if v_range is None else slice(*v_range)
     cl = characteristic_length
+    inv_cl = 1.0 / cl
     target_p = np.array(target[:3, 3], dtype=float)
     if mode == "full":
         target_se3 = pin.SE3(target[:3, :3], target[:3, 3])
@@ -2748,8 +2756,8 @@ def _make_task_terms(
             if build_A:
                 # 计算伴随几何雅可比
                 A = pin.Jlog6(delta.inverse()) @ J if jacobian else J.copy()
-                A[:3] /= cl
-            e[:3] /= cl
+                A[:3] *= inv_cl
+            e[:3] *= inv_cl
             violation = angle
         else:
             a = np.asarray(current.rotation) @ axis
@@ -2769,9 +2777,9 @@ def _make_task_terms(
                     tangent = _antipodal_tangent(a, Jdir if jacobian else None)
                     edir = angle * tangent
                     antipodal = True
-                e = np.concatenate((pos_error / cl, edir))
+                e = np.concatenate((pos_error * inv_cl, edir))
                 if build_A:
-                    A = np.vstack([J[:3] / cl, Jdir])
+                    A = np.vstack([J[:3] * inv_cl, Jdir])
                 violation = angle
             else:
                 violation = max(0.0, angle - cone)
@@ -2789,9 +2797,9 @@ def _make_task_terms(
                         antipodal = True
                     if build_A:
                         row = tangent @ J[3:]
-                e = np.concatenate((pos_error / cl, (violation,)))
+                e = np.concatenate((pos_error * inv_cl, (violation,)))
                 if build_A:
-                    A = np.vstack([J[:3] / cl, row])
+                    A = np.vstack([J[:3] * inv_cl, row])
 
         return {
             "error": e,
@@ -3074,9 +3082,18 @@ def pinocchio_ik_one_seed(
     periodic_any = bool(np.any(periodic_unbounded))
     # 逆度量 D 为对角阵：保存对角元向量以加速 SNS 迭代
     d_base = 1.0 / weights
+    inv_near = 1.0 / near_weight
+    inv_far = 1.0 / far_weight
     waist_idx = np.nonzero(waist)[0]
     waist_movable = waist & movable
     has_waist_dof = bool(np.any(waist_movable))
+    d_inv_static = d_base.copy()
+    if has_waist_dof and not release_enabled:
+        alpha = 1.0 if waist_load_release else 0.0
+        d_inv_static[waist_idx] = (1.0 - alpha) * inv_near + alpha * inv_far
+    d_inv_is_constant = (not has_waist_dof) or (not release_enabled)
+    d_inv = d_inv_static
+    inv_ns_err_scale = 1.0 / max(NULLSPACE_ERR_SCALE, 1e-6)
     target_p = np.array(target[:3, 3], dtype=float)
 
     band_lower, band_upper = (None, None) if band_bounds is None else band_bounds
@@ -3289,8 +3306,8 @@ def pinocchio_ik_one_seed(
                 stall_ref, stall_it = err_norm, it
 
         # 逆度量 D（对角元向量）：手臂 = 1；腰部在近距离目标时“贵”(1/near_weight)，远目标或回程时逐步释放
-        d_inv = d_base.copy()
-        if has_waist_dof:
+        if not d_inv_is_constant:
+            d_inv = d_base.copy()
             alpha = 1.0 if waist_load_release else 0.0
             if release_enabled and shoulder_gap is not None:
                 current_distance = _vec_norm(shoulder_gap)
@@ -3307,19 +3324,11 @@ def pinocchio_ik_one_seed(
                     release_fraction(current_distance),
                     min(max(ret, 0.0), 1.0),
                 )
-            d_inv[waist_idx] = (
-                1.0 - alpha
-            ) / near_weight + alpha / far_weight
+            d_inv[waist_idx] = (1.0 - alpha) * inv_near + alpha * inv_far
 
         # 主任务误差越小，零空间次任务权重越大（达标后再放大 1.5 倍做姿态整理）
-        null_weight = (1.5 if pose_ok else 1.0) / (
-            1.0
-            + (
-                _vec_norm(t["error"])
-                / max(NULLSPACE_ERR_SCALE, 1e-6)
-            )
-            ** 2
-        )
+        err_scaled = _vec_norm(t["error"]) * inv_ns_err_scale
+        null_weight = (1.5 if pose_ok else 1.0) / (1.0 + err_scaled * err_scaled)
 
         if not posture_settle and not pose_ok:
             # 续算模式：未达标前将零空间原始步长限幅到 NO_SETTLE_NULL_STEP_RATIO × |e|
