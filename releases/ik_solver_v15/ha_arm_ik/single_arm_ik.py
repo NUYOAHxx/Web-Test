@@ -165,57 +165,42 @@ __all__ = [
     "collect_pinocchio_candidates_and_seeds",
 ]
 
-SOLVER_VERSION = "merged-v15"   # 写入 last_load_diagnostics["version"]
+SOLVER_VERSION = "v17"   # 写入 last_load_diagnostics["version"]
 
 # =============================================================================
 # 2. 全局超参数与策略常量 (Global Hyperparameters & Policy Constants)
 # =============================================================================
 
 # --- 2.1 Pinocchio DLS 基础数值与收敛容差参数 ---
-# 500 -> 250：停滞检测（12 迭代 / 2.5%）实际在 ~130 迭代内掐掉坏种子，p99=130、
-# max=251（strat 60 目标实测），250 为 p99 的两倍余量；跑满 500 的种子为零。
-# 150 会提前掐断个别可收敛种子，早停补偿性多跑种子反而更慢（实测 +3ms）。
-PIN_IK_MAX_ITER = 250
-PIN_IK_DAMPING = 1e-6
+PIN_IK_MAX_ITER = 250             # DLS 求解最大迭代步数上限
+PIN_IK_DAMPING = 1e-6             # 最小二乘阻尼因子 (λ)
 PIN_IK_POS_TOL = 5e-4             # DLS 内部位姿容差上限；实际取 min(本值, ik_base.POS_TOL)
 PIN_IK_ORI_TOL = 5e-4             # 同上，实际取 min(本值, ik_base.ORI_TOL)
 PIN_IK_MAX_STEP = 0.5             # 单次迭代关节步长 2-范数上限（弧度）
-# 回溯线搜索试探步数上限（默认 12 -> 8）：首轮试探基本即被接受，减的是陡峭
-# 误差面上的备选试探；strat 60 目标 A/B 实测与 bt12 成功率一致、尾部 max 更低
-PIN_IK_BACKTRACK_STEPS = 8
-PIN_IK_STALL_ITERS = 12           # 停滞检测窗口：位姿未达标时每 12 次迭代检查一次进展（v6 为 25）
-PIN_IK_STALL_RTOL = 0.025         # 窗口内主任务误差范数相对下降 < 2.5% -> 判定停滞，换下一个种子
-                                  # （v6 为每 25 次迭代 5%；v7 窗口减半、阈值减半，判定速率与 v6 相当但检查更频繁。
-                                  #   窗口 12 + 5% 会误杀收敛较慢的锁腰种子，tool 模式少数目标丢掉腰部回中解）
+PIN_IK_BACKTRACK_STEPS = 8        # 回溯线搜索试探步数上限
+PIN_IK_STALL_ITERS = 12           # 停滞检测窗口：位姿未达标时每隔该步数检查一次收敛进展
+PIN_IK_STALL_RTOL = 0.025         # 停滞判定阈值：检测窗口内主任务误差范数相对下降 < 2.5% 则判定为停滞
 BOUND_SNAP_TOL = 1e-9             # 试探点越界不超过此值（浮点舍入）时吸附回边界，不整步拒绝
-N_NOISE_PER_BASE = 16
-# 扰动种子标准差（rad），从大到小：前几个扰动种子先探索不同解族（提高成功率、找低负荷解），
-# 后面的小扰动做局部细化。v5 为 [0.02, 0.05, 0.10, 0.20] 且先排完 q_prev 的 16 个小扰动，
-# max_seeds=10 时扰动种子几乎与 q_prev 重合，远目标成功率 97% -> v6 100%（合成基准 100 例）。
+N_NOISE_PER_BASE = 16             # 基础扰动样本数
+# 扰动种子标准差（rad）：从大到小多尺度梯度探索不同构型解族并进行局部细化
 NOISE_SCALES = [0.60, 0.30, 0.15, 0.05]
 
 # --- 2.2 零空间次任务与流形稳态收敛参数 ---
 NULLSPACE_GAIN = 0.30             # 手臂冗余关节拉向 q_ref 物理坐标的次任务增益
 WAIST_NULL_GAIN = 0.50            # 腰部关节拉向 q_ref 腰部角（默认 q_ready）的次任务增益
-NULLSPACE_ERR_SCALE = 0.06        # 零空间权重 = (达标 1.5 / 未达标 1.0) / (1 + (|e| / 0.06)^2)，
-                                  # e 为位置按 characteristic_length(0.5 m) 缩放后的主任务误差：
-                                  # |e| = 0.06 时权重减半（约 30 mm 或 3.4°），误差越小越接近全功率
+NULLSPACE_ERR_SCALE = 0.06        # 零空间权重非线性衰减尺度 (rad 或 m/0.5m)
 POSTURE_SETTLE_TOL = 1e-4         # 末端收敛后，零空间步长小于此阈值(rad)才算稳态收敛
-MAX_SETTLE_EXTRA_ITERS = 25       # 末端达标后继续在零空间整理姿态的安全上限（v8/v6 为 50；50 -> 25：
-                                  # strat 60 目标 A/B 成功率/候选数/主解代价均不变（cost mean +0.04%），
-                                  # solve mean -7ms；SETTLE_LIMIT 尾部种子（56 个）是达标后整理的耗时主体）
+MAX_SETTLE_EXTRA_ITERS = 25       # 末端达标后继续在零空间整理姿态的最大附加迭代步数上限
 SETTLE_COST_RTOL = 1e-3           # 姿态整理阶段：单步次任务代价相对下降 < 0.1% 记为“慢步”
-SETTLE_PATIENCE = 3               # 连续 3 个慢步即视为已收敛（收敛判据，v8 恢复 v6 取值；v7 为 2）
-POSE_PEAK_BAND_FRACTION = 0.25    # 单种子内择优的峰值容差带 = 0.25 * LoadPolicy.peak_tie（默认 0.005）
-NO_SETTLE_NULL_STEP_RATIO = 2.0   # v15：posture_settle=False（续算）时未达标的零空间原始步 |w·D z| <= 2 × |e|
-                                  # （e 为缩放后的主任务误差，与双臂 NULL_STEP_RATIO 相同）：回中幅度与手的
-                                  # 移动量成正比；不限幅时 1 mm 的目标移动也会让关节在收敛过程中变 0.1 rad
-LOAD_EARLY_STOP_RATIO = 0.70      # 低负荷早停阈值默认值，实际取 min(本值, soft_ratio)（v6 默认 0.60）
+SETTLE_PATIENCE = 3               # 姿态整理收敛耐心值：连续 3 个慢步判定为已稳态收敛
+POSE_PEAK_BAND_FRACTION = 0.25    # 单种子内择优的峰值容差带比例
+NO_SETTLE_NULL_STEP_RATIO = 2.0   # 续算模式（posture_settle=False）下未达标时零空间原始步幅与主任务误差的限幅比例
+LOAD_EARLY_STOP_RATIO = 0.70      # 低负荷早停阈值默认值，实际取 min(本值, soft_ratio)
 
 # --- 2.3 无状态腰部自适应释放参数（路径无关，去返程完全对称） ---
 # 逆度量 D 的腰部对角元 = (1-α)/WAIST_TASK_WEIGHT + α/WAIST_TASK_WEIGHT_FAR（手臂 = 1），
 # α 为释放系数（0 = 近目标，1 = 远目标或负荷释放）。D 越小，腰部单位步长在 DLS 中越“贵”。
-WAIST_TASK_WEIGHT = 6.0           # 近目标：腰部步长代价为手臂的 6 倍（D = 1/6，不是锁死）
+WAIST_TASK_WEIGHT = 6.0           # 近目标：腰部步长代价为手臂的 6 倍（D = 1/6，优先臂动）
 WAIST_TASK_WEIGHT_FAR = 1.0       # 远目标完全释放：腰部与手臂同价（D = 1），腰部按需参与够远
 WAIST_RELEASE_START = 0.75        # 肩->目标距离 / 最大臂展 达到此比例开始放腰
 WAIST_RELEASE_END = 0.94          # 达到此比例腰完全释放
@@ -224,24 +209,23 @@ WAIST_RETURN_RELEASE_RAD = 0.20   # 返程解锁尺度(rad)：腰偏离 q_ref �
 # --- 2.4 电机重力矩卸载、重心稳定与限位保护参数 ---
 GRAVITY_TORQUE_GAIN = 0.04        # 默认绝对归一化重力矩卸载增益
 RELATIVE_GRAVITY_GAIN = 0.0       # 可选的相对参考姿态重力矩保持增益
-COM_XY_GAIN = 0.12                # 零空间整机质心(CoM)水平投影稳定增益（代价 0.5 * 0.12 * |Δc|^2，Δc 单位 m）
+COM_XY_GAIN = 0.12                # 零空间整机质心(CoM)水平投影稳定增益
 JOINT_LIMIT_GAIN = 0.03           # 限位排斥增益；排斥区宽度 = max(SAFE_MARGIN, 0.02) rad
-WAIST_YAW_VIRTUAL_LIM = np.deg2rad(90.0)   # v8：重力无关腰关节（偏航类）的舒适半窗，见 derive_waist_comfort_bounds
+WAIST_YAW_VIRTUAL_LIM = np.deg2rad(90.0)   # 重力无关腰关节（偏航轴）的舒适半窗（弧度）
 
 # --- 2.5 腰部舒适窗自适应参数 ---
 WAIST_COMFORT_SOFT_RATIO = 0.70   # 未配置 load_soft_ratio 时的默认值（与 LoadPolicy.soft_ratio 默认一致）
-WAIST_COMFORT_MAX_HALF = 0.5 * np.pi       # 任何腰关节的舒适半窗不超过 90°（躯干最多转四分之一圈）
+WAIST_COMFORT_MAX_HALF = 0.5 * np.pi       # 任何腰关节的舒适半窗不超过 90°
 WAIST_GRAVITY_FREE_COS = math.cos(math.radians(30.0))  # 关节轴与重力夹角 < 30° 视为重力无关（偏航类）
-WAIST_COMFORT_EDGE_SEEDS = 1      # 舒适窗内无合格解时，取窗内主任务误差最小的几个迭代终点作为放开后的续算种子
-WAIST_COMFORT_CONTINUATION_STEP = 0.10   # 续算判据：目标相对 FK(q_prev) 位置差 <= 0.1 × 臂展且姿态差 <= 0.1 rad
-                                         # （约 0.1 rad 关节运动，雅可比线性化仍有效）时不加舒适窗
+WAIST_COMFORT_EDGE_SEEDS = 1      # 舒适窗内无合格解时，取窗内主任务误差最小的迭代终点作为放开后的续算种子
+WAIST_COMFORT_CONTINUATION_STEP = 0.10   # 续算判据比例：目标位姿变化小时不加舒适窗
 
 # --- 2.6 任务空间种子库与最近邻检索参数 ---
-SEED_LIBRARY_SIZE = 16384         # 初始化时在有效限位内均匀采样的关节角个数（建库约 150 ms、2.8 MB）；0 = 关闭
-SEED_LIBRARY_SEEDS = 3            # 每个常规搜索阶段插入的种子库种子个数（排在 q_prev / 锁腰 / q_ready 之后）
+SEED_LIBRARY_SIZE = 16384         # 初始化时在有效限位内均匀采样的关节角个数；0 = 关闭
+SEED_LIBRARY_SEEDS = 3            # 每个常规搜索阶段插入的种子库种子个数
 SEED_LIBRARY_MIN_SEPARATION = 0.5 # 入选种子之间、与本阶段已排队种子之间的关节差 ∞-范数下限（rad）
 SEED_LIBRARY_POOL = 64            # 按任务空间距离预选的候选个数（再按关节差去重）
-SEED_LIBRARY_RNG_SEED = 13        # 采样随机数种子（与求解用的 RNG_SEED 无关，库内容可复现）
+SEED_LIBRARY_RNG_SEED = 13        # 采样随机数种子
 
 # --- 2.7 全局物理环境与主求解器配置 ---
 G_WORLD = np.array([0.0, 0.0, -9.81], dtype=float)
@@ -273,48 +257,29 @@ SSIK_TOP_K_FOR_DIRECT = 10
 
 PIN_TOP_K_FOR_DIRECT = 15
 RNG_SEED = 120
-MAX_JOINT_JUMP_RAD = np.pi  # 默认“绕大圈”阈值：单关节相对 q_prev 超过半圈即视为绕大圈
-# v7：q_prev 的解已合格且腰部偏离 q_ready 不超过该值（rad，逐关节最大值）时跳过锁腰种子；None = v6 顺序
-LOCKED_SEED_SKIP_TOL = 0.02
+MAX_JOINT_JUMP_RAD = np.pi        # 默认“绕大圈”阈值：单关节相对 q_prev 超过半圈即视为绕大圈
+LOCKED_SEED_SKIP_TOL = 0.02       # 锁腰种子跳过阈值（rad）：q_prev 解合格且腰部已靠近 q_ready 时跳过等价锁腰种子
 JOINT_JUMP_POLICIES = ("reject", "prefer")
-# 续算（目标相对 FK(q_prev) 的主任务误差在 continuation_tol 以内，即路点跟踪）时先跑局部续算阶段，
-# 只用与 q_prev 连续的候选（见 collect_pinocchio_candidates_and_seeds）。
-# 原因：ik_base (score_candidate) 的 W_WAIST_RETURN（2000）远大于 W_SMOOTH（8），若逐帧在全域种子里择优，
-# 会在“锁腰（腰回 q_ready）”与“随动”两分支间剧烈切换，造成 0.8~2.5 rad 的跳变；设跳变上限时导致连续路点拒解。
+# 续算阶段局部解优先：连续路点跟踪时优先保留与 q_prev 连续的候选，防止在锁腰与随动分支间跳变
 CONTINUATION_LOCAL = True
-# 续算阶段的单关节步长上限（rad，相对 q_prev，与 joint_jump_metrics 同一度量）：随动续算的搜索
-# 范围是 q_prev ± 该值；步长更大的候选（典型：q_prev 腰部远离 q_ready 时的锁腰解）不算局部解。
-# 取值依据（路点连续跟踪实测）：0.1~0.2 普通跟踪逐帧步长 <= 0.020、腰部不漂；0.3 时随动解
-# 在负荷容差带边界与锁腰解来回切换；0.1 时腰部斜坡跟踪在框边反复切换；0.15 rad 为平稳无抖动的最优单步上限。
+# 续算阶段局部解判定单关节步长上限（rad，相对 q_prev）：随动续算搜索范围限定在 q_prev ± 该值
 CONTINUATION_MAX_STEP = 0.15
-# 续算阶段默认不做达标后的零空间姿态整理（DLS posture_settle=False：位姿达标、负荷合格且离限位 >= SAFE_MARGIN 的
-# 第一个迭代点即返回），且 q_prev 本身已是可接受解时原样返回（静止死区保持），不再跑锁腰续算。
-# 若在续算框内照常整理：目标不动时每次调用关节仍可能漂移 0.10~0.15 rad，导致伺服循环中机器人自发蠕动。
-# 回中只来自收敛过程中的零空间步，与末端实际移动量成正比（与双臂 continuation 相同保持对称）。
+# 续算阶段零空间姿态整理开关：默认关闭以实现静止死区保持，防止伺服循环中机器人自发蠕动漂移
 CONTINUATION_POSTURE_SETTLE = False
-# 续算阶段 DLS 单步（2-范数）上限 = 该比例 × CONTINUATION_MAX_STEP：保证从框中心出发的首步不会越出续算框
-# （越框会被 SNS 钳制、导致线搜索停滞）
+# 续算阶段 DLS 单步（2-范数）上限比例：取 CONTINUATION_MAX_STEP 的该比例作为单步信赖域
 CONTINUATION_DLS_STEP_FRACTION = 0.5
-# 舒适阶段提前回退（dls_waist_comfort_early_fallback，默认 True）：q_prev / 锁腰 / q_ready / 种子库种子
-# 都跑完仍没有可接受候选（满足全部硬约束）时提前结束舒适阶段、回退到有效限位（避免目标需要舒适窗外腰部时在窗内徒劳耗光配额）。
-# 没有种子库时检查点放在第 WAIST_COMFORT_PATIENCE 个名额之后。
+# 舒适阶段提前回退：窗内已无可接受候选时提前回退到有效限位，避免徒劳耗光配额
 WAIST_COMFORT_EARLY_FALLBACK = True
 WAIST_COMFORT_PATIENCE = 4
-LIBRARY_PENDING = "library_pending"   # 搜索队列中的种子库占位（排到时展开，见 collect_pinocchio_candidates_and_seeds）
-COMFORT_CHECKPOINT = "comfort_checkpoint"   # 舒适阶段提前回退的检查点（不占名额）
-# 跳变超限救援（dls_jump_limit_rescue）：常规搜索只找到“跳变超限”的位姿解（其余硬约束都满足）时，
-# 在跳变框 q_prev ± max_joint_jump_rad 内重搜一次（阶段 "jump_box"），大幅减少因初猜跨解族而被整体误杀的概率。
+LIBRARY_PENDING = "library_pending"   # 搜索队列中的种子库占位
+COMFORT_CHECKPOINT = "comfort_checkpoint"   # 舒适阶段提前回退的检查点
+# 跳变超限救援：常规搜索仅因单关节跳变超限失败时，在跳变框内重搜一次
 JUMP_LIMIT_RESCUE = True
-# 锁腰种子严格几何可达性检查（见 locked_arm_reach_bound）：目标超出锁腰时手臂的严格可达范围就跳过锁腰种子，
-# 避免无法解出的几何目标徒劳迭代至停滞（平均单次省去 ~37 步无效求逆迭代）。
+# 锁腰种子严格几何可达性检查：目标超出锁腰臂长严格可达范围时跳过锁腰种子
 LOCKED_REACH_CHECK = True
-# v13：续算类求解（目标就在 FK(q_prev) 附近，即路点跟踪）不排种子库种子。库样本是全局的，收敛到的多是离
-# q_prev 很远的分支；q_prev 附近的解只差限位裕度（NEAR_LIMIT）时，择优会换成这类远处的合格解（跟踪基准、
-# 未设跳变上限：单步 > 0.3 rad 由 v12 的 1 次增至 5 次，最大 3.05 rad）。续算类求解按 v12 的种子顺序搜索。
-# True = 续算类求解也用种子库。
+# 续算类求解是否使用全局种子库：默认 False，避免收敛到全局远处分支造成构型跳变
 SEED_LIBRARY_CONTINUATION = False
-# v13：种子库只取决于运动学模型、活动关节、末端帧、有效限位、q_ready、舒适窗与库大小，同一模型的多个
-# 求解器实例（如左右臂各建多个实例、测试反复构造）共享同一份只读库，不重复建库
+# 任务空间种子库缓存（按模型结构只读共享，避免同一模型多实例重复构建）
 _SEED_LIBRARY_CACHE = {}
 _SEED_LIBRARY_CACHE_MAX = 8
 _SEED_LIBRARY_CACHE_LOCK = threading.Lock()
@@ -399,7 +364,7 @@ class LoadPolicy:
     excess_weight: float = 0.50
     relative_weight: float = 0.0
     soft_ratio: float = 0.70
-    # 低负荷早停阈值；None（默认）= min(LOAD_EARLY_STOP_RATIO, soft_ratio)。v6 默认固定 0.60
+    # 低负荷早停阈值；为 None 时自动取 min(LOAD_EARLY_STOP_RATIO, soft_ratio)
     early_stop_ratio: float | None = None
     peak_tie: float = 0.02  # 峰值负荷率容差带：差距在此以内视为同档，再比较姿态/连续性代价
 
@@ -477,9 +442,9 @@ class LoadPolicy:
         excess = np.maximum(np.abs(r) - self.soft_ratio, 0.0)
         n = len(tau)
 
-        abs_cost = 0.5 * self.absolute_weight * float(np.sum(weights * r * r)) / n
+        abs_cost = 0.5 * self.absolute_weight * float(np.dot(weights * r, r)) / n
         excess_cost = (
-            0.5 * self.excess_weight * float(np.sum(weights * excess * excess)) / n
+            0.5 * self.excess_weight * float(np.dot(weights * excess, excess)) / n
         )
         dcost_dtau = None
         if with_gradient:
@@ -492,7 +457,7 @@ class LoadPolicy:
         if self.relative_weight > 0.0:
             diff = (tau - tau_reference) / caps
             rel_cost = (
-                0.5 * self.relative_weight * float(np.sum(weights * diff * diff)) / n
+                0.5 * self.relative_weight * float(np.dot(weights * diff, diff)) / n
             )
             if with_gradient:
                 dcost_dtau += self.relative_weight * weights * diff / caps / n
@@ -577,8 +542,7 @@ def validate_transform(value):
     if T.shape != (4, 4) or not np.isfinite(T).all():
         raise ValueError("target must be a finite 4x4 transform")
     rot = T[:3, :3]
-    # 判定与 np.allclose / np.isclose(rtol=0) 逐位等价：参考值有限时 isclose(x, y) ⇔ |x - y| <= atol
-    # （含 inf / NaN 情形均为 False）；省去 isclose 的通用分派开销
+    # 快速刚体变换有效性校验（正交矩阵、行列式为 1、底层为 [0, 0, 0, 1]）
     if (
         not (np.abs(T[3] - _RIGID_BOTTOM_ROW) <= 1e-9).all()
         or not (np.abs(rot.T @ rot - _EYE3) <= 1e-6).all()
@@ -824,7 +788,7 @@ def _make_q_builder(model, pin_maps):
     cont_idx_sin = cont_idx + 1
     has_cont = bool(cont_pos.size)
     shape = (n_active,)
-    # v15：全部为标量关节、按活跃顺序连续存放时用切片赋值（纯拷贝，与花式索引逐位相同）
+    # 全部为标量关节、按活跃顺序连续存放时使用切片赋值以提升性能
     scalar_range = _contiguous_range(scalar_idx)
     direct = (
         not has_cont
@@ -835,7 +799,7 @@ def _make_q_builder(model, pin_maps):
 
     def build(q_active):
         values = np.asarray(q_active, dtype=float)
-        # 有限性：x·x 有限 => 全部有限；为 inf/NaN（或极端值溢出）时再逐元素判定，异常与原实现相同
+        # 有限性快速守卫
         if values.shape != shape or (
             not math.isfinite(values.dot(values)) and not np.isfinite(values).all()
         ):
@@ -886,7 +850,7 @@ def pinocchio_q_to_active_q(pin_maps, q_full, reference=None):
 
 
 def _legacy_shoulder_joint(pin_maps):
-    """v7 及以前的肩关节约定：第一个名字以 "_Link2" 结尾的非腰部活跃关节；没有则返回 None。"""
+    """肩关节名称回退解析：当未显式指定肩关节时，默认取首个以 '_Link2' 结尾的非腰部活跃关节。"""
     return next(
         (
             n
@@ -1345,7 +1309,7 @@ def prepare_load_context(model, pin_maps, config, snapshot):
         excess_weight=float(config.get("load_excess_gain", 0.50)),
         relative_weight=float(config.get("load_relative_gain", 0.0)),
         soft_ratio=float(config.get("load_soft_ratio", 0.70)),
-        # v7：未配置时取 min(LOAD_EARLY_STOP_RATIO=0.70, soft_ratio)（v6 默认 0.60）
+        # 低负荷早停阈值：未配置时自动使用 min(LOAD_EARLY_STOP_RATIO, soft_ratio)
         early_stop_ratio=(
             None
             if config.get("load_early_stop_ratio") is None
@@ -1472,7 +1436,7 @@ def add_torque_metrics_to_candidate(
         and candidate.get("_load_checked_q_bytes") == q_arr.tobytes()
         and all(n in guard_efforts for n in active_joint_names)
     ):
-        # strict 模式下 _check_load_candidate 已在同一 q_template 下算过全身重力矩，直接复用（结果逐位相同）
+        # 复用静态负荷复核阶段已计算的重力矩向量
         tau = np.array([float(guard_efforts[n]) for n in active_joint_names], dtype=float)
     else:
         tau = gravity_torque_for_active_q(
@@ -1643,7 +1607,7 @@ def derive_waist_comfort_bounds(
             x0 = math.atan2(tau0, tau90)           # τ(θ0 + δ) = C·sin(x0 + δ)
             check = tau_at(i, theta0 + 0.25 * np.pi)
             if abs(check - c_max * math.sin(x0 + 0.25 * np.pi)) > 1e-6 * (1.0 + c_max):
-                # 刚体子树绕轴转动时不会发生；万一模型不满足该假设，此关节不设舒适窗（= v7 行为），不中断初始化
+                # 模型不满足重力正弦模型假设时，该关节不设舒适窗以保证初始化健壮性
                 entry.update(kind="gravity_check_failed", lower=-np.inf, upper=np.inf)
                 info[name] = entry
                 continue
@@ -2039,18 +2003,24 @@ class _SecondaryObjective:
             root_inertia = pin_model.inertias[0]
             self.m_root = float(root_inertia.mass)
             self.root_term = self.m_root * np.asarray(root_inertia.lever, dtype=float)
+            self.m_mov = float(pin_data.mass[0])
+            if self.m_mov <= 0.0:
+                pin.centerOfMass(pin_model, pin_data, pin.neutral(pin_model), False)
+                self.m_mov = float(pin_data.mass[0])
+            self.m_total = self.m_mov + self.m_root
+            if not math.isfinite(self.m_total) or self.m_total <= 0.0:
+                raise ValueError("model has no positive mass for COM")
+            self.scale_mov = self.m_mov / self.m_total
         if self.use_com:
             self.ref_com = finite_vector(com_xy_ref, 3, "reference COM")
             ghat = np.asarray(pin_model.gravity.linear, dtype=float)
             ghat = ghat / max(float(np.linalg.norm(ghat)), 1e-30)
             self.P = np.eye(3) - np.outer(ghat, ghat)
 
-        # v15 热路径预计算（只改写法，不改任何参与结果的浮点运算）
+        # 零空间次任务求值热路径预计算与切片缓存
         self.movable_f = np.asarray(movable_mask, dtype=float).copy()
         self.movable_all = bool(np.all(np.asarray(movable_mask, dtype=bool)))
-        if limit_gain > 0.0:
-            self.b_low_list = np.asarray(self.b_low, dtype=float).tolist()
-            self.b_high_list = np.asarray(self.b_high, dtype=float).tolist()
+        self.ns_weight = self.ns_gain * self.movable_f
         col_range = _contiguous_range(self.com_cols)
         self.com_col_slice = None if col_range is None else slice(*col_range)
         self.dtau_slices = None
@@ -2090,12 +2060,8 @@ class _SecondaryObjective:
         else:
             pin.centerOfMass(model, data, q_full, False)
             J_mov = None
-        m_mov = float(data.mass[0])
         c_mov = np.asarray(data.com[0], dtype=float)
-        m_total = m_mov + self.m_root
-        if not math.isfinite(m_total) or m_total <= 0.0:
-            raise ValueError("model has no positive mass for COM")
-        com = (m_mov * c_mov + self.root_term) / m_total
+        com = (self.m_mov * c_mov + self.root_term) / self.m_total
         if J_mov is None:
             return com, None
         if self.com_cols is None:
@@ -2105,45 +2071,23 @@ class _SecondaryObjective:
             J_cols = np.asfortranarray(J_mov[:, self.com_col_slice])
         else:
             J_cols = J_mov[:, self.com_cols]
-        return com, (m_mov / m_total) * J_cols
+        return com, self.scale_mov * J_cols
 
     def _limit_terms(self, q_active, need_z):
-        """单侧安全裕度排斥项：返回 (z 增量或 None, c_lim)。
-
-        与原 numpy 写法逐位一致：under = max(0, b_low - q) / margin，over = max(0, q - b_high) / margin，
-        z 增量 = limit_gain * (under - over) / margin，c_lim = 0.5 * limit_gain * dot(under^2 + over^2, movable)。
-        q 全部处于缓冲区外（常见情形）时 under = over = +0.0：z 增量恰为 +0.0（返回标量 0.0，
-        与加零向量逐位相同），c_lim = 0.0。含 NaN 时回到 numpy 原写法。
-        """
+        """单侧安全裕度排斥项：返回 (z 增量或 None, c_lim)。"""
         margin, gain = self.margin, self.limit_gain
-        q_list = q_active.tolist()
-        active = False
-        for qi, lo_i, hi_i in zip(q_list, self.b_low_list, self.b_high_list):
-            if qi < lo_i or qi > hi_i:
-                active = True
-            elif qi != qi:
-                under = np.maximum(0.0, self.b_low - q_active) / margin
-                over = np.maximum(0.0, q_active - self.b_high) / margin
-                dz = gain * (under - over) / margin if need_z else None
-                c_lim = (
-                    0.5 * gain * float(np.dot(under ** 2 + over ** 2, self.movable))
-                )
-                return dz, c_lim
-        if not active:
-            return (0.0 if need_z else None), 0.5 * gain * 0.0
-        dz_list, sq_list = [], []
-        for qi, lo_i, hi_i in zip(q_list, self.b_low_list, self.b_high_list):
-            u = lo_i - qi
-            u = (u if u > 0.0 else 0.0) / margin
-            o = qi - hi_i
-            o = (o if o > 0.0 else 0.0) / margin
-            dz_list.append(gain * (u - o) / margin)
-            sq_list.append(u * u + o * o)
-        c_lim = 0.5 * gain * float(np.dot(np.array(sq_list), self.movable_f))
-        return (np.array(dz_list) if need_z else None), c_lim
+        under = np.maximum(0.0, self.b_low - q_active)
+        over = np.maximum(0.0, q_active - self.b_high)
+        if not np.any(under) and not np.any(over):
+            return (0.0 if need_z else None), 0.0
+        u = under / margin
+        o = over / margin
+        c_lim = 0.5 * gain * float(np.dot(u * u + o * o, self.movable_f))
+        dz = (gain / margin) * (u - o) if need_z else None
+        return dz, c_lim
 
     def _raise_nonfinite(self, com, Jcom, tau, ratios, dtau, g_load, c_load, cost, z, derivatives, need_z):
-        """v14 的逐项有限性检查（原顺序、原异常消息）；v15 仅在末尾合并检查失败时调用。"""
+        """逐项有限性检查与诊断异常抛出。"""
         if self.context is not None:
             if not np.isfinite(com).all() or (
                 Jcom is not None and not np.isfinite(Jcom).all()
@@ -2164,12 +2108,16 @@ class _SecondaryObjective:
             raise ValueError("non-finite secondary objective")
 
     def __call__(self, q_active, q_full, derivatives=True, components=None, need_z=True):
-        """返回 (z * movable_mask, H)；need_z=False 且 derivatives=False 时返回 (None, H)。
-
-        q_full 必须是 q_active 对应的 Pinocchio q（active_q_to_pinocchio_q 的结果）。
-        v15：与 v14 逐位一致的改写——限位项按关节标量运算（缓冲区外直接为零）、严格负荷代价在
-        全部负荷率 <= soft_ratio 时跳过恒为零的 excess 项、有限性检查合并到末尾（失败时按原顺序
-        复核并抛出原异常）、少做冗余拷贝与布尔转换。
+        """计算零空间次任务综合代价 H 及负梯度向量 z。
+        
+        Args:
+            q_active: 活跃关节角向量。
+            q_full: 对应 Pinocchio 模型维度的完整广义坐标 q。
+            derivatives: 是否计算解析导数。
+            components: 可选输出字典，用于回传各代价分量。
+            need_z: 是否需要计算负梯度向量 z。
+        Returns:
+            (z * movable_mask, cost) 或 (None, cost)。
         """
         need_z = need_z or derivatives
         if self.multi_turn is not None:
@@ -2183,7 +2131,7 @@ class _SecondaryObjective:
                 diff[mask] = (diff[mask] + np.pi) % (2.0 * np.pi) - np.pi
 
         z = self.neg_ns_gain * diff if need_z else None
-        posture = 0.5 * float(np.dot(self.ns_gain * (diff ** 2), self.movable_f))
+        posture = 0.5 * float(np.dot(self.ns_weight, diff * diff))
         cost = posture
         c_lim = 0.0
         abs_load = excess_load = rel_load = 0.0
@@ -2229,17 +2177,14 @@ class _SecondaryObjective:
             peak = float(ratios.max())
             load_ok = peak <= 1.0
             if self.fast_load_cost and peak <= self.soft_ratio:
-                # 全部 |r| <= soft_ratio：excess = max(|r| - soft, 0) 恒为 +0.0，故
-                #   excess 代价 = 0.5*w_e*0.0/n = 0.0；梯度第二项为 ±0.0（r<0 时 -0.0），
-                #   x + (-0.0) == x，x + (+0.0) 只把 -0.0 变 +0.0（r == -0.0 时第二项为 +0.0），
-                #   所以 first + 0.0 与原式逐位相同（absolute_weight > 0 保证 r<0 时 first 非零）。
+                # 全部关节负荷率 <= soft_ratio 时，超载罚项恒为 0，仅计算基础负荷代价与梯度
                 r = tau / self.caps
                 n = self.n_guard
-                abs_load = self.half_aw * float((self.weights * r * r).sum()) / n
-                excess_load = 0.5 * self.policy.excess_weight * 0.0 / n
+                abs_load = self.half_aw * float(np.dot(self.weights * r, r)) / n
+                excess_load = 0.0
                 rel_load = 0.0
                 dcost_dtau = (
-                    (self.aw_w * r / self.caps + 0.0) / n if derivatives else None
+                    (self.aw_w * r / self.caps) / n if derivatives else None
                 )
             else:
                 abs_load, excess_load, rel_load, dcost_dtau = self.policy._cost_terms(
@@ -2268,7 +2213,7 @@ class _SecondaryObjective:
                 )
             )
         else:
-            # 2b. 未配置负荷上下文：可选的 URDF 力矩归一化项（与 v6 同序）
+            # 2b. 未配置负荷上下文：可选的 URDF 力矩归一化项
             if self.use_gravity:
                 tau_cur = pin.computeGeneralizedGravity(model, data, q_full)[
                     self.active_v
@@ -2279,7 +2224,7 @@ class _SecondaryObjective:
                     abs_load = (
                         0.5
                         * self.gravity_gain
-                        * float(((tau_cur ** 2) * inv_eff_sq).sum())
+                        * float(np.dot(tau_cur * tau_cur, inv_eff_sq))
                         / n_act
                     )
                     cost += abs_load
@@ -2290,7 +2235,7 @@ class _SecondaryObjective:
                     rel_load = (
                         0.5
                         * self.rel_gain
-                        * float(((tau_diff ** 2) * inv_eff_sq).sum())
+                        * float(np.dot(tau_diff * tau_diff, inv_eff_sq))
                         / n_act
                     )
                     cost += rel_load
@@ -2368,10 +2313,9 @@ def _metric_svd_step(J, error, z, D, damping, rank_rtol=1e-9):
 
 
 def _chol_factor(A):
-    """上三角 Cholesky 分解 A = U^T U（LAPACK dpotrf，与 cho_factor(lower=False) 同一例程）。
+    """上三角 Cholesky 分解 A = U^T U（底层 LAPACK dpotrf）。
 
-    非正定时抛 LinAlgError，由调用方转入 SVD 回退。v7 直接调用 LAPACK，绕过 scipy 封装
-    （约 25 µs/次）；scipy 1.18 的 cho_factor/cho_solve 与直接调用相差 1e-12 量级、不逐位一致。
+    非正定时抛 LinAlgError，由调用方捕获后转入 SVD 伪逆回退。
     """
     c, info = _lapack.dpotrf(A, lower=0, clean=0, overwrite_a=0)
     if info > 0:
@@ -2405,17 +2349,10 @@ def _sns_clamped_core(
     damping,
     max_step,
 ):
-    """主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
+    """主动集限位钳制（SNS）+ 正交信赖域步长求解核。
 
-    数学与返回值见 _sns_clamped_core_reference（v14 原实现）。v15 只改对角逆度量热路径的写法，
-    每一个参与结果的浮点运算（矩阵乘、Cholesky、逐元素运算）与原实现同序、同内存布局，结果逐位一致：
-      - 第一轮（尚无钳制）e_rem = e - J @ 0 恰为 e，||dq_clamped||^2 = 0，直接取用；
-      - 全部关节自由时 J_free 用 np.asfortranarray(J)（与 J[:, mask] 同值同为列主序），
-        d / z 不再做布尔索引；dq_total / dq_null 不再经零向量拷贝赋值；
-      - 无零空间项时不建零向量，dq_task + 0.0 与 dq_task + zeros 逐位相同；
-      - 越界检查用 Python 标量逐关节比较（与 numpy 逐元素减法同一 IEEE 运算），只在出现 NaN 时
-        回到 numpy 原写法，保证最坏关节的选择与原实现完全相同。
-    W_inv（一般矩阵度量）仍走原实现。
+    求解单步满足关节物理/虚拟限位且步长在信赖域 max_step 内的关节增量 dq。
+    在对角逆度量 d_inv 下走向量化快速路径；一般矩阵逆度量 W_inv 回退至通用参考实现。
     """
     if damping < 0.0 or max_step <= 0.0:
         raise ValueError("invalid damping/max_step")
@@ -2437,8 +2374,7 @@ def _sns_clamped_core(
 
     n_active = len(q_active_cur)
     free_mask = np.array(movable_mask, dtype=bool)
-    free_list = free_mask.tolist()
-    n_free = free_list.count(True)
+    n_free = int(np.count_nonzero(free_mask))
     all_free = n_free == n_active
     dq_clamped = None
     task_dim = err.size
@@ -2450,7 +2386,6 @@ def _sns_clamped_core(
     clamped_converged = False
     dq_total = dq_null_out = None
     max_step_sq = float(max_step * max_step)
-    q_list = lo_list = hi_list = None
 
     for _ in range(n_free + 1):
         if n_free == 0:
@@ -2538,43 +2473,19 @@ def _sns_clamped_core(
                 dq_null_out[free_mask] = dq_null_free
 
         # 越界检查：viol_i = max(0, lo_i - q_i', q_i' - hi_i)（仅自由关节），取首个最大者钳制
-        if q_list is None:
-            q_list = q_active_cur.tolist()
-            lo_list = eff_lower.tolist()
-            hi_list = eff_upper.tolist()
-        worst_idx, worst_val, worst_under = -1, 0.0, False
-        has_nan = False
-        for i, (qi, di) in enumerate(zip(q_list, dq_total.tolist())):
-            if not free_list[i]:
-                continue
-            qt = qi + di
-            under = lo_list[i] - qt
-            over = qt - hi_list[i]
-            if under != under or over != over:
-                has_nan = True
-                break
-            if under > worst_val:
-                worst_idx, worst_val, worst_under = i, under, True
-            if over > worst_val:
-                worst_idx, worst_val, worst_under = i, over, False
-        if has_nan:
-            # NaN：按原实现的 numpy 写法确定（max 为 NaN -> 未收敛，argmax 取首个 NaN）
-            q_trial = q_active_cur + dq_total
-            under_amt = np.where(
-                free_mask, np.maximum(0.0, eff_lower - q_trial), 0.0
-            )
-            over_amt = np.where(
-                free_mask, np.maximum(0.0, q_trial - eff_upper), 0.0
-            )
-            viol_amt = np.maximum(under_amt, over_amt)
-            if viol_amt.max() <= 1e-12:
-                clamped_converged = True
-                break
-            worst_idx = int(np.argmax(viol_amt))
-            worst_under = bool(under_amt[worst_idx] >= over_amt[worst_idx])
-        elif worst_val <= 1e-12:
+        q_trial = q_active_cur + dq_total
+        under_amt = np.where(
+            free_mask, np.maximum(0.0, eff_lower - q_trial), 0.0
+        )
+        over_amt = np.where(
+            free_mask, np.maximum(0.0, q_trial - eff_upper), 0.0
+        )
+        viol_amt = np.maximum(under_amt, over_amt)
+        if viol_amt.max() <= 1e-12:
             clamped_converged = True
             break
+        worst_idx = int(np.argmax(viol_amt))
+        worst_under = bool(under_amt[worst_idx] >= over_amt[worst_idx])
 
         # 钳制本轮越界最严重的单个自由关节；由于边界距离严格小于 |dq_free[worst_idx]|，
         # 钳制后的 ||dq_clamped|| 必然严格小于 max_step
@@ -2585,7 +2496,6 @@ def _sns_clamped_core(
         else:
             dq_clamped[worst_idx] = eff_upper[worst_idx] - q_active_cur[worst_idx]
         free_mask[worst_idx] = False
-        free_list[worst_idx] = False
         n_free -= 1
         all_free = False
 
@@ -2606,7 +2516,7 @@ def _sns_clamped_core_reference(
     damping,
     max_step,
 ):
-    """v14 原实现（逐行未改），v15 起只服务一般矩阵 W_inv 路径与逐位对照测试。
+    """主动集限位钳制（SNS）+ 正交信赖域通用矩阵度量参考实现。
 
     主动集限位钳制（SNS）+ 正交信赖域：求一步既不越界、步长 <= max_step 的关节增量。
 
@@ -2809,8 +2719,7 @@ def _make_task_terms(
             pin.updateFramePlacements(model, data)
         else:
             pin.updateFramePlacement(model, data, fid)
-        # v15：不再拷贝 SE3。computeFrameJacobian 会按同一公式重写 data.oMf[fid]（数值逐位相同），
-        # 其余读取都在下一次 Pinocchio 调用之前完成
+        # 复用 data.oMf[fid] 引用避免冗余对象深拷贝
         current = data.oMf[fid]
         pos_error = target_p - current.translation
         pos = _vec_norm(pos_error)
@@ -2837,7 +2746,7 @@ def _make_task_terms(
             e = np.array(pin.log6(delta).vector, copy=True)
             angle = _vec_norm(e[3:])
             if build_A:
-                # 矩阵乘结果本身就是新数组（v14 多一次 np.array 拷贝）
+                # 计算伴随几何雅可比
                 A = pin.Jlog6(delta.inverse()) @ J if jacobian else J.copy()
                 A[:3] /= cl
             e[:3] /= cl
@@ -2845,7 +2754,7 @@ def _make_task_terms(
         else:
             a = np.asarray(current.rotation) @ axis
             a0, a1, a2 = a.tolist()
-            # 与 np.cross 同序的标量公式（逐位一致）
+            # 叉积向量展开计算
             cross = np.array(
                 (a1 * b2 - a2 * b1, a2 * b0 - a0 * b2, a0 * b1 - a1 * b0)
             )
@@ -2913,7 +2822,7 @@ def dls_task_terms(
 ):
     """计算主任务残差与解析雅可比（含一致的 tool_dir 180° 对径点方向导数 -skew(a) @ J[3:]）。
 
-    与 v6 行为一致：更新全部帧位姿；jacobian=False 时 "J" 为按零雅可比构造的同形状矩阵。
+    更新全部帧位姿；jacobian=False 时 "J" 为按零雅可比构造的同形状矩阵。
     """
     terms = _make_task_terms(
         model, data, pin_maps, fid, target, mode, axis, cone, characteristic_length
@@ -3097,8 +3006,7 @@ def pinocchio_ik_one_seed(
             )
             ref_tau = tau_ref_full[active_v_indices].copy()
         if include_waist and com_gain > 0.0:
-            # v8：与次任务代价同一个整机质心（含根 link 质量）；v7 用 pin.centerOfMass（不含根质量），
-            # 参考与代价口径不一致，q_ready 处质心项梯度不为零
+            # 整机质心参考（包含根 link 质量，与次任务代价保持一致口径）
             ref_com = _reference_com(pin_model, pin_data, ref_full)
 
     shoulder_name = (
@@ -3164,7 +3072,7 @@ def pinocchio_ik_one_seed(
         active_periodic_mask(pin_maps), dtype=bool
     )
     periodic_any = bool(np.any(periodic_unbounded))
-    # 逆度量 D 为对角阵：只保存对角元向量（v6 为 np.diag(1.0 / weights)，SNS 结果逐位一致）
+    # 逆度量 D 为对角阵：保存对角元向量以加速 SNS 迭代
     d_base = 1.0 / weights
     waist_idx = np.nonzero(waist)[0]
     waist_movable = waist & movable
@@ -3172,7 +3080,7 @@ def pinocchio_ik_one_seed(
     target_p = np.array(target[:3, 3], dtype=float)
 
     band_lower, band_upper = (None, None) if band_bounds is None else band_bounds
-    # 每种子构造一次的求值器（与 dls_task_terms / tests/dls_compat 的 v6 形式入口同一实现）
+    # 构造单种子零空间次任务求值器
     objective = _SecondaryObjective(
         pin_model,
         pin_data,
@@ -3218,11 +3126,7 @@ def pinocchio_ik_one_seed(
     lo_list, hi_list = lo.tolist(), hi.tolist()
 
     def snap(trial):
-        """试探点只允许浮点舍入级越界（<= BOUND_SNAP_TOL），吸附回边界；真实越界返回 None。
-
-        v15：越界量按关节标量计算（与 numpy 逐元素减法同一 IEEE 运算），NaN 传播与
-        max(float((lo - trial).max()), float((trial - hi).max())) 相同。
-        """
+        """试探点边界吸附：仅允许微小浮点舍入级越界（<= BOUND_SNAP_TOL）并吸附回边界；真实越界返回 None。"""
         under_max = over_max = -math.inf
         nan_under = nan_over = False
         for t_i, lo_i, hi_i in zip(trial.tolist(), lo_list, hi_list):
@@ -3249,10 +3153,9 @@ def pinocchio_ik_one_seed(
         return np.minimum(np.maximum(trial, lo), hi)
 
     # ---- 位姿达标迭代点择优 ----------------------------------------------------
-    # 负荷合格（load_ok）优先；同为合格时，峰值落在 [floor, floor + band] 容差带内的点里取
-    # 次任务代价最小者（floor = 已见合格点的最低峰值，单调不增，所以峰值不会被逐步“蚕食”）；
-    # 同为超载时峰值越低越好。旧版严格字典序 (超载, 峰值, 代价) 会因峰值差 0.001 丢掉姿态改善。
-    # band 取 peak_tie 的一部分：种子内容差 + 候选间容差 (peak_tie) 合计仍接近 peak_tie。
+    # 负荷合格（load_ok）优先；同为合格时，峰值落在 [floor, floor + band] 容差带内的点中取
+    # 次任务代价最小者（floor 为当前已见合格点的最低峰值，单调不增）；
+    # 同为超载时峰值越低越好；band 取 peak_tie 的固定比例，平衡负荷峰值与姿态代价。
     peak_band = (
         0.0
         if context is None
@@ -3321,7 +3224,7 @@ def pinocchio_ik_one_seed(
             break
 
         t = terms(q, jacobian=True)
-        # 目标 - 当前肩位置（v14 先拷贝肩位置、稍后再相减；同一减法，提前做省一次拷贝）
+        # 目标 - 当前肩位置（提前计算几何向量供后续腰部释放判定使用）
         shoulder_gap = (
             target_p - pin_data.oMi[shoulder_id].translation
             if release_enabled
@@ -3348,7 +3251,7 @@ def pinocchio_ik_one_seed(
 
         if pose_ok:
             if not posture_settle and settle_free(q, parts):
-                # v15 续算：不做姿态整理，直接返回本点（不经 offer_pose 择优：之前的达标点都不满足停止条件）
+                # 续算模式（不整理姿态）：首个达标且无冲突点直接作为收敛解返回
                 pose_best.update(
                     q=q.copy(),
                     overloaded=False,
@@ -3419,7 +3322,7 @@ def pinocchio_ik_one_seed(
         )
 
         if not posture_settle and not pose_ok:
-            # v15 续算：零空间原始步 w·D z（可动关节）限幅到 NO_SETTLE_NULL_STEP_RATIO × |e|
+            # 续算模式：未达标前将零空间原始步长限幅到 NO_SETTLE_NULL_STEP_RATIO × |e|
             raw = null_weight * _vec_norm((d_inv * z)[movable])
             cap = NO_SETTLE_NULL_STEP_RATIO * _vec_norm(t["error"])
             if raw > cap:
@@ -3468,14 +3371,16 @@ def pinocchio_ik_one_seed(
         d_idx = 0
         while d_idx < len(directions) and not accepted and not timed_out:
             direction = directions[d_idx]
+            step_scale = 1.0
             for backtrack in range(int(backtrack_steps)):
                 if deadline is not None and time.monotonic() >= deadline:
                     timed_out = True
                     break
-                # 1.0 * direction 与 direction 逐位相同，首个试探点省一次乘法
+                # 回溯试探点：首步为整步长，后续按 0.5 比例逐级回退
                 trial = snap(
-                    q + direction if backtrack == 0 else q + (0.5 ** backtrack) * direction
+                    q + direction if backtrack == 0 else q + step_scale * direction
                 )
+                step_scale *= 0.5
                 if trial is None:
                     continue
                 tt = terms(trial, jacobian=False)
@@ -3548,7 +3453,7 @@ def pinocchio_ik_one_seed(
         result, seed, lo, hi, multi_turn_mask=multi_turn
     )
 
-    # 最终评估与 v6 一样更新全部帧位姿（调用方之后读取 pin_data 时状态与 v6 相同）
+    # 最终评估并同步更新模型全部帧位姿（确保后续读取 pin_data 状态一致）
     final = terms(result, jacobian=False, all_frames=True)
     parts = {}
     objective(result, final["q_full"], False, parts, need_z=False)
@@ -3809,7 +3714,7 @@ class DirectPsiProblem:
         self.w_seed = w_seed
         self.w_bias = w_bias
         self.w_center = w_center
-        # w_limit / limit_margin 保留以兼容旧版构造签名；关节限位在 solve_direct_psi 中由 least_squares bounds 约束
+        # w_limit / limit_margin 保留兼容构造签名；关节限位在求解时由 least_squares bounds 约束
         self.w_limit = w_limit
         self.limit_margin = limit_margin
 
@@ -4478,7 +4383,7 @@ def collect_pinocchio_candidates_and_seeds(
         active_names=pin_maps["active_names"],
     )
 
-    # v8：舒适窗与有效限位求交；不收窄任何关节、或不含 q_ready 时常规搜索退化为单一 full 阶段
+    # 舒适窗与有效限位求交；若未收窄任何关节或不含 q_ready，则退化为单一 full 阶段
     comfort = None
     regime = None
     comfort_enabled = bool(include_waist and comfort_bounds is not None)
@@ -4529,7 +4434,7 @@ def collect_pinocchio_candidates_and_seeds(
             and np.all(q_ready <= c_hi)
         ):
             comfort = (c_lo, c_hi)
-    # full 回退阶段使用与 v7 完全相同的随机扰动：在 comfort 阶段消耗随机数之前复制生成器状态
+    # full 回退阶段保证随机扰动一致性：在 comfort 阶段消耗随机数之前保存生成器状态
     rng_full = copy.deepcopy(rng) if comfort is not None else None
 
     near = (
@@ -4551,7 +4456,7 @@ def collect_pinocchio_candidates_and_seeds(
     early_stop_ratio = context["policy"].early_stop_ratio if strict else None
     edge_pool = []                  # comfort 阶段未达标种子的 (主任务 merit, seed_idx, q)
 
-    # v13：种子库种子（延迟计算：只有排到时才把目标换到库基座坐标系并选样本）
+    # 种子库配置（延迟计算：仅在轮到时才将目标变换至库基座坐标系并抽样）
     lib_k = 0 if seed_library is None else int(search.get("library_seeds", SEED_LIBRARY_SEEDS) or 0)
     # 续算类求解默认不用种子库（见 SEED_LIBRARY_CONTINUATION）
     lib_skip_continuation = bool(
@@ -4649,16 +4554,16 @@ def collect_pinocchio_candidates_and_seeds(
         """按队列运行一个搜索阶段；返回该阶段的停止原因与名额统计。
 
         max_step 覆盖本阶段 DLS 的单步上限；release_rerun=False 时锁腰种子触发腰部释放后不在本阶段重跑 q_prev；
-        posture_settle=False 时本阶段 DLS 不做达标后的姿态整理（v15 续算，见 CONTINUATION_POSTURE_SETTLE）。
-        v13：队列里的 LIBRARY_PENDING 占位在排到时展开为种子库种子、COMFORT_CHECKPOINT 为舒适阶段提前
-        回退检查点（本阶段还没有可接受候选即结束），两者都不占名额。
+        posture_settle=False 时本阶段 DLS 不做达标后的姿态整理（续算模式，见 CONTINUATION_POSTURE_SETTLE）。
+        队列中的 LIBRARY_PENDING 占位在排到时展开为种子库种子；COMFORT_CHECKPOINT 为舒适阶段提前
+        回退检查点（本阶段无合格候选即结束），二者均不占种子名额。
         """
         nonlocal unlocked, released, seed_errors, first_seed_error, reach_skips
         stop = "SEED_LIMIT"
         slots = 0                   # 已用名额：运行过的种子 + 被跳过的锁腰种子
         locked_skipped = False
         prev_rerun_queued = False
-        prev_info = None            # q_prev 种子的候选信息（v7 顺序下用于跳过锁腰种子 / 旧版早停）
+        prev_info = None            # q_prev 种子的候选信息（用于判断是否跳过等价锁腰种子或触发早停）
         stage_params = params if max_step is None else {**params, "max_step": float(max_step)}
         if not posture_settle:
             # 停止条件的限位裕度按有效限位计（与候选判据 SAFE_MARGIN 同一组限位；续算框边不是物理限位）
@@ -4683,7 +4588,7 @@ def collect_pinocchio_candidates_and_seeds(
                     break
                 continue
             if kind == "locked" and locked_unreachable(seed):
-                # v13：目标超出锁腰时的手臂可达范围 -> 与 v7 的等价跳过相同处理（占名额、完成锁腰比较）
+                # 目标超出锁腰时的手臂可达范围：视为等价跳过（占名额、标记锁腰阶段完成）
                 slots += 1
                 locked_done = True
                 locked_skipped = True
@@ -4836,7 +4741,7 @@ def collect_pinocchio_candidates_and_seeds(
 
                 if kind == "q_prev":
                     prev_info = info
-                    # v7：q_prev 的解已合格且腰部基本在 q_ready -> 锁腰种子与之等价，跳过
+                    # 若 q_prev 解已合格且腰部已处于 q_ready 附近，则后续锁腰种子等价，直接跳过
                     if q_prev_first and not locked_done and qualified(info):
                         waist_dev = float(
                             np.max(np.abs(q[waist_mask] - q_ready[waist_mask]))
@@ -4853,7 +4758,7 @@ def collect_pinocchio_candidates_and_seeds(
                     and release_rerun
                     and not prev_rerun_queued
                 ):
-                    # v7：锁腰种子触发腰部释放 -> 下一个种子用释放状态重跑 q_prev（即 v6 的第二个种子）
+                    # 锁腰种子触发腰部释放：下一个种子以释放状态重新运行 q_prev
                     queue.appendleft((q_prev_seed, None, "q_prev_release"))
                     prev_rerun_queued = True
 
@@ -4876,7 +4781,7 @@ def collect_pinocchio_candidates_and_seeds(
                     and locked_done
                     and qualified(prev_info if kind == "locked" else info)
                 ):
-                    # 旧版规则：至少比较 2 个种子后，以 q_prev 及之后种子的合格解早停（锁腰解本身不触发）
+                    # 宽松模式早停规则：至少比较 2 个种子后，以 q_prev 及之后种子的合格解早停
                     stop = "LEGACY_POSE_EARLY_STOP"
                     break
             except Exception as exc:
@@ -4903,10 +4808,10 @@ def collect_pinocchio_candidates_and_seeds(
             "locked_skipped": locked_skipped,
         }
 
-    # ---- v9：跳变上限前移到搜索 ------------------------------------------------------
-    # joint_jump_policy="reject" 且显式上限 < π 的关节：种子与迭代都限制在 q_prev ± 上限内（与有效限位 /
-    # 舒适窗求交；交集为空的关节不加）。否则 DLS 会在零空间里漂到上限之外、再被跳变过滤整批剔除，
-    # q_prev 不再更新，后续路点全部失败。框内没有可接受解时，按 v8 不加框重搜一次（见下方 "unboxed"）。
+    # ---- 关节跳变上限前移到搜索阶段 --------------------------------------------------
+    # joint_jump_policy="reject" 且显式上限 < π 的关节：种子与迭代均限制在 q_prev ± 上限内（与有效限位 /
+    # 舒适窗求交）。防止零空间漂移至跳变上限之外导致候选被整批过滤。
+    # 若框内无合格解，后续会触发无框回退重搜（见下方 unboxed）。
     box_half = None
     if jump_limits is not None and search.get("joint_jump_policy", "reject") == "reject":
         limits = np.asarray(jump_limits, dtype=float)
@@ -4914,7 +4819,7 @@ def collect_pinocchio_candidates_and_seeds(
         if np.any(np.isfinite(limits)):
             box_half = limits
     rng_unboxed = copy.deepcopy(rng) if box_half is not None else None
-    # v13 跳变重搜与 unboxed 一样使用常规阶段之前的随机数状态（两者互斥：一个要求有框、一个要求无框）
+    # 跳变重搜与 unboxed 均使用常规阶段之前的随机数状态（保持随机序列的一致性）
     rng_rescue = (
         copy.deepcopy(rng)
         if box_half is None and jump_limits is not None and search.get("jump_rescue", False)
@@ -4930,9 +4835,8 @@ def collect_pinocchio_candidates_and_seeds(
         return np.where(empty, lo, b_lo), np.where(empty, hi, b_hi)
 
     def with_library(entries, n_lead, seeds_s, lo_s, hi_s, checkpoint=False):
-        """v13：在前 n_lead 个固定种子（q_prev / 锁腰 / comfort_edge）与 q_ready（若与 q_prev 不同）之后
-        插入种子库占位（make_scatter_seeds 去重后 q_ready 若存在必在第 2 位）；checkpoint=True 时其后
-        再放舒适阶段提前回退检查点（没有种子库时放在第 patience 个名额之后）。"""
+        """在前 n_lead 个固定种子（q_prev / 锁腰 / comfort_edge）与 q_ready 之后插入种子库占位；
+        checkpoint=True 时插入舒适阶段提前回退检查点（未配置种子库时插在第 patience 个名额之后）。"""
         pos = n_lead
         if len(seeds_s) > 1 and np.array_equal(
             seeds_s[1], clip_to_bounds(q_ready, lo_s, hi_s)
@@ -4946,11 +4850,10 @@ def collect_pinocchio_candidates_and_seeds(
         return entries[:pos] + marks + entries[pos:]
 
     def regular_queue(lo_s, hi_s, rng_s, *, jump_box=False, checkpoint=False):
-        """常规阶段的种子队列 q_prev -> 锁腰 -> q_ready -> [种子库] -> 随机扰动；返回 (q_prev 种子, 队列)。
+        """构造常规阶段种子队列：q_prev -> 锁腰 -> q_ready -> [种子库] -> 随机扰动；返回 (q_prev 种子, 队列)。
 
-        队列元素 (种子, 固定关节掩码, 种子类别)；make_scatter_seeds 保证第一个是 q_prev。锁腰种子 = q_prev 且
-        腰部锁在 q_ready：v6 顺序（q_prev_first=False）排在最前。jump_box=True（跳变重搜）时锁腰种子恒排第 2、
-        腰部取值钳到框内（q_prev ± 跳变上限不一定含 q_ready 的腰部）。
+        队列元素形式为 (种子, 固定关节掩码, 种子类别)。若 jump_box=True（跳变重搜），锁腰种子排在第 2 位且
+        腰部取值钳位至框内。
         """
         seeds_s = make_scatter_seeds(
             q_prev, q_ready, lo_s, hi_s, rng_s, max_count=max_seeds
@@ -4976,17 +4879,14 @@ def collect_pinocchio_candidates_and_seeds(
         return seeds_s[0], deque(entries_s)
 
     stages = []
-    # ---- v9：续算阶段（局部优先）----------------------------------------------------
-    # 只用与 q_prev 连续的候选，避免在“锁腰（腰回 q_ready）”与“随动”两个分支间来回切换：
-    #   随动续算：种子 q_prev，DLS 限制在 q_prev ± continuation_max_step（∩ 有效限位 ∩ 跳变框）内，
-    #            零空间整理不会一步漂到远处的姿态；单步上限取 min(max_step, 0.5 × continuation_max_step)；
-    #   锁腰续算：腰部锁在 q_ready、其余从 q_prev 出发（与常规锁腰种子相同），只有单关节步长
-    #            <= continuation_max_step 时才算局部（q_prev 腰部离 q_ready 远时它就是分支切换）；
-    #            锁腰解负荷超 soft_ratio 时释放腰部、在续算框内重跑随动续算。
-    # 局部可接受候选（满足全部硬约束且步长 <= continuation_max_step）按常规择优规则比较；
-    # 没有时进入常规搜索（与 v8 相同），续算阶段的候选留在候选池中。
-    # v15（CONTINUATION_POSTURE_SETTLE = False）：续算 DLS 不做达标后的姿态整理；随动续算的解就是 q_prev 本身
-    # 且可接受（目标不动、q_prev 已是解）时原样返回，不跑锁腰续算（continuation_hold）。
+    # ---- 续算阶段（局部优先）--------------------------------------------------------
+    # 优先在 q_prev 局部连续邻域内搜索，防止在锁腰与随动分支间跳跃：
+    #   随动续算：以 q_prev 为种子，DLS 搜索约束在 q_prev ± continuation_max_step（交集于有效限位与跳变框）；
+    #            步长上限取 min(max_step, 0.5 × continuation_max_step)；
+    #   锁腰续算：腰部固定在 q_ready、其余关节从 q_prev 出发，仅当单关节位移 <= continuation_max_step
+    #            时视为局部有效解；若负荷超标则释放腰部重搜；
+    # 若存在合格的局部候选，直接采纳；否则回退进入常规全局搜索。
+    # 若禁用 CONTINUATION_POSTURE_SETTLE，且 q_prev 已满足目标位姿，直接返回无需重搜。
     hold_used = False
     if local_first:
         n_before = len(candidates)
@@ -5012,9 +4912,8 @@ def collect_pinocchio_candidates_and_seeds(
             hold_used = bool(
                 fresh and acceptable(fresh[0]) and np.array_equal(fresh[0]["q"], q_prev)
             )
-        # 锁腰续算：腰部离 q_ready 不超过续算步长时才可能是局部解（否则只多花一次 DLS，常规搜索也会跑锁腰种子）。
-        # 不按 v7 规则用“随动解腰部 ≈ q_ready”跳过：腰部等价不代表手臂等价（零空间整理可能已把手臂推到
-        # 续算框边上，而锁腰解只需跟着目标小步移动），跳过会让轨迹离开锁腰分支、之后再也回不来
+        # 锁腰续算：腰部离 q_ready 不超过续算步长时才可能是局部解；
+        # 此处不因随动解腰部靠近 q_ready 而跳过，避免手臂构型微变导致轨迹脱离锁腰分支
         if not hold_used and include_waist and np.any(waist_mask) and (
             float(np.max(np.abs(q_prev[waist_mask] - q_ready[waist_mask])))
             <= cont_step + 1e-9
@@ -5046,12 +4945,12 @@ def collect_pinocchio_candidates_and_seeds(
             local_used, local_pick = True, local
             stages[-1]["stop"] = "CONTINUATION_LOCAL"
         else:
-            released = released_before  # 回到常规搜索：腰部释放状态从头判定（与 v8 相同）
+            released = released_before  # 回到常规搜索：重置腰部释放状态，重新判定
 
     # ---- 常规搜索阶段 1（comfort 舒适窗；未启用舒适窗时直接跑 full 阶段）-----------
     lo1, hi1 = comfort if comfort is not None else (eff_lower, eff_upper)
     lo1, hi1 = boxed(lo1, hi1, box_half)
-    # 续算局部解已采用时也生成队列：随机数消耗与之前的版本一致
+    # 保持随机生成器调用序列状态同步
     first1, queue1 = regular_queue(
         lo1, hi1, rng, checkpoint=early_fallback and comfort is not None
     )
@@ -5074,9 +4973,8 @@ def collect_pinocchio_candidates_and_seeds(
     # ---- 常规搜索阶段 2（full / jump_box：舒适窗内无可接受解时放开到有效限位）------
     comfort_ok = comfort is not None and any(acceptable(c) for c in candidates)
     fallback = comfort is not None and not comfort_ok and not local_used
-    # v13：舒适阶段已出现“只因跳变超限被拒”的解 -> 放开阶段直接在跳变框内搜索（阶段名 "jump_box"）。
-    # 框外的解必被跳变过滤拒绝，不加框的放开阶段多半只会再收敛到一批超限解（回放基准里这类目标
-    # 先跑满 10 个放开种子、再跳变重搜，单目标 300~500 ms）
+    # 若舒适阶段已出现仅因跳变超限被拒的解，放开阶段直接限制在跳变框内搜索（jump_box），
+    # 避免在框外无效搜索耗费时间
     early_rescue = bool(
         fallback and rescue_allowed and any(jump_only(c) for c in candidates)
     )
@@ -5102,8 +5000,8 @@ def collect_pinocchio_candidates_and_seeds(
                 deque(entries_full), lo2, hi2, seeds_full[0], True,
             )
         )
-    # ---- v9：跳变框内没有可接受解 -> 按 v8 不加框重搜一次 -------------------------------
-    # 既保证 v8 能解的目标 v9 仍能解，也让“只有超限解”的目标照旧报 JOINT_JUMP_LIMIT（而不是位姿不可达）
+    # ---- 跳变框内无合格解时的无框回退重搜 (unboxed) ----------------------------------
+    # 当有框搜索未能获得合格解时，放开跳变框重新搜索一次，以区分是位姿不可达还是跳变超限
     unboxed = bool(
         box_half is not None
         and not local_used
@@ -5116,7 +5014,8 @@ def collect_pinocchio_candidates_and_seeds(
                 "unboxed", queue_u, eff_lower, eff_upper, first_u, not include_waist
             )
         )
-    # ---- v13：只因跳变超限而失败 -> 在跳变框内重搜一次（放开阶段已在框内搜过则不再重搜）------------
+    # ---- 仅因跳变超限失败时的跳变框重搜 (jump_box rescue) ---------------------------
+    # 若放开阶段未曾在框内搜索过，在此阶段对跳变框进行二次拯救搜索
     rescue = bool(
         rescue_allowed
         and not early_rescue
@@ -5293,11 +5192,11 @@ class HAArmIKSolver:
         self.dls_posture_use_equivalent_branch = bool(
             cfg_tune.get("dls_posture_use_equivalent_branch", False)
         )
-        # v8：腰部舒适窗（偏好，非硬约束）。"auto" = 由 q_ready 处静态重力矩推导（默认）；
-        # None / False / "off" = 关闭（v7 行为）；{关节名: 半窗 rad} = 以 q_ready 为中心显式指定
+        # 腰部舒适窗（偏好，非硬约束）。"auto" = 由 q_ready 处静态重力矩自动推导（默认）；
+        # None / False / "off" = 关闭；{关节名: 半窗 rad} = 以 q_ready 为中心显式指定
         self.dls_waist_comfort = cfg_tune.get("dls_waist_comfort", "auto")
-        # 舒适窗只用于“重新定位”：目标相对 FK(q_prev) 的位置差 > pos_m 或姿态差 > ori_rad；
-        # None = 默认 (0.1 × 臂展, 0.1 rad)。小位移续算（路点跟踪）不加舒适窗，保持 v7 的连续性
+        # 舒适窗用于“重新定位”模式：目标相对 FK(q_prev) 的位置差 > pos_m 或姿态差 > ori_rad；
+        # None = 默认 (0.1 × 臂展, 0.1 rad)。小位移续算（路点跟踪）不加舒适窗以保证连续性
         tol = cfg_tune.get("dls_waist_comfort_continuation_tol")
         if tol is not None:
             try:
@@ -5335,8 +5234,7 @@ class HAArmIKSolver:
             "dls_seed_library_min_separation must be a finite angle >= 0",
             positive=False,
         )
-        # 舒适阶段提前回退与耐心、跳变重搜、锁腰种子可达性检查、续算类求解是否用种子库
-        # （校验顺序与之前的版本相同：多项同时出错时报同一项）
+        # 舒适阶段提前回退与耐心、跳变重搜、锁腰种子可达性检查、续算类求解是否使用种子库
         self.dls_waist_comfort_early_fallback = _config_flag(
             cfg_tune, "dls_waist_comfort_early_fallback", WAIST_COMFORT_EARLY_FALLBACK
         )
@@ -5356,32 +5254,16 @@ class HAArmIKSolver:
         )
         # 主任务位置误差的特征长度（m）：DLS 与 strict 最终复核同一口径
         self.dls_characteristic_length = cfg_tune.get("dls_characteristic_length", 0.5)
-        # ---- 防碰撞（环境障碍物）----
-        # collision_avoidance（默认 True = 不写即开，自动构建胶囊体 manager）：
-        #   - True = 开启（环境障碍物防碰；自碰归 MoveIt, 本包不检测）；
-        #   - RobotCollisionManager 实例 = 开启并直接使用该实例（mesh/
-        #     预加障碍物口径，manager.enabled 可运行时开关）；
-        #   - False / None = 关闭，solve() 无任何碰撞开销（仅基线对照用）。
-        # 开启后两道防线生效：
-        #   1. 软排斥：DLS 迭代零空间次任务，把连杆推离障碍物影响区
-        #      （collision_influence_distance，默认 9cm）——软引导不判碰，
-        #      在硬判碰线之前把解推走；
-        #   2. 硬门槛：终检 strict / off 均生效——解净空 <
-        #      collision_safety_margin（默认 5mm）即拒绝整个 solve()。
-        #      对真实 mesh 表面的等效缓冲 = margin 5mm（胶囊包络为实测最大
-        #      半径，不加裕度）。
-        # True 自动构建默认走 mesh 模式（URDF 真实碰撞网格逐连杆凸包化，
-        # 与 MoveIt 同口径，整机全连杆覆盖）；capsule 模式（4 骨段解析几何，
-        # ~0.5ms 全量复核可进 DLS 内层 per-iteration——mesh 全量复核 ~47ms
-        # 会拖爆 strict 0.5s 预算，实测单种子 671ms）需显式
-        # collision_geometry="capsule" 降档（胶囊表只覆盖臂部 4 骨段，
-        # 躯干/头/另一侧臂/夹爪手指无包络）。
-        # 环境障碍物来源（collision_scene_sync，默认 True）：后台探测 MoveIt
-        #   /get_planning_scene——探测到 move_group 则常驻自动同步规划场景
-        #   障碍物（box/sphere/cylinder）进 manager，用户在 RViz/MoveIt 侧
-        #   增删障碍物 IK 自动跟随；探测不到（无 MoveIt / 无 ROS / rclpy
-        #   未装）则静默退化，环境防线仅剩手动 add_obstacle。探测在后台
-        #   线程，不阻塞求解器构造；solver.close() 时停止线程并回收资源。
+        # ---- 环境障碍物防碰撞配置 ----
+        # collision_avoidance:
+        #   - True: 默认开启，自动构建防碰撞管理器（默认使用 URDF 真实碰撞网格凸包化，全连杆覆盖）；
+        #   - RobotCollisionManager 实例: 直接挂载已有实例；
+        #   - False / None: 关闭防碰撞检测。
+        # 避障机制包含两道防线：
+        #   1. 零空间软排斥: 在 DLS 迭代中作为次任务将连杆推离障碍物影响区 (collision_influence_distance, 默认 9cm)；
+        #   2. 终检硬门槛: 最终解净空距离若小于安全裕度 (collision_safety_margin, 默认 5mm) 则判定碰撞并拒绝。
+        # 环境障碍物同步 (collision_scene_sync):
+        #   支持后台探测 MoveIt 规划场景并自动同步障碍物；若未安装 ROS/rclpy 或无 MoveIt 服务则静默退化。
         col_mgr_explicit = cfg_tune.get("collision_manager", None)
         if col_mgr_explicit is not None:
             self.collision_avoidance = col_mgr_explicit
@@ -5597,7 +5479,7 @@ class HAArmIKSolver:
         self.max_joint_jump = self._resolve_joint_jump_limits(
             cfg_tune.get("max_joint_jump_rad", MAX_JOINT_JUMP_RAD)
         )
-        # v7：q_prev 先行 + 等价锁腰种子跳过的腰部容差（rad）；None = v6 种子顺序
+        # q_prev 先行且判定等价锁腰种子跳过的腰部容差（rad）；None 表示关闭跳过
         skip_tol = cfg_tune.get("locked_seed_skip_tol", LOCKED_SEED_SKIP_TOL)
         if skip_tol is not None:
             skip_tol = float(skip_tol)
@@ -6577,14 +6459,8 @@ class HAArmIKSolver:
                 joint_efforts_active=self.joint_efforts_active,
             )
 
-        # direct_psi / ssik 候选不做 per-candidate H_col 同步：单次
-        # compute_collision_repulsion_gradient（cost-only）实测 ~0.5s/次
-        # （全对 broad-phase + GJK 主导，见证点雅可比占比极小），乘以候选数
-        # 必然爆 strict 预算。安全语义不缺口——落进安全裕度的候选随后会被
-        # strict 终检 / off 模式碰撞门槛（与 load_mode 解耦）拒绝；排序偏差
-        # 只剩“贴障碍（净空 < 9cm 影响半径）的 direct_psi/ssik 候选不受
-        # w_collision 惩罚”，属于有界的择优偏差，不牺牲安全性。DLS 候选的
-        # H_col 已在 collector 内同步（零额外开销）。
+        # direct_psi / ssik 候选不重复计算 H_col 碰撞代价：避免全局 GJK 碰撞检测开销过大；
+        # 进入安全裕度内的候选会在最终碰撞门槛中被严格拒绝，DLS 候选的 H_col 已在求解过程中同步。
         if self.sync_secondary_cost and self.collision_manager is not None:
             for c in candidates:
                 if "collision_cost" not in c:
@@ -6925,7 +6801,7 @@ class HAArmIKSolver:
         candidates.extend(portfolio_candidates)
         direct_seeds.extend(portfolio_seeds)
 
-        # 3. direct-psi stage（v9：续算局部解已采用时跳过）
+        # 3. direct-psi stage（续算局部解已采用时跳过）
         if self.use_direct_psi and not (
             self.last_load_diagnostics.get("continuation") or {}
         ).get("local_used"):
@@ -7325,7 +7201,7 @@ class HAArmIKSolver:
                         ],
                         dtype=float,
                     )
-                    # P1 修复：当调用方未显式指定 q_prev 时，严格模式默认使用实测关节角作为分支与连续性参考
+                    # 当未显式指定 q_prev 时，严格模式默认使用实测关节角作为分支与连续性参考
                     if q_prev is None:
                         q_prev = observed.copy()
 
@@ -7367,7 +7243,7 @@ class HAArmIKSolver:
                 self.last_load_diagnostics["code"] = (
                     "LOAD_PROTECTION_EXPLICITLY_DISABLED"
                 )
-                # P2 修复：load_mode="off" 时，仅在显式配置了 solve_budget_s 时才设置截止时间
+                # load_mode="off" 时，仅在显式配置了 solve_budget_s 时才设置截止时间
                 solve_budget = self._load_config.get("solve_budget_s", None)
                 if solve_budget is not None:
                     budget = float(solve_budget)
