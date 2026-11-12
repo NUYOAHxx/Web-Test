@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""防碰撞自动挂载与生命周期管理。"""
+"""防碰撞自动挂载与生命周期管理工具 (供 ROS 节点或外部集成环境显式调用)。
+
+注：IK 求解器本身已与 ROS/MoveIt 探测彻底解耦，不隐式调用此处的后台线程逻辑。
+"""
 from __future__ import annotations
 
 import logging
@@ -9,6 +12,15 @@ from typing import Any, Dict
 from .collision_world import RobotCollisionManager
 
 logger = logging.getLogger(__name__)
+
+
+def build_collision_manager(solver: Any, cfg: Dict[str, Any] | None = None) -> RobotCollisionManager:
+    """纯几何碰撞管理器工厂函数 (不挂载 ROS/MoveIt 场景，纯本地运算)。"""
+    if getattr(solver, "pin_model", None) is None:
+        raise TypeError("构建碰撞管理器需要 solver 提供有效 pin_model")
+    cfg = cfg or {}
+    geometry = str(cfg.get("collision_geometry", "mesh")).strip().lower()
+    return RobotCollisionManager.from_solver(solver, geometry=geometry)
 
 
 def auto_mount(solver: Any, cfg: Dict[str, Any]) -> RobotCollisionManager:

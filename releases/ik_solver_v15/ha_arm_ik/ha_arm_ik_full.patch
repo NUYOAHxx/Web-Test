@@ -1,0 +1,3338 @@
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/__init__.py b/releases/ik_solver_v15/ha_arm_ik/collision/__init__.py
+index d68d800..8223a72 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/__init__.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/__init__.py
+@@ -4,21 +4,30 @@
+ from __future__ import annotations
+ 
+ try:
+-    from .mount import auto_mount, shutdown
++    from .auto_mount import auto_mount, build_collision_manager, shutdown
+     from .collision_world import CollisionWorld, RobotCollisionManager
+ except ImportError:
+     auto_mount = None
++    build_collision_manager = None
+     shutdown = None
+     CollisionWorld = None
+     RobotCollisionManager = None
+ 
+-from .collision_config import BROADPHASE_ENABLED, PACKAGE_DIRS
++from .collision_config import (
++    BROADPHASE_ENABLED,
++    PACKAGE_DIRS,
++    CollisionAvoidanceParams,
++    CollisionConfig,
++)
+ 
+ __all__ = [
+     "auto_mount",
++    "build_collision_manager",
+     "shutdown",
+     "CollisionWorld",
+     "RobotCollisionManager",
++    "CollisionAvoidanceParams",
++    "CollisionConfig",
+     "BROADPHASE_ENABLED",
+     "PACKAGE_DIRS",
+ ]
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/mount.py b/releases/ik_solver_v15/ha_arm_ik/collision/auto_mount.py
+similarity index 69%
+rename from releases/ik_solver_v15/ha_arm_ik/collision/mount.py
+rename to releases/ik_solver_v15/ha_arm_ik/collision/auto_mount.py
+index c571288..131b65d 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/mount.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/auto_mount.py
+@@ -1,6 +1,9 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+-"""防碰撞自动挂载与生命周期管理。"""
++"""防碰撞自动挂载与生命周期管理工具 (供 ROS 节点或外部集成环境显式调用)。
++
++注：IK 求解器本身已与 ROS/MoveIt 探测彻底解耦，不隐式调用此处的后台线程逻辑。
++"""
+ from __future__ import annotations
+ 
+ import logging
+@@ -11,6 +14,15 @@ from .collision_world import RobotCollisionManager
+ logger = logging.getLogger(__name__)
+ 
+ 
++def build_collision_manager(solver: Any, cfg: Dict[str, Any] | None = None) -> RobotCollisionManager:
++    """纯几何碰撞管理器工厂函数 (不挂载 ROS/MoveIt 场景，纯本地运算)。"""
++    if getattr(solver, "pin_model", None) is None:
++        raise TypeError("构建碰撞管理器需要 solver 提供有效 pin_model")
++    cfg = cfg or {}
++    geometry = str(cfg.get("collision_geometry", "mesh")).strip().lower()
++    return RobotCollisionManager.from_solver(solver, geometry=geometry)
++
++
+ def auto_mount(solver: Any, cfg: Dict[str, Any]) -> RobotCollisionManager:
+     """按 solver 配置构建 manager 并挂载 MoveIt 场景感知 (失败静默降级)。"""
+     if getattr(solver, "pin_model", None) is None:
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/broadphase.py b/releases/ik_solver_v15/ha_arm_ik/collision/broadphase.py
+index 04fba49..21bc860 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/broadphase.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/broadphase.py
+@@ -15,8 +15,26 @@ import pinocchio as pin
+ from .collision_config import BROADPHASE_ENABLED
+ 
+ 
++def compute_geometry_bounding_radius(
++    geo: Any, fallback_radius: float = 0.05
++) -> float:
++    """计算单个 coal/FCL 几何体绕局部原点的保守外接球半径。
++
++    严格遵循三角不等式上界: R = aabb_radius + ||aabb_center||。
++    无论机器人连杆凸包还是外部环境障碍物 (含偏心 Mesh), 均統一调用此函数,
++    消除因遗漏 ||aabb_center|| 导致的 Broad-phase 漏检。
++    """
++    try:
++        if getattr(geo, "aabb_radius", -1.0) < 0.0:
++            geo.computeLocalAABB()
++        r = float(geo.aabb_radius) + float(np.linalg.norm(geo.aabb_center))
++        return max(r, 0.0)
++    except Exception:
++        return float(fallback_radius)
++
++
+ class Broadphase:
+-    """包围球保守下界粗筛 (RobotCollisionManager 的 Mixin 功能块)。"""
++    """包围球保守下界粗筛 (RobotCollisionManager 的功能组件)。"""
+ 
+     geom_model: pin.GeometryModel
+     geom_data: pin.GeometryData
+@@ -27,23 +45,13 @@ class Broadphase:
+     _bp_cache: Optional[Dict[str, Any]]
+ 
+     def _compute_bounding_spheres(self) -> np.ndarray:
+-        """预计算每几何体的局部外接球半径 (以几何原点为球心, 保守上界)。
+-
+-        半径口径 = aabb_radius + |aabb_center|，满足三角不等式上界。
+-        """
++        """预计算每几何体的局部外接球半径 (以几何原点为球心, 保守上界)。"""
+         n_geoms = self.geom_model.ngeoms
+         radii = np.zeros(n_geoms, dtype=float)
+         geom_objs = self.geom_model.geometryObjects
+ 
+         for g in range(n_geoms):
+-            geo = geom_objs[g].geometry
+-            try:
+-                if geo.aabb_radius < 0.0:  # 未初始化 (-1)
+-                    geo.computeLocalAABB()
+-                r = float(geo.aabb_radius) + float(np.linalg.norm(geo.aabb_center))
+-                radii[g] = max(r, 0.0)
+-            except Exception:
+-                radii[g] = 0.05
++            radii[g] = compute_geometry_bounding_radius(geom_objs[g].geometry)
+         return radii
+ 
+     def _update_active_pairs(self, influence_distance: float) -> int:
+@@ -57,8 +65,8 @@ class Broadphase:
+             self._pair_active = []
+             return 0
+ 
+-        # 开关未开启: 全部激活回退
+-        if not BROADPHASE_ENABLED:
++        # 开关未开启或无穷大距离查询: 全部激活回退
++        if not BROADPHASE_ENABLED or np.isinf(influence_distance):
+             self._pair_active = [True] * n_pairs
+             act = self.geom_data.activeCollisionPairs
+             for k in range(len(act)):
+@@ -68,11 +76,20 @@ class Broadphase:
+         d_inf = float(influence_distance)
+         n_geoms = self.geom_model.ngeoms
+ 
+-        # 1. 结构与对端索引缓存 (仅随碰撞对增删/模型变动时更新拓扑)
+-        topo_key = (n_pairs, n_geoms, len(self.obstacle_geom_ids))
++        # 1. 结构与对端索引缓存 (仅随碰撞对增删/模型变动/半径表更新时重建拓扑)
++        topo_key = (
++            n_pairs,
++            n_geoms,
++            len(self.obstacle_geom_ids),
++            id(self.geom_model),
++            len(self.geom_bounding_radii),
++        )
+         cached = getattr(self, "_bp_cache", None)
+ 
+         if cached is None or cached["topo_key"] != topo_key:
++            if len(self.geom_bounding_radii) != n_geoms:
++                self.geom_bounding_radii = self._compute_bounding_spheres()
++
+             first = np.empty(n_pairs, dtype=np.intp)
+             second = np.empty(n_pairs, dtype=np.intp)
+             for k, cp in enumerate(self.geom_model.collisionPairs):
+@@ -84,7 +101,8 @@ class Broadphase:
+                 "first": first,
+                 "second": second,
+                 # 预计算对端几何半径之和，避免每轮迭代重复求和
+-                "radii_sum": self.geom_bounding_radii[first] + self.geom_bounding_radii[second],
++                "radii_sum": self.geom_bounding_radii[first]
++                + self.geom_bounding_radii[second],
+                 "centers": np.empty((n_geoms, 3), dtype=float),
+             }
+             self._bp_cache = cached
+@@ -96,9 +114,15 @@ class Broadphase:
+ 
+         for g in range(n_geoms):
+             go = geom_objs[g]
+-            oMi = oMi_all[go.parentJoint]
+-            # c = p_joint + R_joint @ p_geom_local
+-            centers[g] = oMi.translation + oMi.rotation @ go.placement.translation
++            if go.parentJoint > 0:
++                oMi = oMi_all[go.parentJoint]
++                # c = p_joint + R_joint @ p_geom_local
++                centers[g] = (
++                    oMi.translation + oMi.rotation @ go.placement.translation
++                )
++            else:
++                # 挂在 universe (joint 0) 上的环境障碍物直接取 placement.translation
++                centers[g] = go.placement.translation
+ 
+         # 3. 向量化粗筛 (坐标差 -> 欧氏范数 -> 保守下界)
+         diff = centers[cached["first"]] - centers[cached["second"]]
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/collision_config.py b/releases/ik_solver_v15/ha_arm_ik/collision/collision_config.py
+index 7f2f520..164a09b 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/collision_config.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/collision_config.py
+@@ -1,37 +1,47 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+-"""碰撞检测配置: mesh 资产路径表、凸包缓存目录与阈值常量。
++"""碰撞检测配置: mesh 资产路径表、凸包缓存目录、机器人几何配置与阈值常量。
+ 
+-纯配置模块, 无行为逻辑——所有跨模块共享的路径与标量参数集中此处,
+-供 robot_collision / environment_collision 等模块引用。
++支持环境变量与外部 YAML/字典动态覆盖, 兼顾开箱即用与模型无关 (Model-Agnostic) 演进。
+ """
+ from __future__ import annotations
+ 
++from dataclasses import dataclass, field
+ import os
+ from pathlib import Path
+-from typing import List, Tuple
++from typing import Dict, List, Tuple
+ 
+ # ---------------------------------------------------------
+-# 1. 资产路径与包目录配置
++# 1. 资产路径与包目录配置 (支持环境变量 HA_COLLISION_PACKAGE_DIRS 扩展)
+ # ---------------------------------------------------------
+-# 加载时按 os.path.isdir 过滤, 目录缺失时该条目自动失效。
+-# 注意: 条目必须是包目录的父目录 (URDF 的 package://<pkg>/meshes/... 按
+-# "package_dir / pkg / 余下路径" 拼接解析), 不是 meshes 目录本身。
+-_RAW_PACKAGE_DIRS = [
++_DEFAULT_PACKAGE_DIRS = [
+     "/workspaces/isaac_ros-dev/src/lam_pm_cad/lam_description",
+     "/workspaces/isaac_ros-dev/src/lam_pm_cad/lam_description/cpc_tesollo",
+ ]
+ 
++_ENV_PACKAGE_DIRS = [
++    p.strip()
++    for p in os.environ.get("HA_COLLISION_PACKAGE_DIRS", "").split(os.pathsep)
++    if p.strip()
++]
++
+ # 仅保留本地实际存在的有效路径，避免下游加载时重复判断
+-PACKAGE_DIRS: List[str] = [p for p in _RAW_PACKAGE_DIRS if os.path.isdir(p)]
++PACKAGE_DIRS: List[str] = [
++    p for p in (_ENV_PACKAGE_DIRS + _DEFAULT_PACKAGE_DIRS) if os.path.isdir(p)
++]
+ 
+ # 凸包缓存: 全部凸包共用一个目录, 按 "连杆stem_源mesh哈希" 命名,
+ # 源 mesh 变更自动失效重建, 首次构建 ~7ms/连杆, 之后毫秒级加载。
+-HULL_CACHE_DIR: Path = Path(__file__).resolve().parent.parent / "assets" / "hull"
++HULL_CACHE_DIR: Path = Path(
++    os.environ.get(
++        "HA_HULL_CACHE_DIR",
++        str(Path(__file__).resolve().parent.parent / "assets" / "hull"),
++    )
++)
+ HULL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+ 
+ # ---------------------------------------------------------
+-# 2. 凸包分解与连杆白名单配置
++# 2. 凸包分解、连杆白名单与胶囊包络配置
+ # ---------------------------------------------------------
+ # 臂-身体碰撞对靠这三个凸包补齐。
+ BODY_HULL_LINKS: Tuple[str, ...] = ("Hip_Link1", "Body_Link", "Head_Link1")
+@@ -47,8 +57,120 @@ HULL_DECOMPOSE_LINK_PREFIXES: Tuple[str, ...] = (
+     "base_Base",
+ )
+ 
++# 双臂胶囊包络段表: (登记连杆名, 物理挂载帧名, 胶囊半径[m], 挂载帧系下的骨向量[m])
++# 注: 登记名与挂载帧解耦, 挂载帧决定 FK 与雅可比作用的 parentJoint。
++DEFAULT_CAPSULE_SEGMENTS: Dict[str, List[Tuple[str, str, float, Tuple[float, float, float]]]] = {
++    "left": [
++        ("LHand_Link2", "LHand_Link2", 0.0640, (0.0, 0.2378, 0.0)),
++        ("LHand_Link4", "LHand_Link4", 0.0640, (0.0, 0.1719, 0.0)),
++        ("LHand_Link6", "LHand_Link6", 0.0559, (0.084, 0.0, 0.0)),
++        ("LHand_Link7", "LHand_Link7", 0.0422, (0.16, 0.0, 0.0)),
++    ],
++    "right": [
++        ("RHand_Link2", "RHand_Link2", 0.0640, (0.0, 0.2378, 0.0)),
++        ("RHand_Link4", "RHand_Link4", 0.0640, (0.0, 0.1719, 0.0)),
++        ("RHand_Link6", "RHand_Link6", 0.0559, (0.084, 0.0, 0.0)),
++        ("RHand_Link7", "RHand_Link7", 0.0422, (0.16, 0.0, 0.0)),
++    ],
++}
++
+ # ---------------------------------------------------------
+ # 3. 算法开关与通用阈值
+ # ---------------------------------------------------------
+-# 是否启用包围球粗筛 (Broad-phase)
+-BROADPHASE_ENABLED: bool = False
+\ No newline at end of file
++# 是否启用包围球粗筛 (Broad-phase): 半径口径已统一修复为 aabb_radius + ||aabb_center||, 可安全开启
++BROADPHASE_ENABLED: bool = True
++
++
++@dataclass(frozen=True)
++class CollisionConfig:
++    """结构化碰撞配置对象 (支持向组合架构与多机器人配置驱动演进)。"""
++
++    package_dirs: Tuple[str, ...] = field(default_factory=lambda: tuple(PACKAGE_DIRS))
++    hull_cache_dir: Path = HULL_CACHE_DIR
++    body_hull_links: Tuple[str, ...] = BODY_HULL_LINKS
++    hull_decompose_prefixes: Tuple[str, ...] = HULL_DECOMPOSE_LINK_PREFIXES
++    broadphase_enabled: bool = BROADPHASE_ENABLED
++    default_influence_distance: float = 0.08
++    default_safety_margin: float = 0.0
++    default_repulsion_gain: float = 0.25
++
++
++@dataclass
++class CollisionAvoidanceParams:
++    """IK 解算请求级与环境上下文防碰撞参数规范。
++
++    分层职责:
++    - 物理硬约束 (Safety Constraint): safety_margin [m]
++    - 算法软势场 (Potential Field): influence_distance [m], repulsion_gain
++    - 外层评价打分 (Scoring Weight): w_collision
++    - 距离测量模式: compute_exact_min_distance
++    """
++
++    safety_margin: float = 0.002               # 2mm 硬安全门槛 (验收判定)
++    influence_distance: float = 0.09           # 90mm 软排斥势场激活距离
++    repulsion_gain: float = 0.35               # 零空间排斥力矩增益
++    w_collision: float = 500.0                 # 候选解打分惩罚权重
++    compute_exact_min_distance: bool = False   # 是否强制提取全局精确最小距离
++
++    def clone(self) -> "CollisionAvoidanceParams":
++        """深拷贝当前参数对象。"""
++        return CollisionAvoidanceParams(
++            safety_margin=self.safety_margin,
++            influence_distance=self.influence_distance,
++            repulsion_gain=self.repulsion_gain,
++            w_collision=self.w_collision,
++            compute_exact_min_distance=self.compute_exact_min_distance,
++        )
++
++    def with_overrides(
++        self,
++        safety_margin: Optional[float] = None,
++        influence_distance: Optional[float] = None,
++        repulsion_gain: Optional[float] = None,
++        w_collision: Optional[float] = None,
++        compute_exact_min_distance: Optional[bool] = None,
++    ) -> "CollisionAvoidanceParams":
++        """返回注入覆盖值后的新参数对象 (不可变链式更新)。"""
++        return CollisionAvoidanceParams(
++            safety_margin=float(safety_margin) if safety_margin is not None else self.safety_margin,
++            influence_distance=float(influence_distance) if influence_distance is not None else self.influence_distance,
++            repulsion_gain=float(repulsion_gain) if repulsion_gain is not None else self.repulsion_gain,
++            w_collision=float(w_collision) if w_collision is not None else self.w_collision,
++            compute_exact_min_distance=bool(compute_exact_min_distance) if compute_exact_min_distance is not None else self.compute_exact_min_distance,
++        )
++
++    @classmethod
++    def from_any(
++        cls,
++        obj: Any = None,
++        **kwargs,
++    ) -> "CollisionAvoidanceParams":
++        """从任意来源 (dict / dataclass / None) 解析构建并允许 kwargs 覆盖。"""
++        if obj is None:
++            base = cls()
++        elif isinstance(obj, CollisionAvoidanceParams):
++            base = obj.clone()
++        elif isinstance(obj, dict):
++            base = cls(
++                safety_margin=float(obj.get("collision_safety_margin", obj.get("safety_margin", 0.002))),
++                influence_distance=float(obj.get("collision_influence_distance", obj.get("influence_distance", 0.09))),
++                repulsion_gain=float(obj.get("collision_repulsion_gain", obj.get("repulsion_gain", 0.35))),
++                w_collision=float(obj.get("w_collision", 500.0)),
++                compute_exact_min_distance=bool(obj.get("compute_exact_min_distance", False)),
++            )
++        else:
++            base = cls()
++
++        s_margin = kwargs.get("collision_safety_margin", kwargs.get("safety_margin"))
++        s_inf = kwargs.get("collision_influence_distance", kwargs.get("influence_distance"))
++        s_gain = kwargs.get("collision_repulsion_gain", kwargs.get("repulsion_gain"))
++        s_w = kwargs.get("w_collision")
++        s_exact = kwargs.get("compute_exact_min_distance")
++
++        return base.with_overrides(
++            safety_margin=s_margin,
++            influence_distance=s_inf,
++            repulsion_gain=s_gain,
++            w_collision=s_w,
++            compute_exact_min_distance=s_exact,
++        )
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/collision_constraints.py b/releases/ik_solver_v15/ha_arm_ik/collision/collision_constraints.py
+index 01cb090..cba1ce1 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/collision_constraints.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/collision_constraints.py
+@@ -8,6 +8,7 @@
+ from __future__ import annotations
+ 
+ from dataclasses import dataclass
++import threading
+ from typing import Any, Dict, List, Tuple
+ 
+ import numpy as np
+@@ -24,9 +25,9 @@ class CollisionReport:
+ 
+ 
+ class CollisionConstraints:
+-    """check_collision 判碰检查 (RobotCollisionManager 的 Mixin 功能块)。"""
++    """check_collision 判碰检查 (RobotCollisionManager 的功能组件)。"""
+ 
+-    # 声明 Mixin 宿主属性
++    _obstacle_lock: threading.RLock
+     enabled: bool
+     obstacles: Dict[str, Any]
+     geom_model: pin.GeometryModel
+@@ -39,89 +40,107 @@ class CollisionConstraints:
+         q: np.ndarray,
+         stop_at_first: bool = True,
+         safety_margin: float = 0.0,
++        compute_exact_min_distance: bool = False,
+     ) -> CollisionReport:
+-        """机器人×障碍物碰撞检测 (无自碰通道, 全部碰撞对均为障碍物对)。
++        """机器人×障碍物碰撞检测 (线程安全, 支持可选全局精确最小距离查询)。
+ 
+         Args:
+             q: 机器人关节角度向量。
+             stop_at_first: 发现第一个碰撞点即快速熔断退出 (提升检测吞吐)。
+             safety_margin: 安全裕度 [m]——净空 < margin 判碰 (margin=0 等价穿透)。
++            compute_exact_min_distance: 若为 True, 即使未发生碰撞也计算全局精确最短距离
++                (用于监控曲线绘制或安全状态机, 避免未碰撞时返回 inf 跳变)。
+         """
+-        # 1. 未启用或无障碍物时秒级快速短路
+-        if not self.enabled or not self.obstacles:
+-            return CollisionReport(
+-                is_collision=False,
+-                colliding_pairs=[],
+-                min_obstacle_distance=float("inf"),
++        with self._obstacle_lock:
++            # 1. 未启用或无障碍物时秒级快速短路
++            if not self.enabled or not self.obstacles:
++                return CollisionReport(
++                    is_collision=False,
++                    colliding_pairs=[],
++                    min_obstacle_distance=float("inf"),
++                )
++            self._sync_transforms(q)
++
++            # 2. 设置安全裕度与激活表
++            margin_f = float(max(safety_margin, 0.0))
++            saved_margins = [
++                float(cr.security_margin) for cr in self.geom_data.collisionRequests
++            ]
++            for cr in self.geom_data.collisionRequests:
++                cr.security_margin = margin_f
++
++            self._update_active_pairs(
++                float("inf") if compute_exact_min_distance else margin_f
+             )
+-        self._sync_transforms(q)
+-
+-        # 2. 设置安全裕度与激活表
+-        margin_f = float(max(safety_margin, 0.0))
+-        for cr in self.geom_data.collisionRequests:
+-            cr.security_margin = margin_f
+-
+-        self._update_active_pairs(margin_f)
+-
+-        # 3. 运行碰撞检测
+-        pin.computeCollisions(self.geom_model, self.geom_data, stop_at_first)
+-
+-        # 4. 局部属性绑定，加速热路径循环
+-        collision_pairs = self.geom_model.collisionPairs
+-        collision_results = self.geom_data.collisionResults
+-        geom_objs = self.geom_model.geometryObjects
+-        geom_to_link = self.geom_to_link
+-        pair_active = self._pair_active
+-
+-        colliding_pairs: List[Tuple[str, str]] = []
+-        hit_ks: List[int] = []
+-
+-        for k, is_active in enumerate(pair_active):
+-            if not is_active:
+-                continue
+-
+-            if collision_results[k].isCollision():
+-                cp = collision_pairs[k]
+-                gid1, gid2 = cp.first, cp.second
+-                name1 = geom_to_link.get(gid1, geom_objs[gid1].name)
+-                name2 = geom_to_link.get(gid2, geom_objs[gid2].name)
+-                colliding_pairs.append((name1, name2))
+-                hit_ks.append(k)
+-
+-                if stop_at_first:
+-                    break
+-
+-        min_obs_d = float("inf")
+-
+-        # 5. 靶向补测: 命中对单独跑一轮 GJK 提取穿透距离
+-        if hit_ks:
+-            act = self.geom_data.activeCollisionPairs
+-            n_act = len(act)
+-
+-            # 只暂存并还原需要修改的状态，避免全量列表装箱
+-            hit_set = set(hit_ks)
+-            saved_states: Dict[int, bool] = {}
+ 
++            # 3. 运行碰撞检测并保证异常安全地还原 security_margin
+             try:
+-                for k in range(n_act):
+-                    target_state = k in hit_set
+-                    if act[k] != target_state:
+-                        saved_states[k] = act[k]
+-                        act[k] = target_state
+-                pin.computeDistances(self.geom_model, self.geom_data)
++                pin.computeCollisions(
++                    self.geom_model, self.geom_data, stop_at_first
++                )
+             finally:
+-                for k, prev_state in saved_states.items():
+-                    act[k] = prev_state
+-
+-            # 回填最小距离
+-            dist_results = self.geom_data.distanceResults
+-            for k in hit_ks:
+-                d = float(dist_results[k].min_distance)
+-                if d < min_obs_d:
+-                    min_obs_d = d
+-
+-        return CollisionReport(
+-            is_collision=bool(colliding_pairs),
+-            colliding_pairs=colliding_pairs,
+-            min_obstacle_distance=min_obs_d,
+-        )
+\ No newline at end of file
++                for cr, m in zip(self.geom_data.collisionRequests, saved_margins):
++                    cr.security_margin = m
++
++            # 4. 局部属性绑定，加速热路径循环
++            collision_pairs = self.geom_model.collisionPairs
++            collision_results = self.geom_data.collisionResults
++            geom_objs = self.geom_model.geometryObjects
++            geom_to_link = self.geom_to_link
++            pair_active = self._pair_active
++
++            colliding_pairs: List[Tuple[str, str]] = []
++            hit_ks: List[int] = []
++
++            for k, is_active in enumerate(pair_active):
++                if not is_active:
++                    continue
++
++                if collision_results[k].isCollision():
++                    cp = collision_pairs[k]
++                    gid1, gid2 = cp.first, cp.second
++                    name1 = geom_to_link.get(gid1, geom_objs[gid1].name)
++                    name2 = geom_to_link.get(gid2, geom_objs[gid2].name)
++                    colliding_pairs.append((name1, name2))
++                    hit_ks.append(k)
++
++                    if stop_at_first:
++                        break
++
++            min_obs_d = float("inf")
++
++            # 5. 靶向补测或全量精确距离提取
++            if compute_exact_min_distance:
++                pin.computeDistances(self.geom_model, self.geom_data)
++                for dr in self.geom_data.distanceResults:
++                    d = float(dr.min_distance)
++                    if d < min_obs_d:
++                        min_obs_d = d
++            elif hit_ks:
++                act = self.geom_data.activeCollisionPairs
++                n_act = len(act)
++                hit_set = set(hit_ks)
++                saved_states: Dict[int, bool] = {}
++
++                try:
++                    for k in range(n_act):
++                        target_state = k in hit_set
++                        if act[k] != target_state:
++                            saved_states[k] = act[k]
++                            act[k] = target_state
++                    pin.computeDistances(self.geom_model, self.geom_data)
++                finally:
++                    for k, prev_state in saved_states.items():
++                        act[k] = prev_state
++
++                dist_results = self.geom_data.distanceResults
++                for k in hit_ks:
++                    d = float(dist_results[k].min_distance)
++                    if d < min_obs_d:
++                        min_obs_d = d
++
++            return CollisionReport(
++                is_collision=bool(colliding_pairs),
++                colliding_pairs=colliding_pairs,
++                min_obstacle_distance=min_obs_d,
++            )
+\ No newline at end of file
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/collision_gradient.py b/releases/ik_solver_v15/ha_arm_ik/collision/collision_gradient.py
+index 7eb7d5d..8cccdd4 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/collision_gradient.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/collision_gradient.py
+@@ -2,11 +2,14 @@
+ # -*- coding: utf-8 -*-
+ """碰撞排斥梯度: 见证点雅可比 + C¹ 双层单侧二次排斥势场。
+ 
+-零空间避障次任务的数学核: FCL 最近见证点 + Pinocchio 点雅可比解析求 ∂d/∂q,
+-构造 C¹ 单侧排斥势垒 H_col, 负梯度 z_col 投影至度量一致零空间。
++数学核修复与增强:
++* 见证点优先法向准则: 当 d > 0 时严格采用 (p_robot - p_obs) / ||p_robot - p_obs|| 作为远离单位向量,
++  当 d < 0 (EPA 穿透) 时采用 (p_obs - p_robot) 结合法向与球心指向校验, 彻底消除 coal/FCL 不同图元法向符号反转导致的"反向吸入"死锁。
++* 并发安全: 全程受 _obstacle_lock 保护, 防止后台 MoveIt 场景同步重建 geom_data 时引发 C++ 内存越界。
+ """
+ from __future__ import annotations
+ 
++import threading
+ from typing import Any, Dict, List, Tuple
+ 
+ import numpy as np
+@@ -16,9 +19,9 @@ from .collision_constraints import CollisionReport
+ 
+ 
+ class CollisionGradient:
+-    """见证点雅可比与排斥势场梯度 (Mixin)。"""
++    """见证点雅可比与排斥势场梯度 (RobotCollisionManager 的功能组件)。"""
+ 
+-    # 声明 Mixin 依赖的宿主属性类型，提升 IDE 静态检查与可读性
++    _obstacle_lock: threading.RLock
+     enabled: bool
+     active_joint_names: List[str]
+     pin_model: pin.Model
+@@ -48,6 +51,42 @@ class CollisionGradient:
+         r = p_world - self.pin_data.oMi[jid].translation
+         return J_act[:3, :] + np.cross(J_act[3:, :], r, axisa=0, axisb=0, axisc=0)
+ 
++    def _compute_safe_away_direction(
++        self,
++        robot_gid: int,
++        obs_gid: int,
++        p_robot: np.ndarray,
++        p_obs: np.ndarray,
++        d: float,
++        raw_normal: np.ndarray,
++    ) -> np.ndarray:
++        """计算使机器人几何体远离障碍物的解析单位方向向量 u_away = ∂d/∂p_robot。
++
++        消除对 FCL/coal DistanceResult.normal 符号约定的盲目依赖:
++        1. 非穿透区 (d > 1e-7): 最近见证点连线 (p_robot - p_obs) 恒为精确远离方向;
++        2. 穿透区 (d < -1e-7): 见证点位于对方表面内部, (p_obs - p_robot) 指向逃离穿透的最短路径;
++        3. 接触临界区 (|d| <= 1e-7): 使用 raw_normal 并用几何体中心连线校验正负号。
++        """
++        diff = (p_robot - p_obs) if d >= 0.0 else (p_obs - p_robot)
++        dn = float(np.linalg.norm(diff))
++        if dn > 1e-7:
++            return diff / dn
++
++        # 见证点重合时 (刚好接触 d ≈ 0), 使用幾何中心连线校准法线方向
++        c_robot = self.geom_data.oMg[robot_gid].translation
++        c_obs = self.geom_data.oMg[obs_gid].translation
++        center_vec = c_robot - c_obs
++        cn = float(np.linalg.norm(center_vec))
++
++        n_norm = float(np.linalg.norm(raw_normal))
++        if n_norm > 1e-9:
++            u_n = raw_normal / n_norm
++            if cn > 1e-9 and float(np.dot(u_n, center_vec)) < 0.0:
++                u_n = -u_n
++            return u_n
++
++        return (center_vec / cn) if cn > 1e-9 else np.array([0.0, 0.0, 1.0])
++
+     def compute_collision_repulsion_gradient(
+         self,
+         q: np.ndarray,
+@@ -56,175 +95,144 @@ class CollisionGradient:
+         repulsion_gain: float = 0.25,
+         compute_gradient: bool = True,
+     ) -> Tuple[np.ndarray, float, CollisionReport]:
+-        """零空间排斥次任务负梯度 z_col、势能代价 H_col 及碰撞报告。
+-
+-        只覆盖机器人 × 环境障碍物排斥 (自碰撞归 MoveIt)。
+-        compute_gradient=False 为 cost-only 模式: 跳过雅可比, z_col 恒零。
+-
+-        C¹ 连续双层单侧二次势垒 (影响半径 d_inf), 对 d < d_inf 的对:
+-          u = (d_inf - d) / d_inf
+-          H_col = 0.5 * repulsion_gain * ∑ u²
+-          z_col = ∑ (repulsion_gain / d_inf) * u * ∂d/∂q
+-        d < safety_margin 时叠加增益 2x 的内层高刚度项, 阈值处函数值与导数
+-        均连续 (无跳变振颤)。∂d/∂q 由 FCL 见证点经 _point_jacobian 精确求得。
+-
+-        距离查询两段式 (mesh 档热路径关键优化): mesh×图元全量 GJK 距离
+-        要下钻 BVH 到三角形级 (~35ms/52 对), 而 DLS 每迭代只需排斥信号。
+-        先以 security_margin=d_inf 膨胀判碰 (OBB 层剪枝, ~0.05ms) 粗筛,
+-        仅膨胀命中 (d < d_inf 精确) 的对跑 pin.computeDistances 拿见证点
+-        距离/方向; 未命中的对 d >= d_inf, 势场与梯度恒零, 直接跳过。
+-        """
++        """零空间排斥次任务负梯度 z_col、势能代价 H_col 及碰撞报告 (线程安全)。"""
+         n_act = len(q)
+         z_col = np.zeros(n_act, dtype=float)
+ 
+-        # 提前拦截未启用或无环境障碍物场景，省去不必要的运动学与碰撞更新
+-        if not self.enabled or not self.obstacle_geom_ids:
+-            return (
+-                z_col,
+-                0.0,
+-                CollisionReport(
+-                    is_collision=False,
+-                    colliding_pairs=[],
+-                    min_obstacle_distance=float("inf"),
+-                ),
+-            )
+-
+-        # 同步正运动学与关节雅可比 (修复原代码重复调用两次的冗余 bug)
+-        self._sync_transforms(q, compute_joint_jacobians=compute_gradient)
+-        # 仅激活机器人 × 障碍物碰撞对 (对表只含障碍物对, 见 collision_pair)
+-        d_inf = max(float(influence_distance), float(safety_margin) + 0.01, 1e-4)
+-        self._update_active_pairs(d_inf)
+-
+-        obs_gids = set(self.obstacle_geom_ids.values())
+-        collision_pairs = self.geom_model.collisionPairs
+-
+-        # 收集本轮真正需要评估的障碍物碰撞对索引
+-        active_obs_pairs: List[Tuple[int, int, int]] = []
+-        for k, cp in enumerate(collision_pairs):
+-            gid1, gid2 = cp.first, cp.second
+-            if (gid1 in obs_gids or gid2 in obs_gids) and self._pair_active[k]:
+-                active_obs_pairs.append((k, gid1, gid2))
+-
+-        if not active_obs_pairs:
+-            return (
+-                z_col,
+-                0.0,
+-                CollisionReport(
+-                    is_collision=False,
+-                    colliding_pairs=[],
+-                    min_obstacle_distance=float("inf"),
+-                ),
+-            )
+-
+-        # 两段式距离查询: 第一段膨胀判碰粗筛 (OBB 剪枝, 微秒级),
+-        # 只对"膨胀命中"的对跑第二段精确 GJK 距离。势场只在 d < d_inf
+-        # 时非零, 膨胀未命中的对 (d >= d_inf) 无需距离值。
+-        requests = self.geom_data.collisionRequests
+-        saved_margins = [float(cr.security_margin) for cr in requests]
+-        for cr in requests:
+-            cr.security_margin = d_inf
+-        try:
+-            pin.computeCollisions(self.geom_model, self.geom_data, False)
+-        finally:
+-            for cr, m in zip(requests, saved_margins):
+-                cr.security_margin = m
+-
+-        near_pairs = [
+-            t
+-            for t in active_obs_pairs
+-            if self.geom_data.collisionResults[t[0]].isCollision()
+-        ]
+-        if not near_pairs:
+-            return (
+-                z_col,
+-                0.0,
+-                CollisionReport(
+-                    is_collision=False,
+-                    colliding_pairs=[],
+-                    min_obstacle_distance=float("inf"),
+-                ),
++        with self._obstacle_lock:
++            if not self.enabled or not self.obstacle_geom_ids:
++                return (
++                    z_col,
++                    0.0,
++                    CollisionReport(
++                        is_collision=False,
++                        colliding_pairs=[],
++                        min_obstacle_distance=float("inf"),
++                    ),
++                )
++
++            self._sync_transforms(q, compute_joint_jacobians=compute_gradient)
++            d_inf = max(float(influence_distance), float(safety_margin) + 0.01, 1e-4)
++            self._update_active_pairs(d_inf)
++
++            obs_gids = set(self.obstacle_geom_ids.values())
++            collision_pairs = self.geom_model.collisionPairs
++
++            active_obs_pairs: List[Tuple[int, int, int]] = []
++            for k, cp in enumerate(collision_pairs):
++                gid1, gid2 = cp.first, cp.second
++                if (gid1 in obs_gids or gid2 in obs_gids) and self._pair_active[k]:
++                    active_obs_pairs.append((k, gid1, gid2))
++
++            if not active_obs_pairs:
++                return (
++                    z_col,
++                    0.0,
++                    CollisionReport(
++                        is_collision=False,
++                        colliding_pairs=[],
++                        min_obstacle_distance=float("inf"),
++                    ),
++                )
++
++            # 第一段: security_margin = d_inf 膨胀判碰粗筛 (OBB 剪枝, 微秒级)
++            requests = self.geom_data.collisionRequests
++            saved_margins = [float(cr.security_margin) for cr in requests]
++            for cr in requests:
++                cr.security_margin = d_inf
++            try:
++                pin.computeCollisions(self.geom_model, self.geom_data, False)
++            finally:
++                for cr, m in zip(requests, saved_margins):
++                    cr.security_margin = m
++
++            near_pairs = [
++                t
++                for t in active_obs_pairs
++                if self.geom_data.collisionResults[t[0]].isCollision()
++            ]
++            if not near_pairs:
++                return (
++                    z_col,
++                    0.0,
++                    CollisionReport(
++                        is_collision=False,
++                        colliding_pairs=[],
++                        min_obstacle_distance=float("inf"),
++                    ),
++                )
++
++            # 第二段: 仅对进入影响半径 d_inf 的膨胀命中对运行精确 GJK 距离查询
++            act = self.geom_data.activeCollisionPairs
++            saved_act = [bool(act[k]) for k in range(len(act))]
++            try:
++                near_indices = {t[0] for t in near_pairs}
++                for k in range(len(act)):
++                    act[k] = k in near_indices
++                pin.computeDistances(self.geom_model, self.geom_data)
++            finally:
++                for k, v in enumerate(saved_act):
++                    act[k] = v
++
++            threshold = self._env_pair_threshold(safety_margin)
++            inv_d_inf = 1.0 / d_inf
++            outer_grad_scale = repulsion_gain * inv_d_inf
++
++            inner_gain = 2.0 * repulsion_gain
++            scale_inner = max(threshold, 0.01)
++            inv_scale_inner = 1.0 / scale_inner
++            inner_grad_scale = inner_gain * inv_scale_inner
++
++            dist_results = self.geom_data.distanceResults
++            geom_objs = self.geom_model.geometryObjects
++            geom_to_link = self.geom_to_link
++
++            colliding_pairs: List[Tuple[str, str]] = []
++            min_obs_d = float("inf")
++            cost_col = 0.0
++
++            for k, gid1, gid2 in near_pairs:
++                dr = dist_results[k]
++                d = float(dr.min_distance)
++                if d < min_obs_d:
++                    min_obs_d = d
++
++                if d <= threshold:
++                    name1 = geom_to_link.get(gid1, geom_objs[gid1].name)
++                    name2 = geom_to_link.get(gid2, geom_objs[gid2].name)
++                    colliding_pairs.append((name1, name2))
++
++                if d < d_inf:
++                    u_outer = (d_inf - d) * inv_d_inf
++                    cost_col += 0.5 * repulsion_gain * (u_outer * u_outer)
++                    grad_coeff = outer_grad_scale * u_outer
++
++                    if d < threshold:
++                        u_inner = (threshold - d) * inv_scale_inner
++                        cost_col += 0.5 * inner_gain * (u_inner * u_inner)
++                        grad_coeff += inner_grad_scale * u_inner
++
++                    if compute_gradient:
++                        p1 = np.asarray(dr.getNearestPoint1(), dtype=float)
++                        p2 = np.asarray(dr.getNearestPoint2(), dtype=float)
++                        normal = np.asarray(dr.normal, dtype=float)
++
++                        if gid1 in obs_gids:
++                            robot_gid, obs_gid = gid2, gid1
++                            p_robot, p_obs = p2, p1
++                        else:
++                            robot_gid, obs_gid = gid1, gid2
++                            p_robot, p_obs = p1, p2
++
++                        u_away = self._compute_safe_away_direction(
++                            robot_gid, obs_gid, p_robot, p_obs, d, normal
++                        )
++                        J = self._point_jacobian(robot_gid, p_robot)
++                        z_col += grad_coeff * (J.T @ u_away)
++
++            report = CollisionReport(
++                is_collision=bool(colliding_pairs),
++                colliding_pairs=colliding_pairs,
++                min_obstacle_distance=min_obs_d,
+             )
+-
+-        act = self.geom_data.activeCollisionPairs
+-        saved_act = [bool(act[k]) for k in range(len(act))]
+-        try:
+-            near_indices = {t[0] for t in near_pairs}
+-            for k in range(len(act)):
+-                act[k] = k in near_indices
+-            pin.computeDistances(self.geom_model, self.geom_data)
+-        finally:
+-            for k, v in enumerate(saved_act):
+-                act[k] = v
+-
+-        active_obs_pairs = near_pairs
+-
+-        # 预计算循环外常量与局部属性绑定，加速热路径迭代
+-        threshold = self._env_pair_threshold(safety_margin)
+-        inv_d_inf = 1.0 / d_inf
+-        outer_grad_scale = repulsion_gain * inv_d_inf
+-
+-        inner_gain = 2.0 * repulsion_gain
+-        scale_inner = max(threshold, 0.01)
+-        inv_scale_inner = 1.0 / scale_inner
+-        inner_grad_scale = inner_gain * inv_scale_inner
+-
+-        dist_results = self.geom_data.distanceResults
+-        geom_objs = self.geom_model.geometryObjects
+-        geom_to_link = self.geom_to_link
+-
+-        colliding_pairs: List[Tuple[str, str]] = []
+-        min_obs_d = float("inf")
+-        cost_col = 0.0
+-
+-        for k, gid1, gid2 in active_obs_pairs:
+-            dr = dist_results[k]
+-            d = float(dr.min_distance)
+-            if d < min_obs_d:
+-                min_obs_d = d
+-
+-            if d <= threshold:
+-                name1 = geom_to_link.get(gid1, geom_objs[gid1].name)
+-                name2 = geom_to_link.get(gid2, geom_objs[gid2].name)
+-                colliding_pairs.append((name1, name2))
+-
+-            # 进入势场影响半径才计算势能代价与排斥梯度
+-            if d < d_inf:
+-                # 1. 计算双层 C¹ 势能代价与标量梯度系数 (Cost-only 模式下同样生效)
+-                u_outer = (d_inf - d) * inv_d_inf
+-                cost_col += 0.5 * repulsion_gain * (u_outer * u_outer)
+-                grad_coeff = outer_grad_scale * u_outer
+-
+-                if d < threshold:
+-                    u_inner = (threshold - d) * inv_scale_inner
+-                    cost_col += 0.5 * inner_gain * (u_inner * u_inner)
+-                    grad_coeff += inner_grad_scale * u_inner
+-
+-                # 2. 计算见证点排斥梯度 (仅当 compute_gradient=True 时求解雅可比)
+-                if compute_gradient:
+-                    p1 = np.asarray(dr.getNearestPoint1(), dtype=float)
+-                    p2 = np.asarray(dr.getNearestPoint2(), dtype=float)
+-                    normal = np.asarray(dr.normal, dtype=float)
+-
+-                    n_norm = float(np.linalg.norm(normal))
+-                    if n_norm > 1e-9:
+-                        u_away_1 = -normal / n_norm
+-                    else:
+-                        diff = (p1 - p2) if d >= 0.0 else (p2 - p1)
+-                        dn = float(np.linalg.norm(diff))
+-                        u_away_1 = (diff / dn) if dn > 1e-9 else np.array([0.0, 0.0, 1.0])
+-
+-                    if gid1 in obs_gids:
+-                        robot_gid, p_robot, u_away = gid2, p2, -u_away_1
+-                    else:
+-                        robot_gid, p_robot, u_away = gid1, p1, u_away_1
+-
+-                    J = self._point_jacobian(robot_gid, p_robot)
+-                    z_col += grad_coeff * (J.T @ u_away)
+-
+-        has_obs = bool(colliding_pairs)
+-        report = CollisionReport(
+-            is_collision=has_obs,
+-            colliding_pairs=colliding_pairs,
+-            min_obstacle_distance=min_obs_d,
+-        )
+-        return z_col, cost_col, report
+\ No newline at end of file
++            return z_col, cost_col, report
+\ No newline at end of file
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/collision_pair.py b/releases/ik_solver_v15/ha_arm_ik/collision/collision_pair.py
+index 6c35079..67d6a7b 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/collision_pair.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/collision_pair.py
+@@ -14,7 +14,7 @@ import pinocchio as pin
+ 
+ 
+ class CollisionPairManager:
+-    """碰撞对集合组装与环境判据 (RobotCollisionManager 的 Mixin 功能块)。"""
++    """碰撞对集合组装与环境判据 (RobotCollisionManager 的功能组件)。"""
+ 
+     link_geom_ids: Dict[str, List[int]]
+     geom_to_link: Dict[int, str]
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/collision_world.py b/releases/ik_solver_v15/ha_arm_ik/collision/collision_world.py
+index f6764a7..c195e0f 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/collision_world.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/collision_world.py
+@@ -1,28 +1,27 @@
+ #!/usr/bin/env python3
+ # -*- coding: utf-8 -*-
+-"""CollisionWorld —— 碰撞场景统一门面 + RobotCollisionManager 引擎。
+-
+-职责分层:
+-* RobotCollisionManager: 状态唯一持有者 (geom_model/geom_data/broad-phase 激活表/FK 同步),
+-  各功能块以 mixin 挂载提供查询行为。
+-* CollisionWorld: solver 侧唯一依赖的薄门面。
+-  状态契约: check_collision / compute_collision_repulsion_gradient / compute_distances_to_obstacle
+-  共享同一份 geom_data + activeCollisionPairs + _pair_active 可变状态, 均以 _sync_transforms 开头自同步。
++"""CollisionWorld —— 碰撞场景统一门面 + CollisionContext 上下文 + RobotCollisionManager 引擎。
++
++架构演进与修复要点:
++* 引入 CollisionContext: 显式聚合运动学与几何状态, 为向组合模式 (Composition) 解耦提供清晰的数据边界。
++* 消除外部状态污染: 对传入的 pin_maps 字典做浅拷贝隔离, 防止 set_frozen_template 隐式篡改主求解器字典。
++* 实例级 RLock 并发安全: 统一初始化实例级 _obstacle_lock, 保护 CollisionWorld 所有门面查询。
++* 移除冗余未用的 import hppfcl, 提升跨环境兼容性。
+ """
+ from __future__ import annotations
+ 
++from collections.abc import Mapping
++from dataclasses import dataclass
+ import math
+ import os
+-from collections.abc import Mapping
+ from pathlib import Path
++import threading
+ from typing import Any, Dict, List, Optional, Tuple, Union
+ 
+-import hppfcl
+ import numpy as np
+ import pinocchio as pin
+ 
+ from ..ik_base import invert_T
+-from ..single_arm_ik import active_q_to_pinocchio_q
+ from .broadphase import Broadphase
+ from .collision_config import BODY_HULL_LINKS
+ from .collision_constraints import CollisionConstraints, CollisionReport
+@@ -42,6 +41,22 @@ from .robot_collision import (
+ from .trajectory_validator import TrajectoryValidator
+ 
+ 
++@dataclass
++class CollisionContext:
++    """碰撞引擎状态上下文容器 (支持长期架构向组合模式演进)。"""
++
++    pin_model: Optional[pin.Model]
++    pin_data: Optional[pin.Data]
++    pin_maps: Optional[Dict[str, Any]]
++    geom_model: pin.GeometryModel
++    geom_data: pin.GeometryData
++    link_geom_ids: Dict[str, List[int]]
++    geom_to_link: Dict[int, str]
++    obstacle_geom_ids: Dict[str, int]
++    T_world_from_base: np.ndarray
++    T_base_from_world: np.ndarray
++
++
+ class RobotCollisionManager(
+     RobotCollisionGeometry,
+     ObstacleManager,
+@@ -52,11 +67,7 @@ class RobotCollisionManager(
+     CollisionConstraints,
+     TrajectoryValidator,
+ ):
+-    """模型无关机器人碰撞管理器 (只做机器人 × 环境障碍物检测)。
+-
+-    自碰撞归 MoveIt 按 SRDF ACM 口径在规划/执行层负责。本类只持有环境通道设施
+-    (geom_model/geom_data、broad-phase 粗筛、FK 同步、见证点雅可比、距离查询)。
+-    """
++    """模型无关机器人碰撞管理器 (只做机器人 × 环境障碍物检测)。"""
+ 
+     def __init__(
+         self,
+@@ -69,17 +80,19 @@ class RobotCollisionManager(
+         T_world_from_base: Optional[np.ndarray] = None,
+         active_joint_names: Optional[List[str]] = None,
+         urdf_path: Optional[Union[str, Path]] = None,
++        pin_uses_root_frame: bool = True,
+     ):
++        # 实例级可重入锁: 隔离不同实例的锁竞争, 保护读写并发安全
++        self._obstacle_lock = threading.RLock()
+         self.chain = chain
+         self.obstacles: Dict[str, PrimitiveObstacle] = {}
+         self.obstacle_geom_ids: Dict[str, int] = {}
+-        # 运行时总开关: False 时判碰/梯度直接返回无碰撞零梯度
+         self.enabled: bool = True
+ 
+-        # pin_data 自建独立副本，避免污染主求解器的运动学缓存
++        # pin_data 自建独立副本, pin_maps 浅拷贝隔离, 严禁污染主求解器内部状态
+         self.pin_model = pin_model
+         self.pin_data = pin_model.createData() if pin_model is not None else None
+-        self.pin_maps = pin_maps
++        self.pin_maps = dict(pin_maps) if pin_maps is not None else None
+         self.active_joint_names = active_joint_names or (
+             [j["name"] for j in chain.active_joints]
+             if hasattr(chain, "active_joints")
+@@ -87,13 +100,20 @@ class RobotCollisionManager(
+         )
+ 
+         if T_world_from_base is not None:
+-            self.T_world_from_base = np.asarray(T_world_from_base, dtype=float).reshape(4, 4)
++            self.T_world_from_base = np.asarray(
++                T_world_from_base, dtype=float
++            ).reshape(4, 4)
+         else:
+             self.T_world_from_base = np.eye(4, dtype=float)
+         self.T_base_from_world = invert_T(self.T_world_from_base)
++        self._pin_uses_root_frame = bool(pin_uses_root_frame)
+ 
+         self._urdf_path = urdf_path
+-        if geom_model is not None and link_geom_ids is not None and geom_to_link is not None:
++        if (
++            geom_model is not None
++            and link_geom_ids is not None
++            and geom_to_link is not None
++        ):
+             self.geom_model = geom_model
+             self.link_geom_ids = link_geom_ids
+             self.geom_to_link = geom_to_link
+@@ -106,10 +126,25 @@ class RobotCollisionManager(
+ 
+         self.rebuild_pairs()
+         self.geom_data = pin.GeometryData(self.geom_model)
+-        # broad-phase 外接球半径表预计算
+         self.geom_bounding_radii = self._compute_bounding_spheres()
+         self._pair_active: List[bool] = [True] * len(self.geom_model.collisionPairs)
+ 
++    @property
++    def context(self) -> CollisionContext:
++        """导出当前碰撞上下文快照，供组合式下游组件使用。"""
++        return CollisionContext(
++            pin_model=self.pin_model,
++            pin_data=self.pin_data,
++            pin_maps=self.pin_maps,
++            geom_model=self.geom_model,
++            geom_data=self.geom_data,
++            link_geom_ids=self.link_geom_ids,
++            geom_to_link=self.geom_to_link,
++            obstacle_geom_ids=self.obstacle_geom_ids,
++            T_world_from_base=self.T_world_from_base,
++            T_base_from_world=self.T_base_from_world,
++        )
++
+     @classmethod
+     def from_solver(
+         cls,
+@@ -126,6 +161,7 @@ class RobotCollisionManager(
+         urdf_path = getattr(base, "urdf", None) or getattr(base, "urdf_path", None)
+         T_world_from_base = base.T_world_from_base
+         active_joint_names = base.active_joint_names
++        pin_uses_root_frame = getattr(base, "_pin_uses_root_frame", True)
+ 
+         geometry_mode = str(geometry or "capsule").strip().lower()
+         if geometry_mode not in ("capsule", "mesh"):
+@@ -156,7 +192,9 @@ class RobotCollisionManager(
+                     package_dirs=all_package_dirs,
+                 )
+             except Exception as e:
+-                raise RuntimeError(f"geometry='mesh': 从 URDF 加载碰撞网格失败 ({e})") from e
++                raise RuntimeError(
++                    f"geometry='mesh': 从 URDF 加载碰撞网格失败 ({e})"
++                ) from e
+ 
+             if geom_model.ngeoms == 0:
+                 raise RuntimeError("geometry='mesh': URDF 中未找到 collision 几何")
+@@ -182,61 +220,67 @@ class RobotCollisionManager(
+             T_world_from_base=T_world_from_base,
+             active_joint_names=active_joint_names,
+             urdf_path=urdf_path,
++            pin_uses_root_frame=pin_uses_root_frame,
+         )
+         mgr.geometry = geometry_mode
+         return mgr
+ 
+-    def _sync_transforms(self, q: np.ndarray, compute_joint_jacobians: bool = False) -> None:
++    def _sync_transforms(
++        self, q: np.ndarray, compute_joint_jacobians: bool = False
++    ) -> None:
+         """将关节角 q 同步到 Pinocchio FK 并刷新 FCL 几何内存位姿。"""
+-        q_pin = active_q_to_pinocchio_q(self.pin_model, self.pin_maps, q)
+-        if compute_joint_jacobians:
+-            pin.computeJointJacobians(self.pin_model, self.pin_data, q_pin)
+-        else:
+-            pin.forwardKinematics(self.pin_model, self.pin_data, q_pin)
+-        pin.updateGeometryPlacements(
+-            self.pin_model, self.pin_data, self.geom_model, self.geom_data
+-        )
++        with self._obstacle_lock:
++            if len(q) == self.pin_model.nq:
++                q_pin = q
++            else:
++                from ..solver_dls import active_q_to_pinocchio_q
++                q_pin = active_q_to_pinocchio_q(self.pin_model, self.pin_maps, q)
++            if compute_joint_jacobians:
++                pin.computeJointJacobians(self.pin_model, self.pin_data, q_pin)
++            else:
++                pin.forwardKinematics(self.pin_model, self.pin_data, q_pin)
++            pin.updateGeometryPlacements(
++                self.pin_model, self.pin_data, self.geom_model, self.geom_data
++            )
+ 
+     def set_frozen_template(self, q_full: Any) -> None:
+-        """显式设定冻结关节的全身模板，供镜像臂包络 FK 使用。"""
++        """显式设定冻结关节的全身模板，供镜像臂包络 FK 使用 (仅修改内部隔离副本)。"""
+         if self.pin_model is None or self.pin_maps is None:
+             return
+-        if q_full is None:
+-            self.pin_maps.pop("q_template", None)
+-            return
+-        if isinstance(q_full, Mapping):
+-            q_pin = pin.neutral(self.pin_model)
+-            all_specs = self.pin_maps.get("all_specs", {})
+-            for name, val in q_full.items():
+-                s = all_specs.get(name)
+-                if s is None:
+-                    continue
+-                idx = s["idx_q"]
+-                if s["continuous"]:
+-                    v = float(val)
+-                    q_pin[idx : idx + 2] = (math.cos(v), math.sin(v))
+-                else:
+-                    q_pin[idx] = float(val)
+-        else:
+-            q_pin = np.asarray(q_full, dtype=float).reshape(-1)
+-            if q_pin.shape[0] != self.pin_model.nq:
+-                raise ValueError(
+-                    f"q_full 维度不匹配: 期望 {self.pin_model.nq}, 实际 {q_pin.shape[0]}"
+-                )
+-        self.pin_maps["q_template"] = q_pin
++        with self._obstacle_lock:
++            if q_full is None:
++                self.pin_maps.pop("q_template", None)
++                return
++            if isinstance(q_full, Mapping):
++                q_pin = pin.neutral(self.pin_model)
++                all_specs = self.pin_maps.get("all_specs", {})
++                for name, val in q_full.items():
++                    s = all_specs.get(name)
++                    if s is None:
++                        continue
++                    idx = s["idx_q"]
++                    if s["continuous"]:
++                        v = float(val)
++                        q_pin[idx : idx + 2] = (math.cos(v), math.sin(v))
++                    else:
++                        q_pin[idx] = float(val)
++            else:
++                q_pin = np.asarray(q_full, dtype=float).reshape(-1)
++                if q_pin.shape[0] != self.pin_model.nq:
++                    raise ValueError(
++                        f"q_full 维度不匹配: 期望 {self.pin_model.nq}, 实际 {q_pin.shape[0]}"
++                    )
++            self.pin_maps["q_template"] = q_pin
+ 
+ 
+ class CollisionWorld:
+-    """碰撞场景统一门面——solver 侧唯一依赖。
+-
+-    组合 RobotCollisionManager, 暴露稳定的高级操作接口。
+-    """
++    """碰撞场景统一门面——solver 侧唯一依赖。"""
+ 
+     def __init__(self, manager: RobotCollisionManager):
+         self.manager = manager
+ 
+     def update_robot_configuration(self, q: np.ndarray) -> None:
+-        """更新全部机器人碰撞几何体位姿 (FK 同步, 不跑任何查询)。"""
++        """更新全部机器人碰撞几何体位姿 (FK 同步, 线程安全)。"""
+         self.manager._sync_transforms(q)
+ 
+     def update_environment(self, obstacle_states: List[Dict[str, Any]]) -> None:
+@@ -246,25 +290,27 @@ class CollisionWorld:
+     def get_candidate_pairs(self) -> List[Tuple[int, int]]:
+         """返回当前潜在危险碰撞对 (broad-phase 激活对, (gid1, gid2) 列表)。"""
+         mgr = self.manager
+-        mgr._update_active_pairs(0.0)
+-        pair_active = mgr._pair_active
+-        return [
+-            (cp.first, cp.second)
+-            for k, cp in enumerate(mgr.geom_model.collisionPairs)
+-            if pair_active[k]
+-        ]
++        with mgr._obstacle_lock:
++            mgr._update_active_pairs(0.0)
++            pair_active = mgr._pair_active
++            return [
++                (cp.first, cp.second)
++                for k, cp in enumerate(mgr.geom_model.collisionPairs)
++                if pair_active[k]
++            ]
+ 
+     def query_active_distances(self) -> Dict[Tuple[int, int], float]:
+         """查询活跃碰撞对的精确 GJK 距离 {(gid1, gid2): d}。"""
+         mgr = self.manager
+-        pin.computeDistances(mgr.geom_model, mgr.geom_data)
+-        out: Dict[Tuple[int, int], float] = {}
+-        dist_results = mgr.geom_data.distanceResults
+-        pair_active = mgr._pair_active
+-        for k, cp in enumerate(mgr.geom_model.collisionPairs):
+-            if pair_active[k]:
+-                out[(cp.first, cp.second)] = float(dist_results[k].min_distance)
+-        return out
++        with mgr._obstacle_lock:
++            pin.computeDistances(mgr.geom_model, mgr.geom_data)
++            out: Dict[Tuple[int, int], float] = {}
++            dist_results = mgr.geom_data.distanceResults
++            pair_active = mgr._pair_active
++            for k, cp in enumerate(mgr.geom_model.collisionPairs):
++                if pair_active[k]:
++                    out[(cp.first, cp.second)] = float(dist_results[k].min_distance)
++            return out
+ 
+     def compute_collision_gradients(
+         self, q: np.ndarray, **kwargs
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/distance_query.py b/releases/ik_solver_v15/ha_arm_ik/collision/distance_query.py
+index b359b02..acecf83 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/distance_query.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/distance_query.py
+@@ -7,6 +7,7 @@
+ """
+ from __future__ import annotations
+ 
++import threading
+ from typing import Any, Dict, Optional
+ 
+ import numpy as np
+@@ -14,8 +15,9 @@ import pinocchio as pin
+ 
+ 
+ class DistanceQuery:
+-    """GJK 距离 / 见证点查询 (RobotCollisionManager 的 Mixin 功能块)。"""
++    """GJK 距离 / 见证点查询 (RobotCollisionManager 的功能组件)。"""
+ 
++    _obstacle_lock: threading.RLock
+     obstacle_geom_ids: Dict[str, int]
+     geom_model: pin.GeometryModel
+     geom_data: pin.GeometryData
+@@ -24,69 +26,70 @@ class DistanceQuery:
+     def compute_distances_to_obstacle(
+         self, q: np.ndarray, obstacle_name: str
+     ) -> Dict[str, Any]:
+-        """精确计算各连杆到指定障碍物的最短欧氏距离与空间见证接触点。"""
+-        target_gid = self.obstacle_geom_ids.get(obstacle_name)
+-        if target_gid is None:
+-            raise KeyError(f"未找到障碍物 '{obstacle_name}'")
+-
+-        # 1. 状态同步与全激活距离计算
+-        self._sync_transforms(q)
+-        self._update_active_pairs(float("inf"))  # 全激活
+-        pin.computeDistances(self.geom_model, self.geom_data)
+-
+-        # 2. 局部属性绑定，加速循环解析
+-        collision_pairs = self.geom_model.collisionPairs
+-        dist_results = self.geom_data.distanceResults
+-        geom_objs = self.geom_model.geometryObjects
+-        geom_to_link = self.geom_to_link
+-
+-        link_dists: Dict[str, float] = {}
+-        min_d = float("inf")
+-        closest_link: Optional[str] = None
+-        closest_idx: Optional[int] = None
+-        closest_is_first: bool = False
+-
+-        # 3. 遍历碰撞对，收集逐连杆距离与最近几何体索引
+-        for k, cp in enumerate(collision_pairs):
+-            gid1, gid2 = cp.first, cp.second
+-            if gid1 != target_gid and gid2 != target_gid:
+-                continue
+-
+-            dr = dist_results[k]
+-            d = float(dr.min_distance)
+-
+-            is_target_first = gid1 == target_gid
+-            link_gid = gid2 if is_target_first else gid1
+-            l_name = geom_to_link.get(link_gid, geom_objs[link_gid].name)
+-
+-            # 更新该连杆的最短距离
+-            prev_d = link_dists.get(l_name)
+-            if prev_d is None or d < prev_d:
+-                link_dists[l_name] = d
+-
+-            # 仅记录最小距离的索引与方向，避免在循环内部重复调用 np.asarray 转换点坐标
+-            if d < min_d:
+-                min_d = d
+-                closest_link = l_name
+-                closest_idx = k
+-                closest_is_first = is_target_first
+-
+-        # 4. 仅对最终的全局最近接触对提取 3D 见证点
+-        witness_on_robot: Optional[np.ndarray] = None
+-        witness_on_obstacle: Optional[np.ndarray] = None
+-
+-        if closest_idx is not None:
+-            best_dr = dist_results[closest_idx]
+-            p1 = np.asarray(best_dr.getNearestPoint1(), dtype=float)
+-            p2 = np.asarray(best_dr.getNearestPoint2(), dtype=float)
+-            witness_on_robot = p2 if closest_is_first else p1
+-            witness_on_obstacle = p1 if closest_is_first else p2
+-
+-        return {
+-            "obstacle": obstacle_name,
+-            "min_distance": min_d,
+-            "closest_link": closest_link,
+-            "link_distances": link_dists,
+-            "witness_on_robot": witness_on_robot,
+-            "witness_on_obstacle": witness_on_obstacle,
+-        }
+\ No newline at end of file
++        """精确计算各连杆到指定障碍物的最短欧氏距离与空间见证接触点 (线程安全)。"""
++        with self._obstacle_lock:
++            target_gid = self.obstacle_geom_ids.get(obstacle_name)
++            if target_gid is None:
++                raise KeyError(f"未找到障碍物 '{obstacle_name}'")
++
++            # 1. 状态同步与全激活距离计算
++            self._sync_transforms(q)
++            self._update_active_pairs(float("inf"))  # 全激活
++            pin.computeDistances(self.geom_model, self.geom_data)
++
++            # 2. 局部属性绑定，加速循环解析
++            collision_pairs = self.geom_model.collisionPairs
++            dist_results = self.geom_data.distanceResults
++            geom_objs = self.geom_model.geometryObjects
++            geom_to_link = self.geom_to_link
++
++            link_dists: Dict[str, float] = {}
++            min_d = float("inf")
++            closest_link: Optional[str] = None
++            closest_idx: Optional[int] = None
++            closest_is_first: bool = False
++
++            # 3. 遍历碰撞对，收集逐连杆距离与最近几何体索引
++            for k, cp in enumerate(collision_pairs):
++                gid1, gid2 = cp.first, cp.second
++                if gid1 != target_gid and gid2 != target_gid:
++                    continue
++
++                dr = dist_results[k]
++                d = float(dr.min_distance)
++
++                is_target_first = gid1 == target_gid
++                link_gid = gid2 if is_target_first else gid1
++                l_name = geom_to_link.get(link_gid, geom_objs[link_gid].name)
++
++                # 更新该连杆的最短距离
++                prev_d = link_dists.get(l_name)
++                if prev_d is None or d < prev_d:
++                    link_dists[l_name] = d
++
++                # 仅记录最小距离的索引与方向，避免在循环内部重复调用 np.asarray 转换点坐标
++                if d < min_d:
++                    min_d = d
++                    closest_link = l_name
++                    closest_idx = k
++                    closest_is_first = is_target_first
++
++            # 4. 仅对最终的全局最近接触对提取 3D 见证点
++            witness_on_robot: Optional[np.ndarray] = None
++            witness_on_obstacle: Optional[np.ndarray] = None
++
++            if closest_idx is not None:
++                best_dr = dist_results[closest_idx]
++                p1 = np.asarray(best_dr.getNearestPoint1(), dtype=float)
++                p2 = np.asarray(best_dr.getNearestPoint2(), dtype=float)
++                witness_on_robot = p2 if closest_is_first else p1
++                witness_on_obstacle = p1 if closest_is_first else p2
++
++            return {
++                "obstacle": obstacle_name,
++                "min_distance": min_d,
++                "closest_link": closest_link,
++                "link_distances": link_dists,
++                "witness_on_robot": witness_on_robot,
++                "witness_on_obstacle": witness_on_obstacle,
++            }
+\ No newline at end of file
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/environment_collision.py b/releases/ik_solver_v15/ha_arm_ik/collision/environment_collision.py
+index 3499cdf..5176193 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/environment_collision.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/environment_collision.py
+@@ -2,21 +2,32 @@
+ # -*- coding: utf-8 -*-
+ """环境障碍物管理: 解析图元障碍物生命周期 + MoveIt 规划场景自动感知。
+ 
+-* PrimitiveObstacle: box / sphere / cylinder / cone / mesh 解析障碍物数据结构
+-* ObstacleManager: 障碍物生命周期 (add/update/remove/场景对账)
+-* MoveItSceneSync: 后台线程感知 /monitored_planning_scene 门铃 -> /get_planning_scene 重拉 -> manager.sync_scene_objects 幂等对账
++架构演进与修复要点:
++* 并发安全: 采用可重入锁 (RLock) 协同保护写路径与主线程读路径, 彻底消除 geom_model/geom_data 重建期间的 C++ 段错误风险。
++* 批量对账单次重建: sync_scene_objects 将增删改合并后再执行单次 rebuild_pairs(), 真正将 O(N) 次 GeometryData 重建降为 O(1)。
++* 复合障碍物与 SE(3) 位姿合成: 完整支持单个 CollisionObject 含多个 primitives/meshes 的复合场景, 并精确计算 T_world = T_object * T_sub。
++* 统一日志与 coal/hppfcl 兼容: 全面替换裸 print 为标准 logger, 统一使用 compute_geometry_bounding_radius 计算粗筛半径。
+ """
+ from __future__ import annotations
+ 
++from dataclasses import dataclass
++import logging
+ import threading
+ import time
+-from dataclasses import dataclass
+ from typing import Any, Dict, List, Optional, Tuple, Union
+ 
+-import coal
+ import numpy as np
+ import pinocchio as pin
+ 
++try:
++    import coal
++except ImportError:
++    import hppfcl as coal
++
++from .broadphase import compute_geometry_bounding_radius
++
++logger = logging.getLogger(__name__)
++
+ 
+ @dataclass
+ class PrimitiveObstacle:
+@@ -40,6 +51,7 @@ class PrimitiveObstacle:
+     frame: str = "world"              # "world" 或 "base"
+     shape: str = "box"                # "box" | "sphere" | "cylinder" | "cone" | "mesh"
+     mesh_path: Optional[str] = None   # shape="mesh" 时的碰撞网格文件路径
++    source: str = "manual"            # "manual" 或 "moveit"
+ 
+     _SHAPE_NDIM = {"box": 3, "sphere": 1, "cylinder": 2, "cone": 2, "mesh": 0}
+ 
+@@ -78,6 +90,8 @@ class PrimitiveObstacle:
+             # coal.Cone(radius, halfLength), 轴向局部 +Z, 底面朝 -Z
+             return coal.Cone(self.size[0] * 0.5, self.size[1] * 0.5)
+         if self.shape == "mesh":
++            if not self.mesh_path:
++                raise FileNotFoundError(f"mesh 障碍物 '{self.name}' 未提供 mesh_path")
+             return coal.MeshLoader().load(self.mesh_path)
+         return coal.Box(self.size[0], self.size[1], self.size[2])
+ 
+@@ -114,33 +128,66 @@ class PrimitiveObstacle:
+             dtype=float,
+         )
+ 
+-    def to_se3(self, T_world_from_base: Optional[np.ndarray] = None) -> pin.SE3:
++    def to_se3(
++        self,
++        T_world_from_base: Optional[np.ndarray] = None,
++        T_base_from_world: Optional[np.ndarray] = None,
++        pin_uses_root_frame: bool = True,
++    ) -> pin.SE3:
+         """获取在 Pinocchio 模型根系（URDF 根）下的 SE3 位姿。
+ 
+-        障碍物几何挂在 joint 0，placement 由 Pinocchio 按模型根（URDF 根）
+-        解释，与机器人碰撞几何同系。"world" 即 URDF 根系（MoveIt frame_id 同口径，
+-        solver 的 target_to_local 也是此约定），原样放置；"base" 为求解器基座系
+-        （7 轴时是 Body_Link），需乘安装位姿 T_world_from_base 换到模型根。
++        依据 pin_uses_root_frame 与 frame ("world" / "base") 自动完成双向坐标转换:
++        1) pin_uses_root_frame == True (Pinocchio 根为 World):
++           - frame="base": T_root = T_world_from_base @ T_raw
++           - frame="world": T_root = T_raw
++        2) pin_uses_root_frame == False (Pinocchio 根为机器人基座 Base):
++           - frame="base": T_root = T_raw
++           - frame="world": T_root = T_base_from_world @ T_raw
+         """
+         T_raw = np.eye(4, dtype=float)
+         T_raw[:3, :3] = self.R
+         T_raw[:3, 3] = self.position
+ 
+-        if self.frame.lower() == "base" and T_world_from_base is not None:
+-            T_root = T_world_from_base @ T_raw
+-            return pin.SE3(T_root[:3, :3], T_root[:3, 3])
+-        return pin.SE3(self.R, self.position)
++        is_base = self.frame.lower() in ("base", "local")
++
++        if pin_uses_root_frame:
++            if is_base:
++                if T_world_from_base is not None:
++                    T_root = T_world_from_base @ T_raw
++                    return pin.SE3(T_root[:3, :3], T_root[:3, 3])
++                return pin.SE3(T_raw[:3, :3], T_raw[:3, 3])
++            else:
++                return pin.SE3(T_raw[:3, :3], T_raw[:3, 3])
++        else:
++            if is_base:
++                return pin.SE3(T_raw[:3, :3], T_raw[:3, 3])
++            else:
++                if T_base_from_world is not None:
++                    T_root = T_base_from_world @ T_raw
++                    return pin.SE3(T_root[:3, :3], T_root[:3, 3])
++                elif T_world_from_base is not None:
++                    from ..ik_base import invert_T
++                    T_root = invert_T(T_world_from_base) @ T_raw
++                    return pin.SE3(T_root[:3, :3], T_root[:3, 3])
++                return pin.SE3(T_raw[:3, :3], T_raw[:3, 3])
+ 
+ 
+ class ObstacleManager:
+     """解析障碍物生命周期管理 (add/update/remove/场景对账)。
+ 
+-    _obstacle_lock: 生命周期操作互斥锁 (类级共享: add/update/remove 重建
+-    geom_model/半径表/对表非线程安全, 并发写方必须串行)。类级锁跨实例
+-    共享无害——锁只影响障碍物变更时延, 不影响检测路径。
++    _obstacle_lock: 实例级 RLock (由 RobotCollisionManager.__init__ 初始化,
++    此处保留类级回退以防独立混入测试)。写操作与检测热路径均通过该锁保护。
+     """
+ 
+-    _obstacle_lock = threading.Lock()
++    _obstacle_lock = threading.RLock()
++
++    def _obstacle_to_se3(self, obs: PrimitiveObstacle) -> pin.SE3:
++        """计算障碍物在 Pinocchio 模型根系下的 SE3 位姿。"""
++        return obs.to_se3(
++            T_world_from_base=getattr(self, "T_world_from_base", None),
++            T_base_from_world=getattr(self, "T_base_from_world", None),
++            pin_uses_root_frame=getattr(self, "_pin_uses_root_frame", True),
++        )
+ 
+     def add_obstacle(
+         self,
+@@ -152,12 +199,9 @@ class ObstacleManager:
+         frame: str = "world",
+         shape: str = "box",
+         mesh_path: Optional[str] = None,
++        source: str = "manual",
+     ) -> PrimitiveObstacle:
+-        """添加障碍物 (box/sphere/cylinder/cone/mesh, 语义见 PrimitiveObstacle)。
+-
+-        shape="mesh" 时 size 未用, mesh_path 必须给出且文件存在, 否则
+-        抛 FileNotFoundError (调用方捕获降级)。
+-        """
++        """添加障碍物 (box/sphere/cylinder/cone/mesh, 语义见 PrimitiveObstacle)。"""
+         with self._obstacle_lock:
+             return self._add_obstacle_impl(
+                 name,
+@@ -168,6 +212,8 @@ class ObstacleManager:
+                 frame=frame,
+                 shape=shape,
+                 mesh_path=mesh_path,
++                rebuild=True,
++                source=source,
+             )
+ 
+     def _add_obstacle_impl(
+@@ -180,9 +226,11 @@ class ObstacleManager:
+         frame: str = "world",
+         shape: str = "box",
+         mesh_path: Optional[str] = None,
++        rebuild: bool = True,
++        source: str = "manual",
+     ) -> PrimitiveObstacle:
+         if name in self.obstacles:
+-            self._remove_obstacle_impl(name)
++            self._remove_obstacle_impl(name, rebuild=False)
+ 
+         obs = PrimitiveObstacle(
+             name=name,
+@@ -193,22 +241,24 @@ class ObstacleManager:
+             frame=frame,
+             shape=shape,
+             mesh_path=mesh_path,
++            source=source,
++        )
++        coal_geo = obs.to_coal_geometry()
++        radius = compute_geometry_bounding_radius(
++            coal_geo, fallback_radius=float(np.linalg.norm(obs.size) * 0.5)
+         )
+-        self.obstacles[name] = obs
+ 
+-        se3_placement = obs.to_se3(self.T_world_from_base)
+-        go = pin.GeometryObject(name, 0, 0, se3_placement, obs.to_coal_geometry())
++        self.obstacles[name] = obs
++        se3_placement = self._obstacle_to_se3(obs)
++        go = pin.GeometryObject(name, 0, 0, se3_placement, coal_geo)
+         obs_gid = self.geom_model.addGeometryObject(go)
+         self.obstacle_geom_ids[name] = obs_gid
+ 
+-        # 障碍物外接球半径同步入 broad-phase 表 (统一 FCL computeLocalAABB 口径)
+         self.geom_bounding_radii = np.concatenate(
+-            [
+-                self.geom_bounding_radii,
+-                [self._obstacle_bounding_radius(obs)],
+-            ]
++            [self.geom_bounding_radii, [radius]]
+         )
+-        self.rebuild_pairs()
++        if rebuild:
++            self.rebuild_pairs()
+         return obs
+ 
+     def update_obstacle(
+@@ -220,13 +270,16 @@ class ObstacleManager:
+         R: Optional[np.ndarray] = None,
+         frame: Optional[str] = None,
+     ) -> bool:
+-        """动态更新障碍物的位置、朝向或形状 (size 语义随该障碍物的 shape)。
+-
+-        朝向三选一传参: rpy 与 R 同时给出时以 R 为准, rpy 同步为 R 的反推欧拉角。
+-        """
++        """动态更新障碍物的位置、朝向或形状 (size 语义随该障碍物的 shape)。"""
+         with self._obstacle_lock:
+             return self._update_obstacle_impl(
+-                name, position=position, size=size, rpy=rpy, R=R, frame=frame
++                name,
++                position=position,
++                size=size,
++                rpy=rpy,
++                R=R,
++                frame=frame,
++                rebuild=True,
+             )
+ 
+     def _update_obstacle_impl(
+@@ -237,6 +290,7 @@ class ObstacleManager:
+         rpy: Optional[Union[List[float], Tuple[float, ...], np.ndarray]] = None,
+         R: Optional[np.ndarray] = None,
+         frame: Optional[str] = None,
++        rebuild: bool = True,
+     ) -> bool:
+         if name not in self.obstacles:
+             return False
+@@ -253,7 +307,6 @@ class ObstacleManager:
+             obs.R = np.asarray(R, dtype=float).reshape(3, 3)
+             obs.rpy = None
+         if size is not None:
+-            # 尺寸变化改变 FCL 几何本身, 走 add (内部先 remove) 重建
+             obs.size = np.asarray(size, dtype=float).reshape(
+                 PrimitiveObstacle._SHAPE_NDIM[obs.shape]
+             )
+@@ -265,21 +318,29 @@ class ObstacleManager:
+                 R=obs.R,
+                 frame=obs.frame,
+                 shape=obs.shape,
++                mesh_path=obs.mesh_path,
++                rebuild=rebuild,
++                source=getattr(obs, "source", "manual"),
+             )
+         else:
+             obs_gid = self.obstacle_geom_ids[name]
+-            self.geom_model.geometryObjects[obs_gid].placement = obs.to_se3(
+-                self.T_world_from_base
+-            )
++            new_placement = self._obstacle_to_se3(obs)
++            self.geom_model.geometryObjects[obs_gid].placement = new_placement
++            if (
++                hasattr(self, "geom_data")
++                and self.geom_data is not None
++                and obs_gid < len(self.geom_data.oMg)
++            ):
++                self.geom_data.oMg[obs_gid] = new_placement
+ 
+         return True
+ 
+     def remove_obstacle(self, name: str) -> bool:
+         """移除指定的外部障碍物。"""
+         with self._obstacle_lock:
+-            return self._remove_obstacle_impl(name)
++            return self._remove_obstacle_impl(name, rebuild=True)
+ 
+-    def _remove_obstacle_impl(self, name: str) -> bool:
++    def _remove_obstacle_impl(self, name: str, rebuild: bool = True) -> bool:
+         if name not in self.obstacles:
+             return False
+         del self.obstacles[name]
+@@ -297,15 +358,12 @@ class ObstacleManager:
+         del self.obstacle_geom_ids[name]
+         new_obs_ids = {}
+         for obs_name, obs in self.obstacles.items():
+-            # 复用旧 geom_model 里的 GeometryObject (几何指针原样保留):
+-            # 重建时重调 to_coal_geometry 对 prebuilt mesh 型会炸 (无
+-            # mesh_path 可加载), 且重复构建解析几何纯属浪费。
+             old_go = self.geom_model.geometryObjects[self.obstacle_geom_ids[obs_name]]
+             go = pin.GeometryObject(
+                 old_go.name,
+                 old_go.parentJoint,
+                 old_go.parentFrame,
+-                obs.to_se3(self.T_world_from_base),
++                self._obstacle_to_se3(obs),
+                 old_go.geometry,
+             )
+             new_gid = new_geom_model.addGeometryObject(go)
+@@ -315,141 +373,263 @@ class ObstacleManager:
+         self.link_geom_ids = new_link_geom_ids
+         self.geom_to_link = new_geom_to_link
+         self.obstacle_geom_ids = new_obs_ids
+-        # gid 前移, 半径表必须同步重建否则后续障碍的半径索引错位
++        self.invalidate_robot_geoms_cache()
+         self.geom_bounding_radii = self._compute_bounding_spheres()
+-        self.rebuild_pairs()
++        if rebuild:
++            self.rebuild_pairs()
+         return True
+ 
++    def clear_obstacles(self, source: Optional[str] = None) -> None:
++        """清空障碍物。若指定 source 则仅清空该来源 (如 'moveit' 或 'manual')。"""
++        with self._obstacle_lock:
++            if not self.obstacles:
++                return
++            if source is None:
++                self.obstacles.clear()
++                self.obstacle_geom_ids.clear()
++                new_geom_model = pin.GeometryModel()
++                new_link_geom_ids: Dict[str, List[int]] = {}
++                new_geom_to_link: Dict[int, str] = {}
++                for l_name, gids in self.link_geom_ids.items():
++                    for gid in gids:
++                        go = self.geom_model.geometryObjects[gid]
++                        new_gid = new_geom_model.addGeometryObject(go)
++                        new_link_geom_ids.setdefault(l_name, []).append(new_gid)
++                        new_geom_to_link[new_gid] = l_name
++                self.geom_model = new_geom_model
++                self.link_geom_ids = new_link_geom_ids
++                self.geom_to_link = new_geom_to_link
++                self.invalidate_robot_geoms_cache()
++                self.geom_bounding_radii = self._compute_bounding_spheres()
++                self.rebuild_pairs()
++            else:
++                to_del = [
++                    k for k, v in self.obstacles.items()
++                    if getattr(v, "source", "manual") == source
++                ]
++                for name in to_del:
++                    self._remove_obstacle_impl(name, rebuild=False)
++                if to_del:
++                    self.rebuild_pairs()
++
+     @staticmethod
+     def _obstacle_bounding_radius(obs: PrimitiveObstacle) -> float:
+-        """障碍物外接球半径 (局部系), 供 broad-phase 粗筛表使用。"""
++        """障碍物外接球半径 (局部系, 含 ||aabb_center|| 偏移), 供 broad-phase 粗筛表使用。"""
+         geo = obs.to_coal_geometry()
+-        try:
+-            if geo.aabb_radius < 0.0:
+-                geo.computeLocalAABB()
+-            return max(float(geo.aabb_radius), 0.0)
+-        except Exception:
+-            # 兜底: 按"最远顶点距中心"保守估计
+-            return float(np.linalg.norm(obs.size) * 0.5)
+-
+-    def _register_prebuilt(self, name: str, geometry, pos, R) -> None:
+-        """注册已构建的 coal 几何为障碍物 (mesh 内联三角形路径)。
++        return compute_geometry_bounding_radius(
++            geo, fallback_radius=float(np.linalg.norm(obs.size) * 0.5)
++        )
+ 
+-        与 add_obstacle 同口径: Placement 挂 joint 0、半径入 broad-phase
+-        表、rebuild_pairs 重组对表; PrimitiveObstacle 记录 shape="mesh"
+-        仅作生命周期登记 (to_coal_geometry 不会被再调)。
+-        """
++    def _register_prebuilt(
++        self,
++        name: str,
++        geometry: Any,
++        pos: Any,
++        R: Any,
++        frame: str = "world",
++        source: str = "manual",
++    ) -> None:
++        """注册已构建的 coal 几何为障碍物 (mesh 内联三角形路径)。"""
+         with self._obstacle_lock:
+-            return self._register_prebuilt_impl(name, geometry, pos, R)
++            return self._register_prebuilt_impl(
++                name, geometry, pos, R, frame=frame, rebuild=True, source=source
++            )
++
++    def _register_prebuilt_impl(
++        self,
++        name: str,
++        geometry: Any,
++        pos: Any,
++        R: Any,
++        frame: str = "world",
++        rebuild: bool = True,
++        source: str = "manual",
++    ) -> None:
++        if name in self.obstacles:
++            self._remove_obstacle_impl(name, rebuild=False)
+ 
+-    def _register_prebuilt_impl(self, name: str, geometry, pos, R) -> None:
+         obs = PrimitiveObstacle(
+             name=name,
+             size=[],
+             position=pos,
+             R=R,
+-            frame="world",
++            frame=frame,
+             shape="mesh",
++            source=source,
+         )
+-        # mesh 兜底半径: aabb_radius 已在 _mesh_msg_to_coal 算好
+-        radius = 0.0
+-        try:
+-            radius = max(float(geometry.aabb_radius), 0.0)
+-        except Exception:
+-            pass
++        # 严格按 aabb_radius + ||aabb_center|| 计算外接球半径, 修复偏心 Mesh 漏检
++        radius = compute_geometry_bounding_radius(geometry, fallback_radius=0.05)
+ 
+-        se3_placement = obs.to_se3(self.T_world_from_base)
++        se3_placement = self._obstacle_to_se3(obs)
+         go = pin.GeometryObject(name, 0, 0, se3_placement, geometry)
+         obs_gid = self.geom_model.addGeometryObject(go)
+         self.obstacle_geom_ids[name] = obs_gid
+         self.obstacles[name] = obs
+         self.geom_bounding_radii = np.concatenate(
+-            [
+-                self.geom_bounding_radii,
+-                [radius],
+-            ]
++            [self.geom_bounding_radii, [radius]]
+         )
+-        self.rebuild_pairs()
++        if rebuild:
++            self.rebuild_pairs()
+ 
+     def sync_scene_objects(self, objs: List[Dict[str, Any]]) -> None:
+-        """场景物体列表整体对账进 manager (注册/更新/移除, 幂等)。
+-
+-        MoveIt frame_id 即 URDF 根, 直接 frame="world"; quat 恒转换显式
+-        传入 (单位阵也传), 保证对账后障碍物姿态与场景严格一致, 而非
+-        残留旧值; scene 里消失的 id 一并移除。全程持 _obstacle_lock
+-        (对账的 remove+add 序列必须原子, 否则并发方看到中间态)。
+-        """
++        """场景物体列表整体对账进 manager (注册/更新/移除, 幂等且单次 rebuild)。"""
+         with self._obstacle_lock:
+             self._sync_scene_objects_impl(objs)
+ 
+     def _sync_scene_objects_impl(self, objs: List[Dict[str, Any]]) -> None:
+-        """批量对账实现: 零散增删合并为单次 rebuild, 比逐个 remove/add 省多次 geom_model 重建
+-        (多障碍场景对账开销从 O(n) 次重建降到 1 次)。
+-        """
++        """批量对账实现: 仅剔除 moveit 来源的过期障碍物, 原地更新位姿, 单次批量重构几何模型。"""
+         scene_ids = {o["id"] for o in objs}
+-        for name in list(self.obstacles.keys()):
+-            if name not in scene_ids:
+-                self._remove_obstacle_impl(name)
++
++        # 1. 来源隔离: 仅移除 source == 'moveit' 且不在新场景中的障碍物, 保留用户 manual 障碍物
++        to_remove = {
++            name
++            for name, obs in self.obstacles.items()
++            if getattr(obs, "source", "manual") == "moveit" and name not in scene_ids
++        }
++
++        # 2. 分类处理: 纯位姿更新 vs 几何结构变更/新增
++        in_place_updates: List[Tuple[str, List[float], np.ndarray, str]] = []
++        to_add_or_recreate: List[Dict[str, Any]] = []
+ 
+         for o in objs:
+-            if o.get("type") not in ("box", "sphere", "cylinder", "cone", "mesh"):
++            otype = o.get("type")
++            if otype not in ("box", "sphere", "cylinder", "cone", "mesh"):
+                 continue
+             pos = [float(v) for v in o["pos"]]
+             quat = o.get("quat")
+             R = PrimitiveObstacle._quat_to_matrix(quat) if quat else np.eye(3)
+             if R is None:
+                 R = np.eye(3)
+-            size = [float(v) for v in o["size"]]
++            size = [float(v) for v in o.get("size", [])]
++            frame = str(o.get("frame") or "world")
+             mesh_path = o.get("mesh_path")
+             prebuilt = o.get("coal_geometry")
+ 
+-            if o["type"] == "mesh" and prebuilt is None and not mesh_path:
+-                # mesh 物体既无内联几何也无文件路径: 无法构建碰撞几何, 跳过
+-                # (fetch 层已滤过一次, 这里防调用方直传未滤列表)
+-                print(f"[SceneSync] mesh 物体 '{o['id']}' 无可用几何, 跳过")
++            if otype == "mesh" and prebuilt is None and not mesh_path:
++                logger.warning("[SceneSync] mesh 物体 '%s' 无可用几何, 跳过", o["id"])
+                 continue
+ 
+-            if o["id"] in self.obstacles:
+-                existing = self.obstacles[o["id"]]
++            oid = o["id"]
++            if oid in self.obstacles:
++                existing = self.obstacles[oid]
+                 size_arr = np.asarray(size, dtype=float) if size else np.empty(0)
+-                # 同型同尺寸 (mesh 恒走原地): 仅位姿变, 原地更新 placement
+-                # 免 remove+add 重建整表 (高频门铃场景的主要开销来源)
++                # 同型同尺寸且非预建 mesh: 原地更新位姿与标记来源, 无需重构 GeometryModel
+                 if (
+-                    existing.shape == o["type"]
++                    existing.shape == otype
+                     and np.array_equal(existing.size, size_arr)
+                     and prebuilt is None
+                 ):
+-                    self._update_obstacle_impl(o["id"], position=pos, R=R)
++                    existing.source = "moveit"
++                    in_place_updates.append((oid, pos, R, frame))
+                     continue
+-                self._remove_obstacle_impl(o["id"])
+ 
+-            if prebuilt is not None:
+-                # mesh 物体: 已还原的 coal 几何直接注册 (绕过 to_coal_geometry)
+-                self._register_prebuilt_impl(o["id"], prebuilt, pos, R)
+-                continue
++            to_add_or_recreate.append(
++                {
++                    "id": oid,
++                    "type": otype,
++                    "pos": pos,
++                    "R": R,
++                    "size": size,
++                    "frame": frame,
++                    "mesh_path": mesh_path,
++                    "coal_geometry": prebuilt,
++                }
++            )
+ 
+-            self._add_obstacle_impl(
+-                o["id"],
+-                size=size,
+-                position=pos,
+-                R=R,
+-                frame="world",
+-                shape=o["type"],
+-                mesh_path=mesh_path,
++        # 3. 执行原地位姿更新 (毫秒级, 不重建模型与碰撞对)
++        for oid, pos, R, frame in in_place_updates:
++            self._update_obstacle_impl(
++                oid, position=pos, R=R, frame=frame, rebuild=False
+             )
+ 
++        # 4. 若无过期障碍物且无结构变更/新增, 直接完成
++        if not to_remove and not to_add_or_recreate:
++            return
++
++        # 5. 单次批量重建 GeometryModel: 消除循环重建的 O(K*N) 锁竞争与段错误风险
++        for name in to_remove:
++            self.obstacles.pop(name, None)
++            self.obstacle_geom_ids.pop(name, None)
++
++        for po in to_add_or_recreate:
++            self.obstacles.pop(po["id"], None)
++            self.obstacle_geom_ids.pop(po["id"], None)
++
++        new_geom_model = pin.GeometryModel()
++        new_link_geom_ids: Dict[str, List[int]] = {}
++        new_geom_to_link: Dict[int, str] = {}
++
++        # 复制机器人已有连杆几何
++        for l_name, gids in self.link_geom_ids.items():
++            for gid in gids:
++                go = self.geom_model.geometryObjects[gid]
++                new_gid = new_geom_model.addGeometryObject(go)
++                new_link_geom_ids.setdefault(l_name, []).append(new_gid)
++                new_geom_to_link[new_gid] = l_name
++
++        # 复制存活障碍物 (包含本地 manual 障碍物与未改变结构的 moveit 障碍物)
++        new_obs_ids: Dict[str, int] = {}
++        for obs_name, obs in list(self.obstacles.items()):
++            old_gid = self.obstacle_geom_ids.get(obs_name)
++            if old_gid is not None and old_gid < len(self.geom_model.geometryObjects):
++                old_go = self.geom_model.geometryObjects[old_gid]
++                go = pin.GeometryObject(
++                    old_go.name,
++                    old_go.parentJoint,
++                    old_go.parentFrame,
++                    self._obstacle_to_se3(obs),
++                    old_go.geometry,
++                )
++                new_gid = new_geom_model.addGeometryObject(go)
++                new_obs_ids[obs_name] = new_gid
++
++        # 挂载待新增/重建的 moveit 障碍物
++        for po in to_add_or_recreate:
++            oid = po["id"]
++            otype = po["type"]
++            prebuilt = po.get("coal_geometry")
++            if prebuilt is not None:
++                obs = PrimitiveObstacle(
++                    name=oid,
++                    size=[],
++                    position=po["pos"],
++                    R=po["R"],
++                    frame=po["frame"],
++                    shape="mesh",
++                    source="moveit",
++                )
++                coal_geo = prebuilt
++            else:
++                obs = PrimitiveObstacle(
++                    name=oid,
++                    size=po["size"],
++                    position=po["pos"],
++                    R=po["R"],
++                    frame=po["frame"],
++                    shape=otype,
++                    mesh_path=po.get("mesh_path"),
++                    source="moveit",
++                )
++                coal_geo = obs.to_coal_geometry()
++
++            se3_placement = self._obstacle_to_se3(obs)
++            go = pin.GeometryObject(oid, 0, 0, se3_placement, coal_geo)
++            new_gid = new_geom_model.addGeometryObject(go)
++            self.obstacles[oid] = obs
++            new_obs_ids[oid] = new_gid
++
++        # 原子切换模型映射并单次更新碰撞对
++        self.geom_model = new_geom_model
++        self.link_geom_ids = new_link_geom_ids
++        self.geom_to_link = new_geom_to_link
++        self.obstacle_geom_ids = new_obs_ids
++        self.invalidate_robot_geoms_cache()
++        self.geom_bounding_radii = self._compute_bounding_spheres()
++        self.rebuild_pairs()
++
+ 
+ class MoveItSceneSync:
+-    """MoveIt 规划场景 -> RobotCollisionManager 的自动障碍物同步器 (可选挂载)。
+-
+-    设计语义: "有 MoveIt 才感知, 没有 MoveIt 就不做环境避障"——构造后
+-    后台线程经 /get_planning_scene 探测 move_group, 失败则全程零 ROS 资源
+-    (manager 保持手动 add_obstacle)。探测成功后订阅
+-    /monitored_planning_scene 当"变化门铃", 每次门铃经服务重拉全量世界
+-    物体整体对账进 manager (单一事实来源, 幂等); move_group 中途消失时
+-    保留现有障碍物等下次门铃。ROS 依赖全部延迟 import, 纯库环境可加载。
+-    独立 rclpy Context 避免与调用方已有 rclpy.init 冲突。
+-    """
++    """MoveIt 规划场景 -> RobotCollisionManager 的自动障碍物同步器 (可选挂载)。"""
+ 
+     _RESYNC_MERGE_S = 0.2         # 门铃合并窗口 (吸收 ADD+回声多条消息)
+     _FETCH_TIMEOUT_S = 5.0        # 单次服务重拉超时
+@@ -457,7 +637,7 @@ class MoveItSceneSync:
+ 
+     def __init__(
+         self,
+-        manager,
++        manager: Any,
+         scene_service: str = "/get_planning_scene",
+         monitored_topic: str = "/monitored_planning_scene",
+         probe_timeout_s: float = 3.0,
+@@ -468,7 +648,7 @@ class MoveItSceneSync:
+         self.monitored_topic = monitored_topic
+         self.verbose = bool(verbose)
+ 
+-        self._context = None  # 独立 rclpy Context (探测成功才创建)
++        self._context = None
+         self._node = None
+         self._executor = None
+         self._scene_cli = None
+@@ -478,24 +658,21 @@ class MoveItSceneSync:
+         self._pending_lock = threading.Lock()
+         self._stop = threading.Event()
+         self._probe_timeout_s = float(probe_timeout_s)
+-        self._scene_types = None  # (PlanningScene,) 导入成功才有值
++        self._scene_types = None
+         self._srv_type = None
+ 
+-        # 零依赖快检: rclpy / moveit_msgs 未安装 (纯库环境) 直接不启动
+         try:
+             import rclpy  # noqa: F401
+             from moveit_msgs.msg import PlanningScene  # noqa: F401
+             from moveit_msgs.srv import GetPlanningScene  # noqa: F401
+         except ImportError:
+             if self.verbose:
+-                print(
++                logger.info(
+                     "[SceneSync] rclpy / moveit_msgs 未安装: 不启用 MoveIt "
+                     "场景感知, 环境避障退化为仅手动 add_obstacle"
+                 )
+             return
+ 
+-        # 探测在后台线程做: 求解器构造路径绝不等服务探测 (3s 超时量级);
+-        # 探测失败由线程自行拆干净资源, 本实例退化为 inactive (no-op)
+         self._spin_thread = threading.Thread(
+             target=self._spin_loop, daemon=True, name="ha-arm-ik-scene-sync"
+         )
+@@ -514,14 +691,11 @@ class MoveItSceneSync:
+             cli = node.create_client(GetPlanningScene, self.scene_service)
+             if not cli.wait_for_service(timeout_sec=self._probe_timeout_s):
+                 return False
+-            # 服务在 = move_group 在线; 首帧快照由常驻线程的初始 resync 拉取
+             return True
+         except Exception as e:
+-            # 探测失败原因由 _spin_loop 统一打印, 这里只标记
+             self._probe_error = str(e)
+             return False
+         finally:
+-            # 回收一次性探测节点 (常驻期自建全新 context)
+             try:
+                 if node is not None:
+                     node.destroy_node()
+@@ -536,11 +710,7 @@ class MoveItSceneSync:
+             self._resync_pending.set()
+ 
+     def _spin_loop(self) -> None:
+-        """后台线程主体: 探测 -> 常驻 (门铃 -> 合并窗口 -> 服务重拉 -> 对账)。
+-
+-        探测失败: 线程直接退出, 不创建常驻资源。move_group 中途消失:
+-        保留现有障碍物等下次门铃, 不做定时轮询空转。
+-        """
++        """后台线程主体: 探测 -> 常驻 (门铃 -> 合并窗口 -> 服务重拉 -> 对账)。"""
+         import rclpy
+         from moveit_msgs.msg import PlanningScene
+         from moveit_msgs.srv import GetPlanningScene
+@@ -549,19 +719,19 @@ class MoveItSceneSync:
+         self._scene_types = (PlanningScene,)
+         self._srv_type = GetPlanningScene
+ 
+-        # 探测期: move_group 不在线就全程零常驻资源
+         self._probe_error = None
+         if not self._probe_moveit(rclpy, GetPlanningScene):
+             if self.verbose:
+                 reason = f" ({self._probe_error})" if self._probe_error else ""
+-                print(
+-                    f"[SceneSync] 未探测到 move_group ({self.scene_service} "
+-                    f"超时 {self._probe_timeout_s}s{reason}): 不启用 MoveIt "
+-                    "场景感知, 环境避障退化为仅手动 add_obstacle"
++                logger.info(
++                    "[SceneSync] 未探测到 move_group (%s 超时 %ss%s): 不启用 MoveIt "
++                    "场景感知, 环境避障退化为仅手动 add_obstacle",
++                    self.scene_service,
++                    self._probe_timeout_s,
++                    reason,
+                 )
+             return
+ 
+-        # 常驻期: 独立 context + 节点 + 门铃订阅
+         try:
+             from rclpy.context import Context
+ 
+@@ -570,8 +740,6 @@ class MoveItSceneSync:
+             self._node = rclpy.create_node(
+                 "ha_arm_ik_scene_sync", context=self._context
+             )
+-            # 独立 context 的 spin 必须走绑定该 context 的 executor
+-            # (rclpy.spin_once 只作用于全局默认 context)
+             self._executor = rclpy.executors.SingleThreadedExecutor(
+                 context=self._context
+             )
+@@ -579,8 +747,6 @@ class MoveItSceneSync:
+             self._scene_cli = self._node.create_client(
+                 GetPlanningScene, self.scene_service
+             )
+-            # 门铃 QoS: 发布端 durability=VOLATILE, 订阅侧必须一致 (请求值
+-            # 高于提供值会静默收不到)。本订阅只当"可能变了"的信号。
+             self._scene_sub = self._node.create_subscription(
+                 PlanningScene,
+                 self.monitored_topic,
+@@ -592,18 +758,17 @@ class MoveItSceneSync:
+             )
+         except Exception as e:
+             if self.verbose:
+-                print(f"[SceneSync] 常驻初始化失败 (按无 MoveIt 处理): {e}")
++                logger.warning("[SceneSync] 常驻初始化失败 (按无 MoveIt 处理): %s", e)
+             self.close()
+             return
+ 
+         if self.verbose:
+-            print(
+-                f"[SceneSync] 已挂载: 监听 {self.monitored_topic} 门铃 -> "
+-                f"{self.scene_service} 重拉 -> manager 自动增删障碍物"
++            logger.info(
++                "[SceneSync] 已挂载: 监听 %s 门铃 -> %s 重拉 -> manager 自动增删障碍物",
++                self.monitored_topic,
++                self.scene_service,
+             )
+ 
+-        # 首帧快照: 门铃是 VOLATILE, 本节点收不到启动前的历史快照,
+-        # 常驻启动后先主动拉一次 (与后续门铃路径共用 _reconcile_scene)
+         with self._pending_lock:
+             self._resync_pending.set()
+ 
+@@ -617,30 +782,65 @@ class MoveItSceneSync:
+             if self._resync_pending.is_set():
+                 with self._pending_lock:
+                     self._resync_pending.clear()
+-                # 合并窗口: 吸收同一事件的 ADD+回声等多条门铃消息
+                 time.sleep(self._RESYNC_MERGE_S)
+                 try:
+                     self._reconcile_scene()
+                 except Exception as e:
+                     if self.verbose:
+-                        print(f"[SceneSync] 场景重拉失败 (保留现有障碍物): {e}")
++                        logger.warning(
++                            "[SceneSync] 场景重拉失败 (保留现有障碍物): %s", e
++                        )
+ 
+     def _reconcile_scene(self) -> None:
+         objs = self._fetch_scene_via_service()
+         if objs is None:
+-            return  # 服务不可用: 保持现状, 等下次门铃重试
++            return
+         self.manager.sync_scene_objects(objs)
+         if self.verbose:
+-            print(f"[SceneSync] 场景同步: {len(objs)} 个障碍物已对账进 manager")
++            logger.info(
++                "[SceneSync] 场景同步: %d 个障碍物图元已对账进 manager", len(objs)
++            )
+ 
+-    def _fetch_scene_via_service(self) -> Optional[List[Dict[str, Any]]]:
+-        """经 /get_planning_scene 拉取当前世界物体, 返回归一化条目列表或 None。
++    @staticmethod
++    def _pose_msg_to_se3(pose_msg: Any) -> Tuple[np.ndarray, np.ndarray]:
++        """将 geometry_msgs/Pose 转为 (pos_3, R_3x3)。"""
++        pos = np.array(
++            [pose_msg.position.x, pose_msg.position.y, pose_msg.position.z],
++            dtype=float,
++        )
++        quat = (
++            pose_msg.orientation.x,
++            pose_msg.orientation.y,
++            pose_msg.orientation.z,
++            pose_msg.orientation.w,
++        )
++        R = PrimitiveObstacle._quat_to_matrix(quat)
++        if R is None:
++            R = np.eye(3, dtype=float)
++        return pos, R
+ 
+-        条目: {id, type(box/sphere/cylinder/cone/mesh), size(全尺寸),
+-        pos, quat[, mesh_path]}。sphere 直径 x2 归一为全尺寸; 物体级
+-        co.pose 优先, 退化用 primitive_poses[0]/mesh_poses[0]; mesh 物体
+-        经 package:// 解析出绝对路径 (解析不到的跳过并打印)。
+-        """
++    @staticmethod
++    def _matrix_to_quat(R: np.ndarray) -> List[float]:
++        """3x3 旋转矩阵转 (qx, qy, qz, qw) 四元数。"""
++        q = pin.Quaternion(R)
++        return [float(q.x), float(q.y), float(q.z), float(q.w)]
++
++    @classmethod
++    def _compose_obj_and_sub_pose(
++        cls, co_pose: Any, sub_pose: Optional[Any]
++    ) -> Tuple[List[float], List[float]]:
++        """精确合成物体级位姿 T_co 与子图元相对位姿 T_sub: T_world = T_co * T_sub。"""
++        p_co, R_co = cls._pose_msg_to_se3(co_pose)
++        if sub_pose is None:
++            return p_co.tolist(), cls._matrix_to_quat(R_co)
++
++        p_sub, R_sub = cls._pose_msg_to_se3(sub_pose)
++        p_world = p_co + R_co @ p_sub
++        R_world = R_co @ R_sub
++        return p_world.tolist(), cls._matrix_to_quat(R_world)
++
++    def _fetch_scene_via_service(self) -> Optional[List[Dict[str, Any]]]:
++        """经 /get_planning_scene 拉取当前世界物体, 支持复合多图元物体并合成 SE(3) 位姿。"""
+         if self._scene_types is None or self._node is None:
+             return None
+         from moveit_msgs.msg import PlanningSceneComponents
+@@ -657,8 +857,6 @@ class MoveItSceneSync:
+             )
+             fut = self._scene_cli.call_async(req)
+ 
+-            # future 只能靠本线程 spin 完成——边等边 spin executor,
+-            # 纯 sleep 会永远不 done
+             deadline = time.time() + self._FETCH_TIMEOUT_S
+             while not fut.done() and time.time() < deadline:
+                 self._executor.spin_once(timeout_sec=0.05)
+@@ -668,43 +866,31 @@ class MoveItSceneSync:
+             world = fut.result().scene.world
+             out: List[Dict[str, Any]] = []
+             for co in world.collision_objects:
+-                # operation 归一化: rclpy 反序列化怪癖, 可能给 bytes
+                 op = co.operation
+                 if isinstance(op, (bytes, bytearray)):
+                     op = op[0] if op else 0
+-
+                 if op != 0:
+                     continue
+ 
+-                def _obj_pose(co=co, pose_list=None):
+-                    if pose_list is not None:
+-                        return pose_list
+-                    cp = co.pose
+-                    if (
+-                        abs(cp.position.x)
+-                        + abs(cp.position.y)
+-                        + abs(cp.position.z)
+-                        > 1e-9
+-                    ):
+-                        return cp
+-                    if co.primitive_poses:
+-                        return co.primitive_poses[0]
+-                    if co.mesh_poses:
+-                        return co.mesh_poses[0]
+-                    return cp
+-
+-                entry: Dict[str, Any] = {
+-                    "id": co.id,
+-                    "frame": co.header.frame_id or "base_Base",
+-                }
++                frame_id = co.header.frame_id or "world"
++                total_parts = len(co.primitives) + len(co.meshes)
+ 
+-                if co.primitives:
+-                    prim = co.primitives[0]
+-                    # 位姿优先级与 moveit_bridge 同口径: move_group 规范化后
+-                    # 物体级位姿在 co.pose, primitive_poses 是相对位姿
+-                    # (实测物体级 pose=(0.5,0,0) 而 primitive_poses[0]=(0,0,0));
+-                    # 必须走 _obj_pose 的智能回退, 不可直取 primitive_poses[0]
+-                    p = _obj_pose(co)
++                # 1. 遍历全部解析图元 (支持多图元复合障碍物, 如多部件桌架)
++                for idx, prim in enumerate(co.primitives):
++                    sub_p = (
++                        co.primitive_poses[idx]
++                        if idx < len(co.primitive_poses)
++                        else None
++                    )
++                    pos, quat = self._compose_obj_and_sub_pose(co.pose, sub_p)
++                    part_id = co.id if total_parts == 1 else f"{co.id}_prim_{idx}"
++
++                    entry: Dict[str, Any] = {
++                        "id": part_id,
++                        "frame": frame_id,
++                        "pos": pos,
++                        "quat": quat,
++                    }
+                     if prim.type == prim.BOX:
+                         entry["type"] = "box"
+                         entry["size"] = list(prim.dimensions)
+@@ -712,9 +898,6 @@ class MoveItSceneSync:
+                         entry["type"] = "sphere"
+                         entry["size"] = [prim.dimensions[0] * 2.0]
+                     elif prim.type == prim.CYLINDER:
+-                        # shape_msgs cylinder/cone dimensions=[height, radius]
+-                        # (CONE_HEIGHT=0/CONE_RADIUS=1), 翻转为 manager 的
+-                        # [直径, 全高] 全尺寸语义
+                         entry["type"] = "cylinder"
+                         entry["size"] = [prim.dimensions[1] * 2.0, prim.dimensions[0]]
+                     elif prim.type == prim.CONE:
+@@ -722,43 +905,43 @@ class MoveItSceneSync:
+                         entry["size"] = [prim.dimensions[1] * 2.0, prim.dimensions[0]]
+                     else:
+                         continue
+-                elif co.meshes:
+-                    # mesh 物体: shape_msgs/Mesh 内联三角形 (vertices +
+-                    # vertex_indices), 直接还原为 coal BVH 几何, 无需
+-                    # 资源文件; 无内联三角形的空壳跳过。
+-                    mesh_geo = self._mesh_msg_to_coal(co.meshes[0])
++                    out.append(entry)
++
++                # 2. 遍历全部三角网格图元
++                for idx, mesh_msg in enumerate(co.meshes):
++                    mesh_geo = self._mesh_msg_to_coal(mesh_msg)
+                     if mesh_geo is None:
+-                        print(
+-                            f"[SceneSync] mesh 物体 '{co.id}' 无内联三角形, 跳过"
++                        logger.warning(
++                            "[SceneSync] mesh 物体 '%s' (子网格 %d) 无内联三角形, 跳过",
++                            co.id,
++                            idx,
+                         )
+                         continue
+-                    # mesh 物体姿态归 mesh_poses (无则回退物体级位姿)
+-                    p = _obj_pose(co, co.mesh_poses[0] if co.mesh_poses else None)
+-                    entry["type"] = "mesh"
+-                    entry["coal_geometry"] = mesh_geo
+-                    entry["size"] = []
+-                else:
+-                    continue
++                    sub_p = (
++                        co.mesh_poses[idx] if idx < len(co.mesh_poses) else None
++                    )
++                    pos, quat = self._compose_obj_and_sub_pose(co.pose, sub_p)
++                    part_id = co.id if total_parts == 1 else f"{co.id}_mesh_{idx}"
++
++                    out.append(
++                        {
++                            "id": part_id,
++                            "frame": frame_id,
++                            "type": "mesh",
++                            "coal_geometry": mesh_geo,
++                            "size": [],
++                            "pos": pos,
++                            "quat": quat,
++                        }
++                    )
+ 
+-                entry["pos"] = [p.position.x, p.position.y, p.position.z]
+-                entry["quat"] = [
+-                    p.orientation.x,
+-                    p.orientation.y,
+-                    p.orientation.z,
+-                    p.orientation.w,
+-                ]
+-                out.append(entry)
+             return out
+         except Exception:
+             return None
+ 
+     @staticmethod
+     def _mesh_msg_to_coal(mesh_msg: Any):
+-        """shape_msgs/Mesh 内联三角形 -> coal BVHModelOBB (无三角形返回 None)。
+-
+-        coal 4.x 绑定: BVH 构建走 camelCase (beginModel/addSubModel/
+-        endModel), 与 MeshLoader 返回的几何同类, GJK 判碰口径一致。
+-        """
++        """shape_msgs/Mesh 内联三角形 -> coal BVHModelOBBRSS (无三角形返回 None)。"""
+         if not mesh_msg.triangles or not mesh_msg.vertices:
+             return None
+         try:
+@@ -779,12 +962,6 @@ class MoveItSceneSync:
+             )
+             bvh = coal.BVHModelOBBRSS()
+             bvh.beginModel(len(tris), len(verts))
+-            # coal 4.x 绑定: addTriangles 只收 (N,3) Eigen 索引矩阵, 配合
+-            # addVertex 逐个入顶点 (addSubModel 的 vector<Vec3s> 重载不
+-            # 接受 numpy/list, 这里逐顶点最稳)。必须用 OBBRSS 节点——与
+-            # MeshLoader 同款; OBB 节点与机器人侧 OBBRSS 几何判碰时
+-            # coal 报 "node type BV_OBB and node type BV_OBBRSS is not
+-            # yet supported"。
+             for v in verts:
+                 bvh.addVertex(v)
+             bvh.addTriangles(tris)
+@@ -804,12 +981,8 @@ class MoveItSceneSync:
+         )
+ 
+     def close(self) -> None:
+-        """停后台线程并彻底销毁 ROS 资源 (幂等, 可安全多次调用)。
+-
+-        每项资源独立 try: 任一销毁失败不阻断其余资源回收。
+-        """
++        """停后台线程并彻底销毁 ROS 资源 (幂等, 可安全多次调用)。"""
+         self._stop.set()
+-        # 从自身 spin 线程内调用 (异常清理路径) 时不能 join 自己
+         if (
+             self._spin_thread is not None
+             and self._spin_thread is not threading.current_thread()
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/robot_collision.py b/releases/ik_solver_v15/ha_arm_ik/collision/robot_collision.py
+index 1ad0b8d..5ff438f 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/collision/robot_collision.py
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/robot_collision.py
+@@ -2,26 +2,19 @@
+ # -*- coding: utf-8 -*-
+ """机器人碰撞几何模型构建: 胶囊包络、机身凸包、mesh 凸包化与资产解析。
+ 
+-本模块只负责"几何模型从哪来":
+-  - align_z_to_vector:            SO(3) 胶囊轴向对齐工具
+-  - _resolve_package_dirs:        mesh 资产目录嗅探
+-  - _resolve_urdf_collision_mesh: URDF collision mesh 路径解析
+-  - _load_or_build_hull:          凸包构建 + 内容哈希缓存
+-  - _apply_hull_decomposition:    mesh 档逐连杆 BVH -> Convex 原地替换
+-
+-构建入口 (胶囊表注册 / 机身凸包注册) 以功能块形式挂载于
+-RobotCollisionManager 上 (RobotCollisionGeometry), 保持 manager 为
+-状态唯一持有者——本模块自身不持有运行时状态。
++架构演进与修复要点:
++* 配置外部化: 胶囊包络段表抽离至 collision_config.DEFAULT_CAPSULE_SEGMENTS, 支持外部传入自定义段表覆盖。
++* 挂载连杆与登记名对齐: 默认段表统一将登记名与挂载帧对齐至实际运动连杆 (Link2/4/6/7), 修复原代码名义连杆与真实 FK 挂载帧错位问题。
+ """
+ from __future__ import annotations
+ 
+ import hashlib
+ import logging
+ import os
++from pathlib import Path
+ import struct
++from typing import Any, Dict, List, Optional, Set, Tuple, Union
+ import xml.etree.ElementTree as ET
+-from pathlib import Path
+-from typing import Any, Dict, List, Optional, Set, Union
+ 
+ import numpy as np
+ import pinocchio as pin
+@@ -35,6 +28,7 @@ except ImportError:
+ 
+ from .collision_config import (
+     BODY_HULL_LINKS,
++    DEFAULT_CAPSULE_SEGMENTS,
+     HULL_CACHE_DIR,
+     HULL_DECOMPOSE_LINK_PREFIXES,
+     PACKAGE_DIRS,
+@@ -79,7 +73,7 @@ def align_z_to_vector(vec: np.ndarray) -> np.ndarray:
+ 
+ 
+ def _resolve_package_dirs() -> List[str]:
+-    """解析 mesh 资产目录: 硬编码表按存在性过滤并去重。"""
++    """解析 mesh 资产目录: 配置表 + ament_index (若可用) + 当前工作目录按存在性去重。"""
+     dirs = [d for d in PACKAGE_DIRS if os.path.isdir(d)]
+     dirs.append(os.getcwd())
+ 
+@@ -172,17 +166,14 @@ def _save_hull_stl(path: Path, verts: np.ndarray, faces: np.ndarray) -> None:
+ 
+ 
+ def _load_or_build_hull(src: Path, cache_dir: Path) -> Any:
+-    """加载缓存凸包, 未命中则从源 mesh 现算并写盘; 返回 coal 碰撞几何。
+-
+-    返回值两种形态 (引擎对 CollisionGeometry 子类无感知, 混用已验证):
+-      - 缓存命中/写盘成功: MeshLoader 加载的 BVHModel;
+-      - 缓存目录不可写: 内存构建的 coal.Convex (本次构建付现算成本)。
+-    """
++    """加载缓存凸包, 未命中则从源 mesh 现算并写盘; 返回 coal 碰撞几何。"""
+     cache = cache_dir / f"{src.stem}_{_sha1_short(src)}.STL"
+     loader = coal.MeshLoader()
+ 
+     if cache.is_file():
+-        return loader.load(str(cache))
++        bvh = loader.load(str(cache))
++        bvh.computeLocalAABB()
++        return bvh
+ 
+     bvh_src = loader.load(str(src))
+     verts = np.array(
+@@ -199,7 +190,9 @@ def _load_or_build_hull(src: Path, cache_dir: Path) -> Any:
+ 
+     try:
+         _save_hull_stl(cache, hv, faces)
+-        return loader.load(str(cache))
++        bvh = loader.load(str(cache))
++        bvh.computeLocalAABB()
++        return bvh
+     except Exception:
+         vs = coal.StdVec_Vec3s()
+         for v in hv:
+@@ -218,13 +211,7 @@ def _apply_hull_decomposition(
+     package_dirs: List[str],
+     urdf_path: Union[str, Path],
+ ) -> int:
+-    """mesh 档 GJK 加速: HULL_DECOMPOSE_LINK_PREFIXES 匹配的连杆 BVH
+-    逐个替换为凸包 (原地), 源 mesh 经内容哈希缓存 (_load_or_build_hull)。
+-
+-    替换只换 geometry 指针, name/parentJoint/placement 保留——geom_to_link /
+-    FK 挂载均无感知。单连杆失败保留原始 BVH (打印, 不中断)。
+-    返回替换的连杆数。
+-    """
++    """mesh 档 GJK 加速: HULL_DECOMPOSE_LINK_PREFIXES 匹配的连杆 BVH 逐个替换为凸包。"""
+     try:
+         urdf_root = ET.parse(str(urdf_path)).getroot()
+     except Exception as e:
+@@ -264,7 +251,7 @@ def _apply_hull_decomposition(
+ 
+ 
+ class RobotCollisionGeometry:
+-    """胶囊/机身凸包包络注册 (构建期功能块, 状态归 manager)。"""
++    """胶囊/机身凸包包络注册 (构建期功能组件, 状态归 manager)。"""
+ 
+     chain: Any
+     pin_model: Optional[pin.Model]
+@@ -273,33 +260,18 @@ class RobotCollisionGeometry:
+     geom_to_link: Dict[int, str]
+     _urdf_path: Optional[Union[str, Path]]
+ 
+-    def _build_capsule_proxies(self) -> None:
+-        """双臂胶囊包络: 每侧 4 骨段, 按实测段表注册。
+-
+-        半径 = 段内最粗连杆 mesh 横向最大半径。
+-        对侧臂胶囊挂对侧冻结连杆帧, FK 位姿由 q_template 驱动——对侧臂
+-        包络当静态障碍处理 (机器人×障碍物通道)。重合关节 (URDF xyz=0)
+-        与基座/腰/TCP 不单独生成包络。
+-        """
++    def _build_capsule_proxies(
++        self,
++        segment_table: Optional[
++            Dict[str, List[Tuple[str, str, float, Tuple[float, float, float]]]]
++        ] = None,
++    ) -> None:
++        """双臂胶囊包络: 每侧 4 骨段, 支持自定义段表或默认配置表注册。"""
+         chain = getattr(self, "chain", None)
+         if chain is None or not hasattr(chain, "joints"):
+             return
+ 
+-        # 段表: (段首连杆=登记名, 段末连杆=挂载帧, 半径, 骨向量[段末连杆系])
+-        segment_table = {
+-            "left": [
+-                ("LHand_Link1", "LHand_Link2", 0.0640, (0.0, 0.2378, 0.0)),
+-                ("LHand_Link3", "LHand_Link4", 0.0640, (0.0, 0.1719, 0.0)),
+-                ("LHand_Link5", "LHand_Link6", 0.0559, (0.084, 0.0, 0.0)),
+-                ("LHand_Link7", "LHand_Link7", 0.0422, (0.16, 0.0, 0.0)),
+-            ],
+-            "right": [
+-                ("RHand_Link1", "RHand_Link2", 0.0640, (0.0, 0.2378, 0.0)),
+-                ("RHand_Link3", "RHand_Link4", 0.0640, (0.0, 0.1719, 0.0)),
+-                ("RHand_Link5", "RHand_Link6", 0.0559, (0.084, 0.0, 0.0)),
+-                ("RHand_Link7", "RHand_Link7", 0.0422, (0.16, 0.0, 0.0)),
+-            ],
+-        }
++        seg_map = segment_table or DEFAULT_CAPSULE_SEGMENTS
+ 
+         side = (
+             "left"
+@@ -308,41 +280,34 @@ class RobotCollisionGeometry:
+         )
+         other = "right" if side == "left" else "left"
+ 
+-        # 镜像臂挂对侧冻结关节才有正确 FK 位姿, 无对侧帧时只建本臂
+         sides = [side]
+-        other_check_link = segment_table[other][0][1]
++        other_check_link = seg_map[other][0][1]
+         if self.pin_model is not None and self.pin_model.existFrame(
+             other_check_link, pin.FrameType.BODY
+         ):
+             sides.append(other)
+ 
+         for s in sides:
+-            for first_link, end_link, r_seg, bone in segment_table[s]:
++            for reg_link, mount_link, r_seg, bone in seg_map[s]:
+                 bone_vec = np.asarray(bone, dtype=float)
+                 capsule = coal.Capsule(r_seg, float(np.linalg.norm(bone_vec)))
++                capsule.computeLocalAABB()
+                 place = pin.SE3(align_z_to_vector(bone_vec), bone_vec * 0.5)
+ 
+                 jid, fid = 0, 0
+-                # 显式指定 FrameType.BODY 防止与同名 JOINT frame 冲突
+                 if self.pin_model is not None and self.pin_model.existFrame(
+-                    end_link, pin.FrameType.BODY
++                    mount_link, pin.FrameType.BODY
+                 ):
+-                    fid = self.pin_model.getFrameId(end_link, pin.FrameType.BODY)
++                    fid = self.pin_model.getFrameId(mount_link, pin.FrameType.BODY)
+                     jid = self.pin_model.frames[fid].parentJoint
+ 
+-                go = pin.GeometryObject(f"{first_link}_col", jid, fid, place, capsule)
++                go = pin.GeometryObject(f"{reg_link}_col", jid, fid, place, capsule)
+                 gid = self.geom_model.addGeometryObject(go)
+-                self.link_geom_ids.setdefault(first_link, []).append(gid)
+-                self.geom_to_link[gid] = first_link
++                self.link_geom_ids.setdefault(reg_link, []).append(gid)
++                self.geom_to_link[gid] = reg_link
+ 
+     def _build_body_hull_proxies(self) -> None:
+-        """机身凸包包络 (躯干/骨盆/头): 补胶囊表缺失的身体覆盖。
+-
+-        挂载取 pin_model 对应 BODY 帧的 parentJoint/parentFrame——腰关节
+-        驱动 FK, 排斥雅可比自动只对腰非零。注册名 "{link}_hull_col" 登记
+-        geom_to_link 纳入机器人×障碍物对。任一步失败整组放弃退化回纯
+-        胶囊口径, 不抛异常。
+-        """
++        """机身凸包包络 (躯干/骨盆/头): 补胶囊表缺失的身体覆盖。"""
+         if self.pin_model is None:
+             return
+         urdf_path = getattr(self, "_urdf_path", None)
+@@ -390,5 +355,4 @@ class RobotCollisionGeometry:
+                 registered,
+                 len(BODY_HULL_LINKS),
+                 ", ".join(BODY_HULL_LINKS),
+-            )
+-
++            )
+\ No newline at end of file
+diff --git a/releases/ik_solver_v15/ha_arm_ik/collision/trajectory_validator.py b/releases/ik_solver_v15/ha_arm_ik/collision/trajectory_validator.py
+new file mode 100644
+index 0000000..b2f732f
+--- /dev/null
++++ b/releases/ik_solver_v15/ha_arm_ik/collision/trajectory_validator.py
+@@ -0,0 +1,71 @@
++#!/usr/bin/env python3
++# -*- coding: utf-8 -*-
++"""轨迹级碰撞安全验证: 逐帧 check_collision 验证与首碰熔断。"""
++from __future__ import annotations
++
++from typing import Any, Dict, List, Optional, Tuple
++
++import numpy as np
++
++from .collision_constraints import CollisionReport
++
++
++class TrajectoryValidator:
++    """轨迹级碰撞验证组件 (RobotCollisionManager 的功能块)。"""
++
++    def validate_trajectory(
++        self,
++        q_sequence: Any,
++        safety_margin: float = 0.0,
++        stop_at_first: bool = True,
++    ) -> Dict[str, Any]:
++        """逐帧验证一段关节轨迹的碰撞安全性。
++
++        Args:
++            q_sequence: 关节角度序列 (shape: (N, n_joints) 或列表)。
++            safety_margin: 安全裕度 [m] (默认 0.0)。
++            stop_at_first: 发现第一个碰撞点即快速熔断退出。
++
++        Returns:
++            {
++                "is_safe": bool,
++                "first_collision_index": Optional[int],
++                "colliding_pairs": List[Tuple[str, str]],
++                "min_trajectory_distance": float,
++                "total_frames_checked": int,
++            }
++        """
++        frames = np.asarray(q_sequence, dtype=float)
++        if frames.ndim == 1:
++            frames = frames.reshape(1, -1)
++
++        total_frames = frames.shape[0]
++        min_traj_d = float("inf")
++        first_col_idx: Optional[int] = None
++        first_colliding_pairs: List[Tuple[str, str]] = []
++
++        for idx in range(total_frames):
++            q = frames[idx]
++            rep: CollisionReport = self.check_collision(
++                q,
++                stop_at_first=stop_at_first,
++                safety_margin=safety_margin,
++            )
++
++            if np.isfinite(rep.min_obstacle_distance):
++                min_traj_d = min(min_traj_d, float(rep.min_obstacle_distance))
++
++            if rep.is_collision:
++                first_col_idx = idx
++                first_colliding_pairs = list(rep.colliding_pairs)
++                if stop_at_first:
++                    break
++
++        is_safe = first_col_idx is None
++        return {
++            "is_safe": is_safe,
++            "first_collision_index": first_col_idx,
++            "colliding_pairs": first_colliding_pairs,
++            "min_trajectory_distance": min_traj_d,
++            "total_frames_checked": (first_col_idx + 1) if (first_col_idx is not None and stop_at_first) else total_frames,
++        }
+diff --git a/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py b/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
+index 9b0978f..6643a18 100644
+--- a/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
++++ b/releases/ik_solver_v15/ha_arm_ik/single_arm_ik.py
+@@ -49,7 +49,7 @@ from pathlib import Path
+ import threading
+ import time
+ from types import MappingProxyType
+-from typing import Mapping as TypingMapping, Sequence
++from typing import Any, Dict, List, Mapping as TypingMapping, Optional, Sequence, Tuple, Union
+ import warnings
+ import xml.etree.ElementTree as ET
+ 
+@@ -135,11 +135,17 @@ from ha_arm_ik.ik_base import (
+     wrap_to_pi,
+ )
+ 
++try:
++    from ha_arm_ik.collision import CollisionAvoidanceParams
++except ImportError:
++    CollisionAvoidanceParams = None
++
+ # 公共导出接口
+ __all__ = [
+     # 核心求解器与公共结果
+     "SingleArmIKSolver",
+     "HAArmIKSolver",
++    "CollisionAvoidanceParams",
+     "IKResult",
+     "Status",
+     "FailureReason",
+@@ -1925,9 +1931,7 @@ class _SecondaryObjective:
+         band_lower=None,
+         band_upper=None,
+         collision_manager=None,
+-        collision_influence=0.09,
+-        collision_margin=0.005,
+-        collision_gain=0.35,
++        collision_params: Optional[Any] = None,
+     ):
+         self.model = pin_model
+         self.data = pin_data
+@@ -1938,11 +1942,14 @@ class _SecondaryObjective:
+         self.ns_gain = ns_gain
+         self.neg_ns_gain = -ns_gain
+         self.movable = movable_mask
+-        # 零空间碰撞排斥次任务（可选挂载 RobotCollisionManager；None = 关闭）
++        # 零空间碰撞排斥次任务（通过最小接口协议解耦；None = 关闭）
+         self.collision_manager = collision_manager
+-        self.collision_influence = float(collision_influence)
+-        self.collision_margin = float(collision_margin)
+-        self.collision_gain = float(collision_gain)
++        if collision_manager is not None:
++            self.collision_params = collision_params or (
++                CollisionAvoidanceParams() if CollisionAvoidanceParams is not None else None
++            )
++        else:
++            self.collision_params = None
+ 
+         # 姿态回中：默认真实编码器坐标差（仅无界 continuous 关节做周期折叠）
+         self.multi_turn = None
+@@ -2163,12 +2170,12 @@ class _SecondaryObjective:
+         #     cost-only 评估（need_z=False，如回线搜索/尾评估）不付见证点雅可比开销。
+         c_col = 0.0
+         col_rep = None
+-        if self.collision_manager is not None:
++        if self.collision_manager is not None and self.collision_params is not None:
+             z_col, c_col, col_rep = self.collision_manager.compute_collision_repulsion_gradient(
+                 q_active,
+-                influence_distance=self.collision_influence,
+-                safety_margin=self.collision_margin,
+-                repulsion_gain=self.collision_gain,
++                influence_distance=self.collision_params.influence_distance,
++                safety_margin=self.collision_params.safety_margin,
++                repulsion_gain=self.collision_params.repulsion_gain,
+                 compute_gradient=need_z,
+             )
+             if need_z:
+@@ -2892,9 +2899,7 @@ def pinocchio_ik_one_seed(
+     margin_bounds=None,
+     band_bounds=None,
+     collision_manager=None,
+-    collision_influence=0.09,
+-    collision_margin=0.005,
+-    collision_gain=0.35,
++    collision_params=None,
+ ):
+     """单种子 DLS IK：主任务为末端位姿，零空间次任务为回中 / 限位裕度 / 负荷 / 质心。
+ 
+@@ -3130,9 +3135,7 @@ def pinocchio_ik_one_seed(
+         band_lower=band_lower,
+         band_upper=band_upper,
+         collision_manager=collision_manager,
+-        collision_influence=collision_influence,
+-        collision_margin=collision_margin,
+-        collision_gain=collision_gain,
++        collision_params=collision_params,
+     )
+     terms = _make_task_terms(
+         pin_model,
+@@ -4420,7 +4423,7 @@ def collect_pinocchio_candidates_and_seeds(
+     continuation_reach = params.pop("continuation_reach", None)  # 只用于求解类别判据，不传给 DLS
+     sync_secondary_cost = bool(params.pop("sync_secondary_cost", False))
+     w_com = float(params.pop("w_com", 100.0))
+-    w_collision = float(params.pop("w_collision", 500.0))
++    w_collision = float(params.pop("w_collision", 0.0))
+     if sync_secondary_cost and include_waist and params.get("waist_null_gain") is None:
+         # 对齐内层零空间腰回中增益与外层 W_WAIST_RETURN 偏好，消除内外层腰部回正口径倒挂
+         params["waist_null_gain"] = 2.0
+@@ -5437,50 +5440,48 @@ class HAArmIKSolver:
+         )
+         # 主任务位置误差的特征长度（m）：DLS 与 strict 最终复核同一口径
+         self.dls_characteristic_length = cfg_tune.get("dls_characteristic_length", 0.5)
+-        # ---- 环境障碍物防碰撞配置 ----
++        # ---- 环境障碍物防碰撞配置 (接口解耦) ----
+         # collision_avoidance:
+-        #   - True: 默认开启，自动构建防碰撞管理器（默认使用 URDF 真实碰撞网格凸包化，全连杆覆盖）；
+-        #   - RobotCollisionManager 实例: 直接挂载已有实例；
++        #   - True: 默认开启，pin_model 就绪后自动构建几何防碰撞管理器；
++        #   - collision_manager 实例: 外部依赖注入（只要提供 compute_collision_repulsion_gradient 和 check_collision）；
+         #   - False / None: 关闭防碰撞检测。
+         # 避障机制包含两道防线：
+-        #   1. 零空间软排斥: 在 DLS 迭代中作为次任务将连杆推离障碍物影响区 (collision_influence_distance, 默认 9cm)；
+-        #   2. 终检硬门槛: 最终解净空距离若小于安全裕度 (collision_safety_margin, 默认 5mm) 则判定碰撞并拒绝。
+-        # 环境障碍物同步 (collision_scene_sync):
+-        #   支持后台探测 MoveIt 规划场景并自动同步障碍物；若未安装 ROS/rclpy 或无 MoveIt 服务则静默退化。
++        #   1. 零空间软排斥: 在 DLS 迭代中作为次任务将连杆推离障碍物影响区 (collision_influence_distance)；
++        #   2. 终检硬门槛: 最终解净空距离若小于安全裕度 (collision_safety_margin) 则判定碰撞并拒绝。
+         col_mgr_explicit = cfg_tune.get("collision_manager", None)
+         if col_mgr_explicit is not None:
+-            self.collision_avoidance = col_mgr_explicit
+             self.collision_manager = col_mgr_explicit
+         else:
+-            self.collision_avoidance = cfg_tune.get("collision_avoidance", True)
+-            if self.collision_avoidance is False or self.collision_avoidance is None:
++            col_avoid = cfg_tune.get("collision_avoidance", True)
++            if col_avoid is False or col_avoid is None:
+                 self.collision_manager = None
+-            elif self.collision_avoidance is True:
+-                self.collision_manager = True  # 占位，pin_model 就绪后构建（见 _check_model 前）
++            elif col_avoid is True:
++                self.collision_manager = True  # 占位，待 pin_model 就绪后由外部 factory 创建几何碰撞模型
++            elif hasattr(col_avoid, "compute_collision_repulsion_gradient") and hasattr(
++                col_avoid, "check_collision"
++            ):
++                self.collision_manager = col_avoid
+             else:
+-                try:
+-                    from ha_arm_ik.collision_fcl import RobotCollisionManager
++                raise TypeError(
++                    "collision_avoidance must be True, False, None, or an object implementing "
++                    "compute_collision_repulsion_gradient and check_collision"
++                )
+ 
+-                    valid_instance = isinstance(
+-                        self.collision_avoidance, RobotCollisionManager
+-                    )
+-                except ImportError:
+-                    valid_instance = False
+-                if not valid_instance:
+-                    raise ValueError(
+-                        "collision_avoidance must be True, False, None, or a "
+-                        "RobotCollisionManager instance"
+-                    )
+-                self.collision_manager = self.collision_avoidance  # manager 实例
+-        self.collision_safety_margin = float(cfg_tune.get("collision_safety_margin", 0.005))
+-        self.collision_influence = float(cfg_tune.get("collision_influence_distance", 0.09))
+-        self.collision_gain = float(cfg_tune.get("collision_repulsion_gain", 0.35))
+-        # 开启防碰撞时默认把内层 com/collision 次任务代价同步进外层候选打分
+-        self.sync_secondary_cost = bool(
+-            cfg_tune.get("sync_secondary_cost", self.collision_manager is not None)
+-        )
++        # ---- 结构化防碰撞参数规范 (统一由 CollisionAvoidanceParams 持有) ----
++        if CollisionAvoidanceParams is not None and self.collision_manager is not None:
++            self.collision_params = CollisionAvoidanceParams.from_any(
++                cfg_tune.get("collision_params"),
++                collision_safety_margin=cfg_tune.get("collision_safety_margin"),
++                collision_influence_distance=cfg_tune.get("collision_influence_distance"),
++                collision_repulsion_gain=cfg_tune.get("collision_repulsion_gain"),
++                w_collision=cfg_tune.get("w_collision"),
++            )
++        else:
++            self.collision_params = None
++
++        # 内层 com/collision 次任务代价同步进外层候选打分 (显式开关，不隐式绑定碰撞)
++        self.sync_secondary_cost = bool(cfg_tune.get("sync_secondary_cost", False))
+         self.w_com = float(cfg_tune.get("w_com", 100.0))
+-        self.w_collision = float(cfg_tune.get("w_collision", 500.0))
+         # 统一解列表：solve() 成功结果附带 info["solutions"] =
+         # [best, 备选, ...] 按排序输出的已过硬约束（跳变/限位/位姿/负荷）的
+         # 有序解，供客户端在 MoveIt 目标碰撞时直接遍历重试。
+@@ -5782,29 +5783,32 @@ class HAArmIKSolver:
+             if self.use_pinocchio_ik and self.dls_seed_library_size > 0:
+                 self.seed_library = self._shared_seed_library()
+ 
+-        # 防碰撞自动构建：pin_model/chain/maps/T_world_from_base 全部就绪后
+-        # （collision_avoidance=True 时把占位 True 换成真 manager；构建编排
+-        # 全在 collision.auto_mount——geometry 档位 / 场景感知挂载是碰撞域
+-        # 内部决策，solver 只负责调用）
++        # 防碰撞几何管理器自动构建：pin_model/chain/maps/T_world_from_base 全部就绪后
++        # （调用外部 auto_mount 工厂，IK 核心不绑定具体几何类；MoveIt 场景由外部显式挂载）
+         if self.collision_manager is True:
+             try:
+-                from ha_arm_ik.collision_fcl import auto_mount
+-            except ImportError:
+-                try:
+-                    from ha_arm_ik.collision import auto_mount
+-                except ImportError:
+-                    auto_mount = None
+-            if auto_mount is not None:
+-                self.collision_manager = auto_mount(self, cfg_tune)
++                from ha_arm_ik.collision.auto_mount import build_collision_manager
++
++                self.collision_manager = build_collision_manager(self, cfg_tune)
+                 if self.verbose:
+                     print(
+                         f"[HAArmIKSolver] collision_avoidance=True: 已自动构建 "
+-                        f"{getattr(self.collision_manager, 'geometry', 'mesh')} "
+-                        f"碰撞管理器（{self.collision_manager.geom_model.ngeoms} geoms）"
++                        f"{getattr(self.collision_manager, 'geometry', 'mesh')} 碰撞管理器"
+                     )
+-            else:
++            except Exception as err:
++                if self.verbose:
++                    print(f"[HAArmIKSolver] 构建几何碰撞管理器退化: {err}")
+                 self.collision_manager = None
+ 
++            if self.collision_manager is not None and self.collision_params is None and CollisionAvoidanceParams is not None:
++                self.collision_params = CollisionAvoidanceParams.from_any(
++                    cfg_tune.get("collision_params"),
++                    collision_safety_margin=cfg_tune.get("collision_safety_margin"),
++                    collision_influence_distance=cfg_tune.get("collision_influence_distance"),
++                    collision_repulsion_gain=cfg_tune.get("collision_repulsion_gain"),
++                    w_collision=cfg_tune.get("w_collision"),
++                )
++
+         self._check_model()
+ 
+         if self.verbose:
+@@ -6368,6 +6372,7 @@ class HAArmIKSolver:
+         orientation_mode,
+         tool_axis,
+         tool_cone_half_angle,
++        col_params=None,
+     ):
+         """Run the SSIK + Pinocchio-DLS stages."""
+         candidates = []
+@@ -6421,15 +6426,14 @@ class HAArmIKSolver:
+                 "ori_tol": min(PIN_IK_ORI_TOL, ORI_TOL),
+             }
+             dls_params["continuation_reach"] = self.dls_arm_max_reach
+-            if getattr(self, "collision_manager", None) is not None:
++            active_col = col_params or self.collision_params
++            if getattr(self, "collision_manager", None) is not None and active_col is not None:
+                 dls_params["collision_manager"] = self.collision_manager
+-                dls_params["collision_influence"] = self.collision_influence
+-                dls_params["collision_margin"] = self.collision_safety_margin
+-                dls_params["collision_gain"] = self.collision_gain
++                dls_params["collision_params"] = active_col
+             if getattr(self, "sync_secondary_cost", False):
+                 dls_params["sync_secondary_cost"] = True
+                 dls_params["w_com"] = self.w_com
+-                dls_params["w_collision"] = self.w_collision
++                dls_params["w_collision"] = active_col.w_collision if active_col is not None else 0.0
+             if self.include_waist:
+                 dls_params["shoulder_joint"] = self.s_joint
+                 dls_params["waist_max_reach"] = self.dls_waist_max_reach
+@@ -6614,12 +6618,15 @@ class HAArmIKSolver:
+         q_prev,
+         update_prev,
+         allow_approximate,
++        col_params=None,
+     ):
+         """硬约束过滤 -> 负荷峰值容差带 -> 原 select_best_candidate 择优 -> 受门控约束的近似回退。
+ 
+         硬约束顺序：单关节跳变（不绕大圈）-> 有效限位 + 位姿复核 + 静态负荷（strict）。
+         跳变过滤放在负荷容差带之前，否则容差带可能只剩“负荷略低但要绕大圈”的候选。
+         """
++        active_col = col_params or self.collision_params
++        cur_margin = active_col.safety_margin if active_col is not None else None
+         n_raw = len(candidates)
+         candidates, jump_rejected_pose = self._apply_joint_jump_policy(
+             candidates, q_prev
+@@ -6639,6 +6646,7 @@ class HAArmIKSolver:
+                 tool_axis,
+                 tool_cone_half_angle,
+                 return_load_safe_pool=True,
++                safety_margin=cur_margin,
+             )
+             if not candidates:
+                 if allow_approximate and strict_load_safe_pool:
+@@ -6722,7 +6730,9 @@ class HAArmIKSolver:
+             # 碰撞硬门槛只取决于是否挂载 manager，与 load_mode 解耦：
+             # off 模式的解同样保证无碰（strict 另含负荷门）。
+             if self.collision_manager is not None and self.load_mode != "strict":
+-                ok, _ = self._check_collision_gate(best["q"], candidate=best)
++                ok, _ = self._check_collision_gate(
++                    best["q"], candidate=best, safety_margin=cur_margin
++                )
+                 if not ok:
+                     return self._load_failure(
+                         "FINAL_RECHECK_FAILED",
+@@ -6736,6 +6746,7 @@ class HAArmIKSolver:
+                     orientation_mode,
+                     tool_axis,
+                     tool_cone_half_angle,
++                    safety_margin=cur_margin,
+                 ):
+                     return self._load_failure(
+                         "FINAL_RECHECK_FAILED",
+@@ -6765,6 +6776,7 @@ class HAArmIKSolver:
+                     orientation_mode,
+                     tool_axis,
+                     tool_cone_half_angle,
++                    safety_margin=cur_margin,
+                 )
+                 # 近似接受同样受碰撞硬门槛约束（与精确路径同一 manager 口径）
+                 if self.collision_manager is not None and not best.get(
+@@ -6791,7 +6803,9 @@ class HAArmIKSolver:
+             else:
+                 # off 模式近似回退同样保证无碰（硬门槛与 load_mode 解耦）
+                 if self.collision_manager is not None:
+-                    ok, _ = self._check_collision_gate(best["q"], candidate=best)
++                    ok, _ = self._check_collision_gate(
++                        best["q"], candidate=best, safety_margin=cur_margin
++                    )
+                     if not ok:
+                         return self._load_failure(
+                             "NO_LOAD_SAFE_APPROXIMATE_SOLUTION",
+@@ -6919,6 +6933,7 @@ class HAArmIKSolver:
+         orientation_mode="full",
+         tool_axis=None,
+         tool_cone_half_angle=None,
++        col_params=None,
+     ):
+         T_target_local, T_target_world = self.target_to_local(
+             T_target, frame=frame
+@@ -7002,6 +7017,7 @@ class HAArmIKSolver:
+                 orientation_mode,
+                 tool_axis,
+                 tool_cone_half_angle,
++                col_params=col_params,
+             )
+         )
+         candidates.extend(portfolio_candidates)
+@@ -7039,6 +7055,7 @@ class HAArmIKSolver:
+             q_prev,
+             update_prev,
+             allow_approximate,
++            col_params=col_params,
+         )
+ 
+     def close(self):
+@@ -7056,16 +7073,7 @@ class HAArmIKSolver:
+                 except Exception:
+                     pass
+ 
+-            # 场景感知后台线程先停 (持有 manager 引用, 需在模型拆除前退出)
+-            try:
+-                from ha_arm_ik.collision_fcl import shutdown as collision_shutdown
+-            except ImportError:
+-                try:
+-                    from ha_arm_ik.collision import shutdown as collision_shutdown
+-                except ImportError:
+-                    collision_shutdown = None
+-            if collision_shutdown is not None:
+-                collision_shutdown(self)
++            self.collision_manager = None
+             self.pin_model = None
+             self.pin_data = None
+             self.pin_maps = None
+@@ -7170,13 +7178,28 @@ class HAArmIKSolver:
+                     return f"CONTEXT_CHANGED:{name}"
+         return None
+ 
+-    def _check_collision_gate(self, q, candidate=None):
++    def _resolve_collision_params(
++        self,
++        collision_params: Optional[Any] = None,
++        **overrides,
++    ) -> Any:
++        """解析单次请求或当前上下文中的生效防碰撞参数 (分层优先级合并)。"""
++        if CollisionAvoidanceParams is None:
++            return None
++        has_overrides = any(v is not None for v in overrides.values())
++        if collision_params is None and getattr(self, "collision_params", None) is None and not has_overrides:
++            return None
++        base = collision_params or getattr(self, "collision_params", None) or CollisionAvoidanceParams()
++        return CollisionAvoidanceParams.from_any(base, **overrides)
++
++    def _check_collision_gate(self, q, candidate=None, safety_margin=None):
+         """碰撞硬门槛辅助 (solve 流程四处 check_collision 的统一口径)。
+ 
+         Args:
+             q: 待验关节角。
+             candidate: 可选字典, 传入时把 collision_ok / collision_min_distance
+                 写入该字典 (终检写 best、负荷复核写 candidate 两种用法统一)。
++            safety_margin: 可选安全裕度 [m], 未给出时采用当前生效参数。
+         Returns:
+             (collision_ok, min_distance): ok = 净空 >= margin; min_distance
+             仅距离查询路径有效 (布尔路径 inf, 调用方以 np.isfinite 守卫)。
+@@ -7185,8 +7208,21 @@ class HAArmIKSolver:
+             if candidate is not None:
+                 candidate["collision_ok"] = True
+             return True, float("inf")
++        margin = (
++            float(safety_margin)
++            if safety_margin is not None
++            else (
++                self.collision_params.safety_margin
++                if self.collision_params is not None
++                else (
++                    CollisionAvoidanceParams.safety_margin
++                    if CollisionAvoidanceParams is not None
++                    else 0.0
++                )
++            )
++        )
+         col_rep = self.collision_manager.check_collision(
+-            q, safety_margin=self.collision_safety_margin,
++            q, safety_margin=margin,
+         )
+         ok = not col_rep.is_collision
+         min_d = (
+@@ -7201,7 +7237,13 @@ class HAArmIKSolver:
+         return ok, min_d
+ 
+     def _check_load_candidate(
+-        self, candidate, T_target_world, orientation_mode, tool_axis, cone
++        self,
++        candidate,
++        T_target_world,
++        orientation_mode,
++        tool_axis,
++        cone,
++        safety_margin=None,
+     ):
+         q = finite_vector(
+             candidate.get("q"), len(self.active_joint_names), "candidate q"
+@@ -7240,7 +7282,9 @@ class HAArmIKSolver:
+             and pos_err <= POS_TOL
+             and ori_violation <= ORI_TOL
+         )
+-        collision_ok, _ = self._check_collision_gate(q, candidate=candidate)
++        collision_ok, _ = self._check_collision_gate(
++            q, candidate=candidate, safety_margin=safety_margin
++        )
+         cache = self._load_context.get("_physics_cache") if filtering else None
+         physical = None if cache is None else cache.get(q_bytes)
+         if physical is None:
+@@ -7280,6 +7324,7 @@ class HAArmIKSolver:
+         cone,
+         *,
+         return_load_safe_pool=False,
++        safety_margin=None,
+     ):
+         eligible = []
+         load_safe_pool = []
+@@ -7292,7 +7337,12 @@ class HAArmIKSolver:
+             for index, c in enumerate(candidates):
+                 try:
+                     safe = self._check_load_candidate(
+-                        c, T_target_world, orientation_mode, tool_axis, cone
++                        c,
++                        T_target_world,
++                        orientation_mode,
++                        tool_axis,
++                        cone,
++                        safety_margin=safety_margin,
+                     )
+                     pose_count += int(c["load_pose_ok"] and c["load_bounds_ok"])
+                     if c["load_bounds_ok"] and c["load_ok"]:
+@@ -7360,8 +7410,20 @@ class HAArmIKSolver:
+         tool_cone_half_angle=None,
+         *,
+         joint_state=None,
++        collision_params=None,
++        collision_safety_margin=None,
++        collision_influence_distance=None,
++        collision_repulsion_gain=None,
++        w_collision=None,
+     ):
+-        """Original public tuple/formatter retained; only a keyword state input is new."""
++        """主求解入口 (支持单次请求级解耦覆盖防碰撞参数)。"""
++        active_col_params = self._resolve_collision_params(
++            collision_params,
++            collision_safety_margin=collision_safety_margin,
++            collision_influence_distance=collision_influence_distance,
++            collision_repulsion_gain=collision_repulsion_gain,
++            w_collision=w_collision,
++        )
+         start = time.monotonic()
+         if not self._solve_lock.acquire(blocking=False):
+             return (
+@@ -7479,6 +7541,7 @@ class HAArmIKSolver:
+                 orientation_mode,
+                 tool_axis,
+                 tool_cone_half_angle,
++                col_params=active_col_params,
+             )
+             if (
+                 self._load_deadline is not None
+@@ -7555,6 +7618,10 @@ class HAArmIKSolver:
+         max_step=None,
+         margin_bounds=None,
+         fixed_joint_mask=None,
++        collision_params=None,
++        collision_safety_margin=None,
++        collision_influence_distance=None,
++        collision_repulsion_gain=None,
+     ):
+         """单种子 DLS/SNS 迭代接口，自动注入当前求解器的 pin_model, pin_data, pin_maps 及 load_context。"""
+         if not self._solve_lock.acquire(blocking=False):
+@@ -7603,12 +7670,16 @@ class HAArmIKSolver:
+                 fixed_joint_mask=fixed_joint_mask,
+                 backtrack_steps=self.dls_backtrack_steps,
+             )
+-            if getattr(self, "collision_manager", None) is not None:
++            active_col = self._resolve_collision_params(
++                collision_params,
++                collision_safety_margin=collision_safety_margin,
++                collision_influence_distance=collision_influence_distance,
++                collision_repulsion_gain=collision_repulsion_gain,
++            )
++            if getattr(self, "collision_manager", None) is not None and active_col is not None:
+                 one_seed_kwargs.update(
+                     collision_manager=self.collision_manager,
+-                    collision_influence=self.collision_influence,
+-                    collision_margin=self.collision_safety_margin,
+-                    collision_gain=self.collision_gain,
++                    collision_params=active_col,
+                 )
+             return pinocchio_ik_one_seed(
+                 self.pin_model,

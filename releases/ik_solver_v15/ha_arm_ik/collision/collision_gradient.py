@@ -2,11 +2,14 @@
 # -*- coding: utf-8 -*-
 """碰撞排斥梯度: 见证点雅可比 + C¹ 双层单侧二次排斥势场。
 
-零空间避障次任务的数学核: FCL 最近见证点 + Pinocchio 点雅可比解析求 ∂d/∂q,
-构造 C¹ 单侧排斥势垒 H_col, 负梯度 z_col 投影至度量一致零空间。
+数学核修复与增强:
+* 见证点优先法向准则: 当 d > 0 时严格采用 (p_robot - p_obs) / ||p_robot - p_obs|| 作为远离单位向量,
+  当 d < 0 (EPA 穿透) 时采用 (p_obs - p_robot) 结合法向与球心指向校验, 彻底消除 coal/FCL 不同图元法向符号反转导致的"反向吸入"死锁。
+* 并发安全: 全程受 _obstacle_lock 保护, 防止后台 MoveIt 场景同步重建 geom_data 时引发 C++ 内存越界。
 """
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -16,9 +19,9 @@ from .collision_constraints import CollisionReport
 
 
 class CollisionGradient:
-    """见证点雅可比与排斥势场梯度 (Mixin)。"""
+    """见证点雅可比与排斥势场梯度 (RobotCollisionManager 的功能组件)。"""
 
-    # 声明 Mixin 依赖的宿主属性类型，提升 IDE 静态检查与可读性
+    _obstacle_lock: threading.RLock
     enabled: bool
     active_joint_names: List[str]
     pin_model: pin.Model
@@ -48,6 +51,42 @@ class CollisionGradient:
         r = p_world - self.pin_data.oMi[jid].translation
         return J_act[:3, :] + np.cross(J_act[3:, :], r, axisa=0, axisb=0, axisc=0)
 
+    def _compute_safe_away_direction(
+        self,
+        robot_gid: int,
+        obs_gid: int,
+        p_robot: np.ndarray,
+        p_obs: np.ndarray,
+        d: float,
+        raw_normal: np.ndarray,
+    ) -> np.ndarray:
+        """计算使机器人几何体远离障碍物的解析单位方向向量 u_away = ∂d/∂p_robot。
+
+        消除对 FCL/coal DistanceResult.normal 符号约定的盲目依赖:
+        1. 非穿透区 (d > 1e-7): 最近见证点连线 (p_robot - p_obs) 恒为精确远离方向;
+        2. 穿透区 (d < -1e-7): 见证点位于对方表面内部, (p_obs - p_robot) 指向逃离穿透的最短路径;
+        3. 接触临界区 (|d| <= 1e-7): 使用 raw_normal 并用几何体中心连线校验正负号。
+        """
+        diff = (p_robot - p_obs) if d >= 0.0 else (p_obs - p_robot)
+        dn = float(np.linalg.norm(diff))
+        if dn > 1e-7:
+            return diff / dn
+
+        # 见证点重合时 (刚好接触 d ≈ 0), 使用幾何中心连线校准法线方向
+        c_robot = self.geom_data.oMg[robot_gid].translation
+        c_obs = self.geom_data.oMg[obs_gid].translation
+        center_vec = c_robot - c_obs
+        cn = float(np.linalg.norm(center_vec))
+
+        n_norm = float(np.linalg.norm(raw_normal))
+        if n_norm > 1e-9:
+            u_n = raw_normal / n_norm
+            if cn > 1e-9 and float(np.dot(u_n, center_vec)) < 0.0:
+                u_n = -u_n
+            return u_n
+
+        return (center_vec / cn) if cn > 1e-9 else np.array([0.0, 0.0, 1.0])
+
     def compute_collision_repulsion_gradient(
         self,
         q: np.ndarray,
@@ -56,175 +95,144 @@ class CollisionGradient:
         repulsion_gain: float = 0.25,
         compute_gradient: bool = True,
     ) -> Tuple[np.ndarray, float, CollisionReport]:
-        """零空间排斥次任务负梯度 z_col、势能代价 H_col 及碰撞报告。
-
-        只覆盖机器人 × 环境障碍物排斥 (自碰撞归 MoveIt)。
-        compute_gradient=False 为 cost-only 模式: 跳过雅可比, z_col 恒零。
-
-        C¹ 连续双层单侧二次势垒 (影响半径 d_inf), 对 d < d_inf 的对:
-          u = (d_inf - d) / d_inf
-          H_col = 0.5 * repulsion_gain * ∑ u²
-          z_col = ∑ (repulsion_gain / d_inf) * u * ∂d/∂q
-        d < safety_margin 时叠加增益 2x 的内层高刚度项, 阈值处函数值与导数
-        均连续 (无跳变振颤)。∂d/∂q 由 FCL 见证点经 _point_jacobian 精确求得。
-
-        距离查询两段式 (mesh 档热路径关键优化): mesh×图元全量 GJK 距离
-        要下钻 BVH 到三角形级 (~35ms/52 对), 而 DLS 每迭代只需排斥信号。
-        先以 security_margin=d_inf 膨胀判碰 (OBB 层剪枝, ~0.05ms) 粗筛,
-        仅膨胀命中 (d < d_inf 精确) 的对跑 pin.computeDistances 拿见证点
-        距离/方向; 未命中的对 d >= d_inf, 势场与梯度恒零, 直接跳过。
-        """
+        """零空间排斥次任务负梯度 z_col、势能代价 H_col 及碰撞报告 (线程安全)。"""
         n_act = len(q)
         z_col = np.zeros(n_act, dtype=float)
 
-        # 提前拦截未启用或无环境障碍物场景，省去不必要的运动学与碰撞更新
-        if not self.enabled or not self.obstacle_geom_ids:
-            return (
-                z_col,
-                0.0,
-                CollisionReport(
-                    is_collision=False,
-                    colliding_pairs=[],
-                    min_obstacle_distance=float("inf"),
-                ),
+        with self._obstacle_lock:
+            if not self.enabled or not self.obstacle_geom_ids:
+                return (
+                    z_col,
+                    0.0,
+                    CollisionReport(
+                        is_collision=False,
+                        colliding_pairs=[],
+                        min_obstacle_distance=float("inf"),
+                    ),
+                )
+
+            self._sync_transforms(q, compute_joint_jacobians=compute_gradient)
+            d_inf = max(float(influence_distance), float(safety_margin) + 0.01, 1e-4)
+            self._update_active_pairs(d_inf)
+
+            obs_gids = set(self.obstacle_geom_ids.values())
+            collision_pairs = self.geom_model.collisionPairs
+
+            active_obs_pairs: List[Tuple[int, int, int]] = []
+            for k, cp in enumerate(collision_pairs):
+                gid1, gid2 = cp.first, cp.second
+                if (gid1 in obs_gids or gid2 in obs_gids) and self._pair_active[k]:
+                    active_obs_pairs.append((k, gid1, gid2))
+
+            if not active_obs_pairs:
+                return (
+                    z_col,
+                    0.0,
+                    CollisionReport(
+                        is_collision=False,
+                        colliding_pairs=[],
+                        min_obstacle_distance=float("inf"),
+                    ),
+                )
+
+            # 第一段: security_margin = d_inf 膨胀判碰粗筛 (OBB 剪枝, 微秒级)
+            requests = self.geom_data.collisionRequests
+            saved_margins = [float(cr.security_margin) for cr in requests]
+            for cr in requests:
+                cr.security_margin = d_inf
+            try:
+                pin.computeCollisions(self.geom_model, self.geom_data, False)
+            finally:
+                for cr, m in zip(requests, saved_margins):
+                    cr.security_margin = m
+
+            near_pairs = [
+                t
+                for t in active_obs_pairs
+                if self.geom_data.collisionResults[t[0]].isCollision()
+            ]
+            if not near_pairs:
+                return (
+                    z_col,
+                    0.0,
+                    CollisionReport(
+                        is_collision=False,
+                        colliding_pairs=[],
+                        min_obstacle_distance=float("inf"),
+                    ),
+                )
+
+            # 第二段: 仅对进入影响半径 d_inf 的膨胀命中对运行精确 GJK 距离查询
+            act = self.geom_data.activeCollisionPairs
+            saved_act = [bool(act[k]) for k in range(len(act))]
+            try:
+                near_indices = {t[0] for t in near_pairs}
+                for k in range(len(act)):
+                    act[k] = k in near_indices
+                pin.computeDistances(self.geom_model, self.geom_data)
+            finally:
+                for k, v in enumerate(saved_act):
+                    act[k] = v
+
+            threshold = self._env_pair_threshold(safety_margin)
+            inv_d_inf = 1.0 / d_inf
+            outer_grad_scale = repulsion_gain * inv_d_inf
+
+            inner_gain = 2.0 * repulsion_gain
+            scale_inner = max(threshold, 0.01)
+            inv_scale_inner = 1.0 / scale_inner
+            inner_grad_scale = inner_gain * inv_scale_inner
+
+            dist_results = self.geom_data.distanceResults
+            geom_objs = self.geom_model.geometryObjects
+            geom_to_link = self.geom_to_link
+
+            colliding_pairs: List[Tuple[str, str]] = []
+            min_obs_d = float("inf")
+            cost_col = 0.0
+
+            for k, gid1, gid2 in near_pairs:
+                dr = dist_results[k]
+                d = float(dr.min_distance)
+                if d < min_obs_d:
+                    min_obs_d = d
+
+                if d <= threshold:
+                    name1 = geom_to_link.get(gid1, geom_objs[gid1].name)
+                    name2 = geom_to_link.get(gid2, geom_objs[gid2].name)
+                    colliding_pairs.append((name1, name2))
+
+                if d < d_inf:
+                    u_outer = (d_inf - d) * inv_d_inf
+                    cost_col += 0.5 * repulsion_gain * (u_outer * u_outer)
+                    grad_coeff = outer_grad_scale * u_outer
+
+                    if d < threshold:
+                        u_inner = (threshold - d) * inv_scale_inner
+                        cost_col += 0.5 * inner_gain * (u_inner * u_inner)
+                        grad_coeff += inner_grad_scale * u_inner
+
+                    if compute_gradient:
+                        p1 = np.asarray(dr.getNearestPoint1(), dtype=float)
+                        p2 = np.asarray(dr.getNearestPoint2(), dtype=float)
+                        normal = np.asarray(dr.normal, dtype=float)
+
+                        if gid1 in obs_gids:
+                            robot_gid, obs_gid = gid2, gid1
+                            p_robot, p_obs = p2, p1
+                        else:
+                            robot_gid, obs_gid = gid1, gid2
+                            p_robot, p_obs = p1, p2
+
+                        u_away = self._compute_safe_away_direction(
+                            robot_gid, obs_gid, p_robot, p_obs, d, normal
+                        )
+                        J = self._point_jacobian(robot_gid, p_robot)
+                        z_col += grad_coeff * (J.T @ u_away)
+
+            report = CollisionReport(
+                is_collision=bool(colliding_pairs),
+                colliding_pairs=colliding_pairs,
+                min_obstacle_distance=min_obs_d,
             )
-
-        # 同步正运动学与关节雅可比 (修复原代码重复调用两次的冗余 bug)
-        self._sync_transforms(q, compute_joint_jacobians=compute_gradient)
-        # 仅激活机器人 × 障碍物碰撞对 (对表只含障碍物对, 见 collision_pair)
-        d_inf = max(float(influence_distance), float(safety_margin) + 0.01, 1e-4)
-        self._update_active_pairs(d_inf)
-
-        obs_gids = set(self.obstacle_geom_ids.values())
-        collision_pairs = self.geom_model.collisionPairs
-
-        # 收集本轮真正需要评估的障碍物碰撞对索引
-        active_obs_pairs: List[Tuple[int, int, int]] = []
-        for k, cp in enumerate(collision_pairs):
-            gid1, gid2 = cp.first, cp.second
-            if (gid1 in obs_gids or gid2 in obs_gids) and self._pair_active[k]:
-                active_obs_pairs.append((k, gid1, gid2))
-
-        if not active_obs_pairs:
-            return (
-                z_col,
-                0.0,
-                CollisionReport(
-                    is_collision=False,
-                    colliding_pairs=[],
-                    min_obstacle_distance=float("inf"),
-                ),
-            )
-
-        # 两段式距离查询: 第一段膨胀判碰粗筛 (OBB 剪枝, 微秒级),
-        # 只对"膨胀命中"的对跑第二段精确 GJK 距离。势场只在 d < d_inf
-        # 时非零, 膨胀未命中的对 (d >= d_inf) 无需距离值。
-        requests = self.geom_data.collisionRequests
-        saved_margins = [float(cr.security_margin) for cr in requests]
-        for cr in requests:
-            cr.security_margin = d_inf
-        try:
-            pin.computeCollisions(self.geom_model, self.geom_data, False)
-        finally:
-            for cr, m in zip(requests, saved_margins):
-                cr.security_margin = m
-
-        near_pairs = [
-            t
-            for t in active_obs_pairs
-            if self.geom_data.collisionResults[t[0]].isCollision()
-        ]
-        if not near_pairs:
-            return (
-                z_col,
-                0.0,
-                CollisionReport(
-                    is_collision=False,
-                    colliding_pairs=[],
-                    min_obstacle_distance=float("inf"),
-                ),
-            )
-
-        act = self.geom_data.activeCollisionPairs
-        saved_act = [bool(act[k]) for k in range(len(act))]
-        try:
-            near_indices = {t[0] for t in near_pairs}
-            for k in range(len(act)):
-                act[k] = k in near_indices
-            pin.computeDistances(self.geom_model, self.geom_data)
-        finally:
-            for k, v in enumerate(saved_act):
-                act[k] = v
-
-        active_obs_pairs = near_pairs
-
-        # 预计算循环外常量与局部属性绑定，加速热路径迭代
-        threshold = self._env_pair_threshold(safety_margin)
-        inv_d_inf = 1.0 / d_inf
-        outer_grad_scale = repulsion_gain * inv_d_inf
-
-        inner_gain = 2.0 * repulsion_gain
-        scale_inner = max(threshold, 0.01)
-        inv_scale_inner = 1.0 / scale_inner
-        inner_grad_scale = inner_gain * inv_scale_inner
-
-        dist_results = self.geom_data.distanceResults
-        geom_objs = self.geom_model.geometryObjects
-        geom_to_link = self.geom_to_link
-
-        colliding_pairs: List[Tuple[str, str]] = []
-        min_obs_d = float("inf")
-        cost_col = 0.0
-
-        for k, gid1, gid2 in active_obs_pairs:
-            dr = dist_results[k]
-            d = float(dr.min_distance)
-            if d < min_obs_d:
-                min_obs_d = d
-
-            if d <= threshold:
-                name1 = geom_to_link.get(gid1, geom_objs[gid1].name)
-                name2 = geom_to_link.get(gid2, geom_objs[gid2].name)
-                colliding_pairs.append((name1, name2))
-
-            # 进入势场影响半径才计算势能代价与排斥梯度
-            if d < d_inf:
-                # 1. 计算双层 C¹ 势能代价与标量梯度系数 (Cost-only 模式下同样生效)
-                u_outer = (d_inf - d) * inv_d_inf
-                cost_col += 0.5 * repulsion_gain * (u_outer * u_outer)
-                grad_coeff = outer_grad_scale * u_outer
-
-                if d < threshold:
-                    u_inner = (threshold - d) * inv_scale_inner
-                    cost_col += 0.5 * inner_gain * (u_inner * u_inner)
-                    grad_coeff += inner_grad_scale * u_inner
-
-                # 2. 计算见证点排斥梯度 (仅当 compute_gradient=True 时求解雅可比)
-                if compute_gradient:
-                    p1 = np.asarray(dr.getNearestPoint1(), dtype=float)
-                    p2 = np.asarray(dr.getNearestPoint2(), dtype=float)
-                    normal = np.asarray(dr.normal, dtype=float)
-
-                    n_norm = float(np.linalg.norm(normal))
-                    if n_norm > 1e-9:
-                        u_away_1 = -normal / n_norm
-                    else:
-                        diff = (p1 - p2) if d >= 0.0 else (p2 - p1)
-                        dn = float(np.linalg.norm(diff))
-                        u_away_1 = (diff / dn) if dn > 1e-9 else np.array([0.0, 0.0, 1.0])
-
-                    if gid1 in obs_gids:
-                        robot_gid, p_robot, u_away = gid2, p2, -u_away_1
-                    else:
-                        robot_gid, p_robot, u_away = gid1, p1, u_away_1
-
-                    J = self._point_jacobian(robot_gid, p_robot)
-                    z_col += grad_coeff * (J.T @ u_away)
-
-        has_obs = bool(colliding_pairs)
-        report = CollisionReport(
-            is_collision=has_obs,
-            colliding_pairs=colliding_pairs,
-            min_obstacle_distance=min_obs_d,
-        )
-        return z_col, cost_col, report
+            return z_col, cost_col, report

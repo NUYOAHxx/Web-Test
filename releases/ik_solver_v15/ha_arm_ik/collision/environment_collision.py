@@ -2,20 +2,31 @@
 # -*- coding: utf-8 -*-
 """环境障碍物管理: 解析图元障碍物生命周期 + MoveIt 规划场景自动感知。
 
-* PrimitiveObstacle: box / sphere / cylinder / cone / mesh 解析障碍物数据结构
-* ObstacleManager: 障碍物生命周期 (add/update/remove/场景对账)
-* MoveItSceneSync: 后台线程感知 /monitored_planning_scene 门铃 -> /get_planning_scene 重拉 -> manager.sync_scene_objects 幂等对账
+架构演进与修复要点:
+* 并发安全: 采用可重入锁 (RLock) 协同保护写路径与主线程读路径, 彻底消除 geom_model/geom_data 重建期间的 C++ 段错误风险。
+* 批量对账单次重建: sync_scene_objects 将增删改合并后再执行单次 rebuild_pairs(), 真正将 O(N) 次 GeometryData 重建降为 O(1)。
+* 复合障碍物与 SE(3) 位姿合成: 完整支持单个 CollisionObject 含多个 primitives/meshes 的复合场景, 并精确计算 T_world = T_object * T_sub。
+* 统一日志与 coal/hppfcl 兼容: 全面替换裸 print 为标准 logger, 统一使用 compute_geometry_bounding_radius 计算粗筛半径。
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+import logging
 import threading
 import time
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import coal
 import numpy as np
 import pinocchio as pin
+
+try:
+    import coal
+except ImportError:
+    import hppfcl as coal
+
+from .broadphase import compute_geometry_bounding_radius
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,6 +51,7 @@ class PrimitiveObstacle:
     frame: str = "world"              # "world" 或 "base"
     shape: str = "box"                # "box" | "sphere" | "cylinder" | "cone" | "mesh"
     mesh_path: Optional[str] = None   # shape="mesh" 时的碰撞网格文件路径
+    source: str = "manual"            # "manual" 或 "moveit"
 
     _SHAPE_NDIM = {"box": 3, "sphere": 1, "cylinder": 2, "cone": 2, "mesh": 0}
 
@@ -78,6 +90,8 @@ class PrimitiveObstacle:
             # coal.Cone(radius, halfLength), 轴向局部 +Z, 底面朝 -Z
             return coal.Cone(self.size[0] * 0.5, self.size[1] * 0.5)
         if self.shape == "mesh":
+            if not self.mesh_path:
+                raise FileNotFoundError(f"mesh 障碍物 '{self.name}' 未提供 mesh_path")
             return coal.MeshLoader().load(self.mesh_path)
         return coal.Box(self.size[0], self.size[1], self.size[2])
 
@@ -114,33 +128,66 @@ class PrimitiveObstacle:
             dtype=float,
         )
 
-    def to_se3(self, T_world_from_base: Optional[np.ndarray] = None) -> pin.SE3:
+    def to_se3(
+        self,
+        T_world_from_base: Optional[np.ndarray] = None,
+        T_base_from_world: Optional[np.ndarray] = None,
+        pin_uses_root_frame: bool = True,
+    ) -> pin.SE3:
         """获取在 Pinocchio 模型根系（URDF 根）下的 SE3 位姿。
 
-        障碍物几何挂在 joint 0，placement 由 Pinocchio 按模型根（URDF 根）
-        解释，与机器人碰撞几何同系。"world" 即 URDF 根系（MoveIt frame_id 同口径，
-        solver 的 target_to_local 也是此约定），原样放置；"base" 为求解器基座系
-        （7 轴时是 Body_Link），需乘安装位姿 T_world_from_base 换到模型根。
+        依据 pin_uses_root_frame 与 frame ("world" / "base") 自动完成双向坐标转换:
+        1) pin_uses_root_frame == True (Pinocchio 根为 World):
+           - frame="base": T_root = T_world_from_base @ T_raw
+           - frame="world": T_root = T_raw
+        2) pin_uses_root_frame == False (Pinocchio 根为机器人基座 Base):
+           - frame="base": T_root = T_raw
+           - frame="world": T_root = T_base_from_world @ T_raw
         """
         T_raw = np.eye(4, dtype=float)
         T_raw[:3, :3] = self.R
         T_raw[:3, 3] = self.position
 
-        if self.frame.lower() == "base" and T_world_from_base is not None:
-            T_root = T_world_from_base @ T_raw
-            return pin.SE3(T_root[:3, :3], T_root[:3, 3])
-        return pin.SE3(self.R, self.position)
+        is_base = self.frame.lower() in ("base", "local")
+
+        if pin_uses_root_frame:
+            if is_base:
+                if T_world_from_base is not None:
+                    T_root = T_world_from_base @ T_raw
+                    return pin.SE3(T_root[:3, :3], T_root[:3, 3])
+                return pin.SE3(T_raw[:3, :3], T_raw[:3, 3])
+            else:
+                return pin.SE3(T_raw[:3, :3], T_raw[:3, 3])
+        else:
+            if is_base:
+                return pin.SE3(T_raw[:3, :3], T_raw[:3, 3])
+            else:
+                if T_base_from_world is not None:
+                    T_root = T_base_from_world @ T_raw
+                    return pin.SE3(T_root[:3, :3], T_root[:3, 3])
+                elif T_world_from_base is not None:
+                    from ..ik_base import invert_T
+                    T_root = invert_T(T_world_from_base) @ T_raw
+                    return pin.SE3(T_root[:3, :3], T_root[:3, 3])
+                return pin.SE3(T_raw[:3, :3], T_raw[:3, 3])
 
 
 class ObstacleManager:
     """解析障碍物生命周期管理 (add/update/remove/场景对账)。
 
-    _obstacle_lock: 生命周期操作互斥锁 (类级共享: add/update/remove 重建
-    geom_model/半径表/对表非线程安全, 并发写方必须串行)。类级锁跨实例
-    共享无害——锁只影响障碍物变更时延, 不影响检测路径。
+    _obstacle_lock: 实例级 RLock (由 RobotCollisionManager.__init__ 初始化,
+    此处保留类级回退以防独立混入测试)。写操作与检测热路径均通过该锁保护。
     """
 
-    _obstacle_lock = threading.Lock()
+    _obstacle_lock = threading.RLock()
+
+    def _obstacle_to_se3(self, obs: PrimitiveObstacle) -> pin.SE3:
+        """计算障碍物在 Pinocchio 模型根系下的 SE3 位姿。"""
+        return obs.to_se3(
+            T_world_from_base=getattr(self, "T_world_from_base", None),
+            T_base_from_world=getattr(self, "T_base_from_world", None),
+            pin_uses_root_frame=getattr(self, "_pin_uses_root_frame", True),
+        )
 
     def add_obstacle(
         self,
@@ -152,12 +199,9 @@ class ObstacleManager:
         frame: str = "world",
         shape: str = "box",
         mesh_path: Optional[str] = None,
+        source: str = "manual",
     ) -> PrimitiveObstacle:
-        """添加障碍物 (box/sphere/cylinder/cone/mesh, 语义见 PrimitiveObstacle)。
-
-        shape="mesh" 时 size 未用, mesh_path 必须给出且文件存在, 否则
-        抛 FileNotFoundError (调用方捕获降级)。
-        """
+        """添加障碍物 (box/sphere/cylinder/cone/mesh, 语义见 PrimitiveObstacle)。"""
         with self._obstacle_lock:
             return self._add_obstacle_impl(
                 name,
@@ -168,6 +212,8 @@ class ObstacleManager:
                 frame=frame,
                 shape=shape,
                 mesh_path=mesh_path,
+                rebuild=True,
+                source=source,
             )
 
     def _add_obstacle_impl(
@@ -180,9 +226,11 @@ class ObstacleManager:
         frame: str = "world",
         shape: str = "box",
         mesh_path: Optional[str] = None,
+        rebuild: bool = True,
+        source: str = "manual",
     ) -> PrimitiveObstacle:
         if name in self.obstacles:
-            self._remove_obstacle_impl(name)
+            self._remove_obstacle_impl(name, rebuild=False)
 
         obs = PrimitiveObstacle(
             name=name,
@@ -193,22 +241,24 @@ class ObstacleManager:
             frame=frame,
             shape=shape,
             mesh_path=mesh_path,
+            source=source,
         )
-        self.obstacles[name] = obs
+        coal_geo = obs.to_coal_geometry()
+        radius = compute_geometry_bounding_radius(
+            coal_geo, fallback_radius=float(np.linalg.norm(obs.size) * 0.5)
+        )
 
-        se3_placement = obs.to_se3(self.T_world_from_base)
-        go = pin.GeometryObject(name, 0, 0, se3_placement, obs.to_coal_geometry())
+        self.obstacles[name] = obs
+        se3_placement = self._obstacle_to_se3(obs)
+        go = pin.GeometryObject(name, 0, 0, se3_placement, coal_geo)
         obs_gid = self.geom_model.addGeometryObject(go)
         self.obstacle_geom_ids[name] = obs_gid
 
-        # 障碍物外接球半径同步入 broad-phase 表 (统一 FCL computeLocalAABB 口径)
         self.geom_bounding_radii = np.concatenate(
-            [
-                self.geom_bounding_radii,
-                [self._obstacle_bounding_radius(obs)],
-            ]
+            [self.geom_bounding_radii, [radius]]
         )
-        self.rebuild_pairs()
+        if rebuild:
+            self.rebuild_pairs()
         return obs
 
     def update_obstacle(
@@ -220,13 +270,16 @@ class ObstacleManager:
         R: Optional[np.ndarray] = None,
         frame: Optional[str] = None,
     ) -> bool:
-        """动态更新障碍物的位置、朝向或形状 (size 语义随该障碍物的 shape)。
-
-        朝向三选一传参: rpy 与 R 同时给出时以 R 为准, rpy 同步为 R 的反推欧拉角。
-        """
+        """动态更新障碍物的位置、朝向或形状 (size 语义随该障碍物的 shape)。"""
         with self._obstacle_lock:
             return self._update_obstacle_impl(
-                name, position=position, size=size, rpy=rpy, R=R, frame=frame
+                name,
+                position=position,
+                size=size,
+                rpy=rpy,
+                R=R,
+                frame=frame,
+                rebuild=True,
             )
 
     def _update_obstacle_impl(
@@ -237,6 +290,7 @@ class ObstacleManager:
         rpy: Optional[Union[List[float], Tuple[float, ...], np.ndarray]] = None,
         R: Optional[np.ndarray] = None,
         frame: Optional[str] = None,
+        rebuild: bool = True,
     ) -> bool:
         if name not in self.obstacles:
             return False
@@ -253,7 +307,6 @@ class ObstacleManager:
             obs.R = np.asarray(R, dtype=float).reshape(3, 3)
             obs.rpy = None
         if size is not None:
-            # 尺寸变化改变 FCL 几何本身, 走 add (内部先 remove) 重建
             obs.size = np.asarray(size, dtype=float).reshape(
                 PrimitiveObstacle._SHAPE_NDIM[obs.shape]
             )
@@ -265,21 +318,29 @@ class ObstacleManager:
                 R=obs.R,
                 frame=obs.frame,
                 shape=obs.shape,
+                mesh_path=obs.mesh_path,
+                rebuild=rebuild,
+                source=getattr(obs, "source", "manual"),
             )
         else:
             obs_gid = self.obstacle_geom_ids[name]
-            self.geom_model.geometryObjects[obs_gid].placement = obs.to_se3(
-                self.T_world_from_base
-            )
+            new_placement = self._obstacle_to_se3(obs)
+            self.geom_model.geometryObjects[obs_gid].placement = new_placement
+            if (
+                hasattr(self, "geom_data")
+                and self.geom_data is not None
+                and obs_gid < len(self.geom_data.oMg)
+            ):
+                self.geom_data.oMg[obs_gid] = new_placement
 
         return True
 
     def remove_obstacle(self, name: str) -> bool:
         """移除指定的外部障碍物。"""
         with self._obstacle_lock:
-            return self._remove_obstacle_impl(name)
+            return self._remove_obstacle_impl(name, rebuild=True)
 
-    def _remove_obstacle_impl(self, name: str) -> bool:
+    def _remove_obstacle_impl(self, name: str, rebuild: bool = True) -> bool:
         if name not in self.obstacles:
             return False
         del self.obstacles[name]
@@ -297,15 +358,12 @@ class ObstacleManager:
         del self.obstacle_geom_ids[name]
         new_obs_ids = {}
         for obs_name, obs in self.obstacles.items():
-            # 复用旧 geom_model 里的 GeometryObject (几何指针原样保留):
-            # 重建时重调 to_coal_geometry 对 prebuilt mesh 型会炸 (无
-            # mesh_path 可加载), 且重复构建解析几何纯属浪费。
             old_go = self.geom_model.geometryObjects[self.obstacle_geom_ids[obs_name]]
             go = pin.GeometryObject(
                 old_go.name,
                 old_go.parentJoint,
                 old_go.parentFrame,
-                obs.to_se3(self.T_world_from_base),
+                self._obstacle_to_se3(obs),
                 old_go.geometry,
             )
             new_gid = new_geom_model.addGeometryObject(go)
@@ -315,141 +373,263 @@ class ObstacleManager:
         self.link_geom_ids = new_link_geom_ids
         self.geom_to_link = new_geom_to_link
         self.obstacle_geom_ids = new_obs_ids
-        # gid 前移, 半径表必须同步重建否则后续障碍的半径索引错位
+        self.invalidate_robot_geoms_cache()
         self.geom_bounding_radii = self._compute_bounding_spheres()
-        self.rebuild_pairs()
+        if rebuild:
+            self.rebuild_pairs()
         return True
+
+    def clear_obstacles(self, source: Optional[str] = None) -> None:
+        """清空障碍物。若指定 source 则仅清空该来源 (如 'moveit' 或 'manual')。"""
+        with self._obstacle_lock:
+            if not self.obstacles:
+                return
+            if source is None:
+                self.obstacles.clear()
+                self.obstacle_geom_ids.clear()
+                new_geom_model = pin.GeometryModel()
+                new_link_geom_ids: Dict[str, List[int]] = {}
+                new_geom_to_link: Dict[int, str] = {}
+                for l_name, gids in self.link_geom_ids.items():
+                    for gid in gids:
+                        go = self.geom_model.geometryObjects[gid]
+                        new_gid = new_geom_model.addGeometryObject(go)
+                        new_link_geom_ids.setdefault(l_name, []).append(new_gid)
+                        new_geom_to_link[new_gid] = l_name
+                self.geom_model = new_geom_model
+                self.link_geom_ids = new_link_geom_ids
+                self.geom_to_link = new_geom_to_link
+                self.invalidate_robot_geoms_cache()
+                self.geom_bounding_radii = self._compute_bounding_spheres()
+                self.rebuild_pairs()
+            else:
+                to_del = [
+                    k for k, v in self.obstacles.items()
+                    if getattr(v, "source", "manual") == source
+                ]
+                for name in to_del:
+                    self._remove_obstacle_impl(name, rebuild=False)
+                if to_del:
+                    self.rebuild_pairs()
 
     @staticmethod
     def _obstacle_bounding_radius(obs: PrimitiveObstacle) -> float:
-        """障碍物外接球半径 (局部系), 供 broad-phase 粗筛表使用。"""
+        """障碍物外接球半径 (局部系, 含 ||aabb_center|| 偏移), 供 broad-phase 粗筛表使用。"""
         geo = obs.to_coal_geometry()
-        try:
-            if geo.aabb_radius < 0.0:
-                geo.computeLocalAABB()
-            return max(float(geo.aabb_radius), 0.0)
-        except Exception:
-            # 兜底: 按"最远顶点距中心"保守估计
-            return float(np.linalg.norm(obs.size) * 0.5)
+        return compute_geometry_bounding_radius(
+            geo, fallback_radius=float(np.linalg.norm(obs.size) * 0.5)
+        )
 
-    def _register_prebuilt(self, name: str, geometry, pos, R) -> None:
-        """注册已构建的 coal 几何为障碍物 (mesh 内联三角形路径)。
-
-        与 add_obstacle 同口径: Placement 挂 joint 0、半径入 broad-phase
-        表、rebuild_pairs 重组对表; PrimitiveObstacle 记录 shape="mesh"
-        仅作生命周期登记 (to_coal_geometry 不会被再调)。
-        """
+    def _register_prebuilt(
+        self,
+        name: str,
+        geometry: Any,
+        pos: Any,
+        R: Any,
+        frame: str = "world",
+        source: str = "manual",
+    ) -> None:
+        """注册已构建的 coal 几何为障碍物 (mesh 内联三角形路径)。"""
         with self._obstacle_lock:
-            return self._register_prebuilt_impl(name, geometry, pos, R)
+            return self._register_prebuilt_impl(
+                name, geometry, pos, R, frame=frame, rebuild=True, source=source
+            )
 
-    def _register_prebuilt_impl(self, name: str, geometry, pos, R) -> None:
+    def _register_prebuilt_impl(
+        self,
+        name: str,
+        geometry: Any,
+        pos: Any,
+        R: Any,
+        frame: str = "world",
+        rebuild: bool = True,
+        source: str = "manual",
+    ) -> None:
+        if name in self.obstacles:
+            self._remove_obstacle_impl(name, rebuild=False)
+
         obs = PrimitiveObstacle(
             name=name,
             size=[],
             position=pos,
             R=R,
-            frame="world",
+            frame=frame,
             shape="mesh",
+            source=source,
         )
-        # mesh 兜底半径: aabb_radius 已在 _mesh_msg_to_coal 算好
-        radius = 0.0
-        try:
-            radius = max(float(geometry.aabb_radius), 0.0)
-        except Exception:
-            pass
+        # 严格按 aabb_radius + ||aabb_center|| 计算外接球半径, 修复偏心 Mesh 漏检
+        radius = compute_geometry_bounding_radius(geometry, fallback_radius=0.05)
 
-        se3_placement = obs.to_se3(self.T_world_from_base)
+        se3_placement = self._obstacle_to_se3(obs)
         go = pin.GeometryObject(name, 0, 0, se3_placement, geometry)
         obs_gid = self.geom_model.addGeometryObject(go)
         self.obstacle_geom_ids[name] = obs_gid
         self.obstacles[name] = obs
         self.geom_bounding_radii = np.concatenate(
-            [
-                self.geom_bounding_radii,
-                [radius],
-            ]
+            [self.geom_bounding_radii, [radius]]
         )
-        self.rebuild_pairs()
+        if rebuild:
+            self.rebuild_pairs()
 
     def sync_scene_objects(self, objs: List[Dict[str, Any]]) -> None:
-        """场景物体列表整体对账进 manager (注册/更新/移除, 幂等)。
-
-        MoveIt frame_id 即 URDF 根, 直接 frame="world"; quat 恒转换显式
-        传入 (单位阵也传), 保证对账后障碍物姿态与场景严格一致, 而非
-        残留旧值; scene 里消失的 id 一并移除。全程持 _obstacle_lock
-        (对账的 remove+add 序列必须原子, 否则并发方看到中间态)。
-        """
+        """场景物体列表整体对账进 manager (注册/更新/移除, 幂等且单次 rebuild)。"""
         with self._obstacle_lock:
             self._sync_scene_objects_impl(objs)
 
     def _sync_scene_objects_impl(self, objs: List[Dict[str, Any]]) -> None:
-        """批量对账实现: 零散增删合并为单次 rebuild, 比逐个 remove/add 省多次 geom_model 重建
-        (多障碍场景对账开销从 O(n) 次重建降到 1 次)。
-        """
+        """批量对账实现: 仅剔除 moveit 来源的过期障碍物, 原地更新位姿, 单次批量重构几何模型。"""
         scene_ids = {o["id"] for o in objs}
-        for name in list(self.obstacles.keys()):
-            if name not in scene_ids:
-                self._remove_obstacle_impl(name)
+
+        # 1. 来源隔离: 仅移除 source == 'moveit' 且不在新场景中的障碍物, 保留用户 manual 障碍物
+        to_remove = {
+            name
+            for name, obs in self.obstacles.items()
+            if getattr(obs, "source", "manual") == "moveit" and name not in scene_ids
+        }
+
+        # 2. 分类处理: 纯位姿更新 vs 几何结构变更/新增
+        in_place_updates: List[Tuple[str, List[float], np.ndarray, str]] = []
+        to_add_or_recreate: List[Dict[str, Any]] = []
 
         for o in objs:
-            if o.get("type") not in ("box", "sphere", "cylinder", "cone", "mesh"):
+            otype = o.get("type")
+            if otype not in ("box", "sphere", "cylinder", "cone", "mesh"):
                 continue
             pos = [float(v) for v in o["pos"]]
             quat = o.get("quat")
             R = PrimitiveObstacle._quat_to_matrix(quat) if quat else np.eye(3)
             if R is None:
                 R = np.eye(3)
-            size = [float(v) for v in o["size"]]
+            size = [float(v) for v in o.get("size", [])]
+            frame = str(o.get("frame") or "world")
             mesh_path = o.get("mesh_path")
             prebuilt = o.get("coal_geometry")
 
-            if o["type"] == "mesh" and prebuilt is None and not mesh_path:
-                # mesh 物体既无内联几何也无文件路径: 无法构建碰撞几何, 跳过
-                # (fetch 层已滤过一次, 这里防调用方直传未滤列表)
-                print(f"[SceneSync] mesh 物体 '{o['id']}' 无可用几何, 跳过")
+            if otype == "mesh" and prebuilt is None and not mesh_path:
+                logger.warning("[SceneSync] mesh 物体 '%s' 无可用几何, 跳过", o["id"])
                 continue
 
-            if o["id"] in self.obstacles:
-                existing = self.obstacles[o["id"]]
+            oid = o["id"]
+            if oid in self.obstacles:
+                existing = self.obstacles[oid]
                 size_arr = np.asarray(size, dtype=float) if size else np.empty(0)
-                # 同型同尺寸 (mesh 恒走原地): 仅位姿变, 原地更新 placement
-                # 免 remove+add 重建整表 (高频门铃场景的主要开销来源)
+                # 同型同尺寸且非预建 mesh: 原地更新位姿与标记来源, 无需重构 GeometryModel
                 if (
-                    existing.shape == o["type"]
+                    existing.shape == otype
                     and np.array_equal(existing.size, size_arr)
                     and prebuilt is None
                 ):
-                    self._update_obstacle_impl(o["id"], position=pos, R=R)
+                    existing.source = "moveit"
+                    in_place_updates.append((oid, pos, R, frame))
                     continue
-                self._remove_obstacle_impl(o["id"])
 
-            if prebuilt is not None:
-                # mesh 物体: 已还原的 coal 几何直接注册 (绕过 to_coal_geometry)
-                self._register_prebuilt_impl(o["id"], prebuilt, pos, R)
-                continue
-
-            self._add_obstacle_impl(
-                o["id"],
-                size=size,
-                position=pos,
-                R=R,
-                frame="world",
-                shape=o["type"],
-                mesh_path=mesh_path,
+            to_add_or_recreate.append(
+                {
+                    "id": oid,
+                    "type": otype,
+                    "pos": pos,
+                    "R": R,
+                    "size": size,
+                    "frame": frame,
+                    "mesh_path": mesh_path,
+                    "coal_geometry": prebuilt,
+                }
             )
+
+        # 3. 执行原地位姿更新 (毫秒级, 不重建模型与碰撞对)
+        for oid, pos, R, frame in in_place_updates:
+            self._update_obstacle_impl(
+                oid, position=pos, R=R, frame=frame, rebuild=False
+            )
+
+        # 4. 若无过期障碍物且无结构变更/新增, 直接完成
+        if not to_remove and not to_add_or_recreate:
+            return
+
+        # 5. 单次批量重建 GeometryModel: 消除循环重建的 O(K*N) 锁竞争与段错误风险
+        for name in to_remove:
+            self.obstacles.pop(name, None)
+            self.obstacle_geom_ids.pop(name, None)
+
+        for po in to_add_or_recreate:
+            self.obstacles.pop(po["id"], None)
+            self.obstacle_geom_ids.pop(po["id"], None)
+
+        new_geom_model = pin.GeometryModel()
+        new_link_geom_ids: Dict[str, List[int]] = {}
+        new_geom_to_link: Dict[int, str] = {}
+
+        # 复制机器人已有连杆几何
+        for l_name, gids in self.link_geom_ids.items():
+            for gid in gids:
+                go = self.geom_model.geometryObjects[gid]
+                new_gid = new_geom_model.addGeometryObject(go)
+                new_link_geom_ids.setdefault(l_name, []).append(new_gid)
+                new_geom_to_link[new_gid] = l_name
+
+        # 复制存活障碍物 (包含本地 manual 障碍物与未改变结构的 moveit 障碍物)
+        new_obs_ids: Dict[str, int] = {}
+        for obs_name, obs in list(self.obstacles.items()):
+            old_gid = self.obstacle_geom_ids.get(obs_name)
+            if old_gid is not None and old_gid < len(self.geom_model.geometryObjects):
+                old_go = self.geom_model.geometryObjects[old_gid]
+                go = pin.GeometryObject(
+                    old_go.name,
+                    old_go.parentJoint,
+                    old_go.parentFrame,
+                    self._obstacle_to_se3(obs),
+                    old_go.geometry,
+                )
+                new_gid = new_geom_model.addGeometryObject(go)
+                new_obs_ids[obs_name] = new_gid
+
+        # 挂载待新增/重建的 moveit 障碍物
+        for po in to_add_or_recreate:
+            oid = po["id"]
+            otype = po["type"]
+            prebuilt = po.get("coal_geometry")
+            if prebuilt is not None:
+                obs = PrimitiveObstacle(
+                    name=oid,
+                    size=[],
+                    position=po["pos"],
+                    R=po["R"],
+                    frame=po["frame"],
+                    shape="mesh",
+                    source="moveit",
+                )
+                coal_geo = prebuilt
+            else:
+                obs = PrimitiveObstacle(
+                    name=oid,
+                    size=po["size"],
+                    position=po["pos"],
+                    R=po["R"],
+                    frame=po["frame"],
+                    shape=otype,
+                    mesh_path=po.get("mesh_path"),
+                    source="moveit",
+                )
+                coal_geo = obs.to_coal_geometry()
+
+            se3_placement = self._obstacle_to_se3(obs)
+            go = pin.GeometryObject(oid, 0, 0, se3_placement, coal_geo)
+            new_gid = new_geom_model.addGeometryObject(go)
+            self.obstacles[oid] = obs
+            new_obs_ids[oid] = new_gid
+
+        # 原子切换模型映射并单次更新碰撞对
+        self.geom_model = new_geom_model
+        self.link_geom_ids = new_link_geom_ids
+        self.geom_to_link = new_geom_to_link
+        self.obstacle_geom_ids = new_obs_ids
+        self.invalidate_robot_geoms_cache()
+        self.geom_bounding_radii = self._compute_bounding_spheres()
+        self.rebuild_pairs()
 
 
 class MoveItSceneSync:
-    """MoveIt 规划场景 -> RobotCollisionManager 的自动障碍物同步器 (可选挂载)。
-
-    设计语义: "有 MoveIt 才感知, 没有 MoveIt 就不做环境避障"——构造后
-    后台线程经 /get_planning_scene 探测 move_group, 失败则全程零 ROS 资源
-    (manager 保持手动 add_obstacle)。探测成功后订阅
-    /monitored_planning_scene 当"变化门铃", 每次门铃经服务重拉全量世界
-    物体整体对账进 manager (单一事实来源, 幂等); move_group 中途消失时
-    保留现有障碍物等下次门铃。ROS 依赖全部延迟 import, 纯库环境可加载。
-    独立 rclpy Context 避免与调用方已有 rclpy.init 冲突。
-    """
+    """MoveIt 规划场景 -> RobotCollisionManager 的自动障碍物同步器 (可选挂载)。"""
 
     _RESYNC_MERGE_S = 0.2         # 门铃合并窗口 (吸收 ADD+回声多条消息)
     _FETCH_TIMEOUT_S = 5.0        # 单次服务重拉超时
@@ -457,7 +637,7 @@ class MoveItSceneSync:
 
     def __init__(
         self,
-        manager,
+        manager: Any,
         scene_service: str = "/get_planning_scene",
         monitored_topic: str = "/monitored_planning_scene",
         probe_timeout_s: float = 3.0,
@@ -468,7 +648,7 @@ class MoveItSceneSync:
         self.monitored_topic = monitored_topic
         self.verbose = bool(verbose)
 
-        self._context = None  # 独立 rclpy Context (探测成功才创建)
+        self._context = None
         self._node = None
         self._executor = None
         self._scene_cli = None
@@ -478,24 +658,21 @@ class MoveItSceneSync:
         self._pending_lock = threading.Lock()
         self._stop = threading.Event()
         self._probe_timeout_s = float(probe_timeout_s)
-        self._scene_types = None  # (PlanningScene,) 导入成功才有值
+        self._scene_types = None
         self._srv_type = None
 
-        # 零依赖快检: rclpy / moveit_msgs 未安装 (纯库环境) 直接不启动
         try:
             import rclpy  # noqa: F401
             from moveit_msgs.msg import PlanningScene  # noqa: F401
             from moveit_msgs.srv import GetPlanningScene  # noqa: F401
         except ImportError:
             if self.verbose:
-                print(
+                logger.info(
                     "[SceneSync] rclpy / moveit_msgs 未安装: 不启用 MoveIt "
                     "场景感知, 环境避障退化为仅手动 add_obstacle"
                 )
             return
 
-        # 探测在后台线程做: 求解器构造路径绝不等服务探测 (3s 超时量级);
-        # 探测失败由线程自行拆干净资源, 本实例退化为 inactive (no-op)
         self._spin_thread = threading.Thread(
             target=self._spin_loop, daemon=True, name="ha-arm-ik-scene-sync"
         )
@@ -514,14 +691,11 @@ class MoveItSceneSync:
             cli = node.create_client(GetPlanningScene, self.scene_service)
             if not cli.wait_for_service(timeout_sec=self._probe_timeout_s):
                 return False
-            # 服务在 = move_group 在线; 首帧快照由常驻线程的初始 resync 拉取
             return True
         except Exception as e:
-            # 探测失败原因由 _spin_loop 统一打印, 这里只标记
             self._probe_error = str(e)
             return False
         finally:
-            # 回收一次性探测节点 (常驻期自建全新 context)
             try:
                 if node is not None:
                     node.destroy_node()
@@ -536,11 +710,7 @@ class MoveItSceneSync:
             self._resync_pending.set()
 
     def _spin_loop(self) -> None:
-        """后台线程主体: 探测 -> 常驻 (门铃 -> 合并窗口 -> 服务重拉 -> 对账)。
-
-        探测失败: 线程直接退出, 不创建常驻资源。move_group 中途消失:
-        保留现有障碍物等下次门铃, 不做定时轮询空转。
-        """
+        """后台线程主体: 探测 -> 常驻 (门铃 -> 合并窗口 -> 服务重拉 -> 对账)。"""
         import rclpy
         from moveit_msgs.msg import PlanningScene
         from moveit_msgs.srv import GetPlanningScene
@@ -549,19 +719,19 @@ class MoveItSceneSync:
         self._scene_types = (PlanningScene,)
         self._srv_type = GetPlanningScene
 
-        # 探测期: move_group 不在线就全程零常驻资源
         self._probe_error = None
         if not self._probe_moveit(rclpy, GetPlanningScene):
             if self.verbose:
                 reason = f" ({self._probe_error})" if self._probe_error else ""
-                print(
-                    f"[SceneSync] 未探测到 move_group ({self.scene_service} "
-                    f"超时 {self._probe_timeout_s}s{reason}): 不启用 MoveIt "
-                    "场景感知, 环境避障退化为仅手动 add_obstacle"
+                logger.info(
+                    "[SceneSync] 未探测到 move_group (%s 超时 %ss%s): 不启用 MoveIt "
+                    "场景感知, 环境避障退化为仅手动 add_obstacle",
+                    self.scene_service,
+                    self._probe_timeout_s,
+                    reason,
                 )
             return
 
-        # 常驻期: 独立 context + 节点 + 门铃订阅
         try:
             from rclpy.context import Context
 
@@ -570,8 +740,6 @@ class MoveItSceneSync:
             self._node = rclpy.create_node(
                 "ha_arm_ik_scene_sync", context=self._context
             )
-            # 独立 context 的 spin 必须走绑定该 context 的 executor
-            # (rclpy.spin_once 只作用于全局默认 context)
             self._executor = rclpy.executors.SingleThreadedExecutor(
                 context=self._context
             )
@@ -579,8 +747,6 @@ class MoveItSceneSync:
             self._scene_cli = self._node.create_client(
                 GetPlanningScene, self.scene_service
             )
-            # 门铃 QoS: 发布端 durability=VOLATILE, 订阅侧必须一致 (请求值
-            # 高于提供值会静默收不到)。本订阅只当"可能变了"的信号。
             self._scene_sub = self._node.create_subscription(
                 PlanningScene,
                 self.monitored_topic,
@@ -592,18 +758,17 @@ class MoveItSceneSync:
             )
         except Exception as e:
             if self.verbose:
-                print(f"[SceneSync] 常驻初始化失败 (按无 MoveIt 处理): {e}")
+                logger.warning("[SceneSync] 常驻初始化失败 (按无 MoveIt 处理): %s", e)
             self.close()
             return
 
         if self.verbose:
-            print(
-                f"[SceneSync] 已挂载: 监听 {self.monitored_topic} 门铃 -> "
-                f"{self.scene_service} 重拉 -> manager 自动增删障碍物"
+            logger.info(
+                "[SceneSync] 已挂载: 监听 %s 门铃 -> %s 重拉 -> manager 自动增删障碍物",
+                self.monitored_topic,
+                self.scene_service,
             )
 
-        # 首帧快照: 门铃是 VOLATILE, 本节点收不到启动前的历史快照,
-        # 常驻启动后先主动拉一次 (与后续门铃路径共用 _reconcile_scene)
         with self._pending_lock:
             self._resync_pending.set()
 
@@ -617,30 +782,65 @@ class MoveItSceneSync:
             if self._resync_pending.is_set():
                 with self._pending_lock:
                     self._resync_pending.clear()
-                # 合并窗口: 吸收同一事件的 ADD+回声等多条门铃消息
                 time.sleep(self._RESYNC_MERGE_S)
                 try:
                     self._reconcile_scene()
                 except Exception as e:
                     if self.verbose:
-                        print(f"[SceneSync] 场景重拉失败 (保留现有障碍物): {e}")
+                        logger.warning(
+                            "[SceneSync] 场景重拉失败 (保留现有障碍物): %s", e
+                        )
 
     def _reconcile_scene(self) -> None:
         objs = self._fetch_scene_via_service()
         if objs is None:
-            return  # 服务不可用: 保持现状, 等下次门铃重试
+            return
         self.manager.sync_scene_objects(objs)
         if self.verbose:
-            print(f"[SceneSync] 场景同步: {len(objs)} 个障碍物已对账进 manager")
+            logger.info(
+                "[SceneSync] 场景同步: %d 个障碍物图元已对账进 manager", len(objs)
+            )
+
+    @staticmethod
+    def _pose_msg_to_se3(pose_msg: Any) -> Tuple[np.ndarray, np.ndarray]:
+        """将 geometry_msgs/Pose 转为 (pos_3, R_3x3)。"""
+        pos = np.array(
+            [pose_msg.position.x, pose_msg.position.y, pose_msg.position.z],
+            dtype=float,
+        )
+        quat = (
+            pose_msg.orientation.x,
+            pose_msg.orientation.y,
+            pose_msg.orientation.z,
+            pose_msg.orientation.w,
+        )
+        R = PrimitiveObstacle._quat_to_matrix(quat)
+        if R is None:
+            R = np.eye(3, dtype=float)
+        return pos, R
+
+    @staticmethod
+    def _matrix_to_quat(R: np.ndarray) -> List[float]:
+        """3x3 旋转矩阵转 (qx, qy, qz, qw) 四元数。"""
+        q = pin.Quaternion(R)
+        return [float(q.x), float(q.y), float(q.z), float(q.w)]
+
+    @classmethod
+    def _compose_obj_and_sub_pose(
+        cls, co_pose: Any, sub_pose: Optional[Any]
+    ) -> Tuple[List[float], List[float]]:
+        """精确合成物体级位姿 T_co 与子图元相对位姿 T_sub: T_world = T_co * T_sub。"""
+        p_co, R_co = cls._pose_msg_to_se3(co_pose)
+        if sub_pose is None:
+            return p_co.tolist(), cls._matrix_to_quat(R_co)
+
+        p_sub, R_sub = cls._pose_msg_to_se3(sub_pose)
+        p_world = p_co + R_co @ p_sub
+        R_world = R_co @ R_sub
+        return p_world.tolist(), cls._matrix_to_quat(R_world)
 
     def _fetch_scene_via_service(self) -> Optional[List[Dict[str, Any]]]:
-        """经 /get_planning_scene 拉取当前世界物体, 返回归一化条目列表或 None。
-
-        条目: {id, type(box/sphere/cylinder/cone/mesh), size(全尺寸),
-        pos, quat[, mesh_path]}。sphere 直径 x2 归一为全尺寸; 物体级
-        co.pose 优先, 退化用 primitive_poses[0]/mesh_poses[0]; mesh 物体
-        经 package:// 解析出绝对路径 (解析不到的跳过并打印)。
-        """
+        """经 /get_planning_scene 拉取当前世界物体, 支持复合多图元物体并合成 SE(3) 位姿。"""
         if self._scene_types is None or self._node is None:
             return None
         from moveit_msgs.msg import PlanningSceneComponents
@@ -657,8 +857,6 @@ class MoveItSceneSync:
             )
             fut = self._scene_cli.call_async(req)
 
-            # future 只能靠本线程 spin 完成——边等边 spin executor,
-            # 纯 sleep 会永远不 done
             deadline = time.time() + self._FETCH_TIMEOUT_S
             while not fut.done() and time.time() < deadline:
                 self._executor.spin_once(timeout_sec=0.05)
@@ -668,43 +866,31 @@ class MoveItSceneSync:
             world = fut.result().scene.world
             out: List[Dict[str, Any]] = []
             for co in world.collision_objects:
-                # operation 归一化: rclpy 反序列化怪癖, 可能给 bytes
                 op = co.operation
                 if isinstance(op, (bytes, bytearray)):
                     op = op[0] if op else 0
-
                 if op != 0:
                     continue
 
-                def _obj_pose(co=co, pose_list=None):
-                    if pose_list is not None:
-                        return pose_list
-                    cp = co.pose
-                    if (
-                        abs(cp.position.x)
-                        + abs(cp.position.y)
-                        + abs(cp.position.z)
-                        > 1e-9
-                    ):
-                        return cp
-                    if co.primitive_poses:
-                        return co.primitive_poses[0]
-                    if co.mesh_poses:
-                        return co.mesh_poses[0]
-                    return cp
+                frame_id = co.header.frame_id or "world"
+                total_parts = len(co.primitives) + len(co.meshes)
 
-                entry: Dict[str, Any] = {
-                    "id": co.id,
-                    "frame": co.header.frame_id or "base_Base",
-                }
+                # 1. 遍历全部解析图元 (支持多图元复合障碍物, 如多部件桌架)
+                for idx, prim in enumerate(co.primitives):
+                    sub_p = (
+                        co.primitive_poses[idx]
+                        if idx < len(co.primitive_poses)
+                        else None
+                    )
+                    pos, quat = self._compose_obj_and_sub_pose(co.pose, sub_p)
+                    part_id = co.id if total_parts == 1 else f"{co.id}_prim_{idx}"
 
-                if co.primitives:
-                    prim = co.primitives[0]
-                    # 位姿优先级与 moveit_bridge 同口径: move_group 规范化后
-                    # 物体级位姿在 co.pose, primitive_poses 是相对位姿
-                    # (实测物体级 pose=(0.5,0,0) 而 primitive_poses[0]=(0,0,0));
-                    # 必须走 _obj_pose 的智能回退, 不可直取 primitive_poses[0]
-                    p = _obj_pose(co)
+                    entry: Dict[str, Any] = {
+                        "id": part_id,
+                        "frame": frame_id,
+                        "pos": pos,
+                        "quat": quat,
+                    }
                     if prim.type == prim.BOX:
                         entry["type"] = "box"
                         entry["size"] = list(prim.dimensions)
@@ -712,9 +898,6 @@ class MoveItSceneSync:
                         entry["type"] = "sphere"
                         entry["size"] = [prim.dimensions[0] * 2.0]
                     elif prim.type == prim.CYLINDER:
-                        # shape_msgs cylinder/cone dimensions=[height, radius]
-                        # (CONE_HEIGHT=0/CONE_RADIUS=1), 翻转为 manager 的
-                        # [直径, 全高] 全尺寸语义
                         entry["type"] = "cylinder"
                         entry["size"] = [prim.dimensions[1] * 2.0, prim.dimensions[0]]
                     elif prim.type == prim.CONE:
@@ -722,43 +905,43 @@ class MoveItSceneSync:
                         entry["size"] = [prim.dimensions[1] * 2.0, prim.dimensions[0]]
                     else:
                         continue
-                elif co.meshes:
-                    # mesh 物体: shape_msgs/Mesh 内联三角形 (vertices +
-                    # vertex_indices), 直接还原为 coal BVH 几何, 无需
-                    # 资源文件; 无内联三角形的空壳跳过。
-                    mesh_geo = self._mesh_msg_to_coal(co.meshes[0])
+                    out.append(entry)
+
+                # 2. 遍历全部三角网格图元
+                for idx, mesh_msg in enumerate(co.meshes):
+                    mesh_geo = self._mesh_msg_to_coal(mesh_msg)
                     if mesh_geo is None:
-                        print(
-                            f"[SceneSync] mesh 物体 '{co.id}' 无内联三角形, 跳过"
+                        logger.warning(
+                            "[SceneSync] mesh 物体 '%s' (子网格 %d) 无内联三角形, 跳过",
+                            co.id,
+                            idx,
                         )
                         continue
-                    # mesh 物体姿态归 mesh_poses (无则回退物体级位姿)
-                    p = _obj_pose(co, co.mesh_poses[0] if co.mesh_poses else None)
-                    entry["type"] = "mesh"
-                    entry["coal_geometry"] = mesh_geo
-                    entry["size"] = []
-                else:
-                    continue
+                    sub_p = (
+                        co.mesh_poses[idx] if idx < len(co.mesh_poses) else None
+                    )
+                    pos, quat = self._compose_obj_and_sub_pose(co.pose, sub_p)
+                    part_id = co.id if total_parts == 1 else f"{co.id}_mesh_{idx}"
 
-                entry["pos"] = [p.position.x, p.position.y, p.position.z]
-                entry["quat"] = [
-                    p.orientation.x,
-                    p.orientation.y,
-                    p.orientation.z,
-                    p.orientation.w,
-                ]
-                out.append(entry)
+                    out.append(
+                        {
+                            "id": part_id,
+                            "frame": frame_id,
+                            "type": "mesh",
+                            "coal_geometry": mesh_geo,
+                            "size": [],
+                            "pos": pos,
+                            "quat": quat,
+                        }
+                    )
+
             return out
         except Exception:
             return None
 
     @staticmethod
     def _mesh_msg_to_coal(mesh_msg: Any):
-        """shape_msgs/Mesh 内联三角形 -> coal BVHModelOBB (无三角形返回 None)。
-
-        coal 4.x 绑定: BVH 构建走 camelCase (beginModel/addSubModel/
-        endModel), 与 MeshLoader 返回的几何同类, GJK 判碰口径一致。
-        """
+        """shape_msgs/Mesh 内联三角形 -> coal BVHModelOBBRSS (无三角形返回 None)。"""
         if not mesh_msg.triangles or not mesh_msg.vertices:
             return None
         try:
@@ -779,12 +962,6 @@ class MoveItSceneSync:
             )
             bvh = coal.BVHModelOBBRSS()
             bvh.beginModel(len(tris), len(verts))
-            # coal 4.x 绑定: addTriangles 只收 (N,3) Eigen 索引矩阵, 配合
-            # addVertex 逐个入顶点 (addSubModel 的 vector<Vec3s> 重载不
-            # 接受 numpy/list, 这里逐顶点最稳)。必须用 OBBRSS 节点——与
-            # MeshLoader 同款; OBB 节点与机器人侧 OBBRSS 几何判碰时
-            # coal 报 "node type BV_OBB and node type BV_OBBRSS is not
-            # yet supported"。
             for v in verts:
                 bvh.addVertex(v)
             bvh.addTriangles(tris)
@@ -804,12 +981,8 @@ class MoveItSceneSync:
         )
 
     def close(self) -> None:
-        """停后台线程并彻底销毁 ROS 资源 (幂等, 可安全多次调用)。
-
-        每项资源独立 try: 任一销毁失败不阻断其余资源回收。
-        """
+        """停后台线程并彻底销毁 ROS 资源 (幂等, 可安全多次调用)。"""
         self._stop.set()
-        # 从自身 spin 线程内调用 (异常清理路径) 时不能 join 自己
         if (
             self._spin_thread is not None
             and self._spin_thread is not threading.current_thread()

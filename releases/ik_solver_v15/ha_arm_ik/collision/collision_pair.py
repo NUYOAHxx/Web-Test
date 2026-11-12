@@ -14,7 +14,7 @@ import pinocchio as pin
 
 
 class CollisionPairManager:
-    """碰撞对集合组装与环境判据 (RobotCollisionManager 的 Mixin 功能块)。"""
+    """碰撞对集合组装与环境判据 (RobotCollisionManager 的功能组件)。"""
 
     link_geom_ids: Dict[str, List[int]]
     geom_to_link: Dict[int, str]

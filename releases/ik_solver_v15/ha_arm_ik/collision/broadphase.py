@@ -15,8 +15,26 @@ import pinocchio as pin
 from .collision_config import BROADPHASE_ENABLED
 
 
+def compute_geometry_bounding_radius(
+    geo: Any, fallback_radius: float = 0.05
+) -> float:
+    """计算单个 coal/FCL 几何体绕局部原点的保守外接球半径。
+
+    严格遵循三角不等式上界: R = aabb_radius + ||aabb_center||。
+    无论机器人连杆凸包还是外部环境障碍物 (含偏心 Mesh), 均統一调用此函数,
+    消除因遗漏 ||aabb_center|| 导致的 Broad-phase 漏检。
+    """
+    try:
+        if getattr(geo, "aabb_radius", -1.0) < 0.0:
+            geo.computeLocalAABB()
+        r = float(geo.aabb_radius) + float(np.linalg.norm(geo.aabb_center))
+        return max(r, 0.0)
+    except Exception:
+        return float(fallback_radius)
+
+
 class Broadphase:
-    """包围球保守下界粗筛 (RobotCollisionManager 的 Mixin 功能块)。"""
+    """包围球保守下界粗筛 (RobotCollisionManager 的功能组件)。"""
 
     geom_model: pin.GeometryModel
     geom_data: pin.GeometryData
@@ -27,23 +45,13 @@ class Broadphase:
     _bp_cache: Optional[Dict[str, Any]]
 
     def _compute_bounding_spheres(self) -> np.ndarray:
-        """预计算每几何体的局部外接球半径 (以几何原点为球心, 保守上界)。
-
-        半径口径 = aabb_radius + |aabb_center|，满足三角不等式上界。
-        """
+        """预计算每几何体的局部外接球半径 (以几何原点为球心, 保守上界)。"""
         n_geoms = self.geom_model.ngeoms
         radii = np.zeros(n_geoms, dtype=float)
         geom_objs = self.geom_model.geometryObjects
 
         for g in range(n_geoms):
-            geo = geom_objs[g].geometry
-            try:
-                if geo.aabb_radius < 0.0:  # 未初始化 (-1)
-                    geo.computeLocalAABB()
-                r = float(geo.aabb_radius) + float(np.linalg.norm(geo.aabb_center))
-                radii[g] = max(r, 0.0)
-            except Exception:
-                radii[g] = 0.05
+            radii[g] = compute_geometry_bounding_radius(geom_objs[g].geometry)
         return radii
 
     def _update_active_pairs(self, influence_distance: float) -> int:
@@ -57,8 +65,8 @@ class Broadphase:
             self._pair_active = []
             return 0
 
-        # 开关未开启: 全部激活回退
-        if not BROADPHASE_ENABLED:
+        # 开关未开启或无穷大距离查询: 全部激活回退
+        if not BROADPHASE_ENABLED or np.isinf(influence_distance):
             self._pair_active = [True] * n_pairs
             act = self.geom_data.activeCollisionPairs
             for k in range(len(act)):
@@ -68,11 +76,20 @@ class Broadphase:
         d_inf = float(influence_distance)
         n_geoms = self.geom_model.ngeoms
 
-        # 1. 结构与对端索引缓存 (仅随碰撞对增删/模型变动时更新拓扑)
-        topo_key = (n_pairs, n_geoms, len(self.obstacle_geom_ids))
+        # 1. 结构与对端索引缓存 (仅随碰撞对增删/模型变动/半径表更新时重建拓扑)
+        topo_key = (
+            n_pairs,
+            n_geoms,
+            len(self.obstacle_geom_ids),
+            id(self.geom_model),
+            len(self.geom_bounding_radii),
+        )
         cached = getattr(self, "_bp_cache", None)
 
         if cached is None or cached["topo_key"] != topo_key:
+            if len(self.geom_bounding_radii) != n_geoms:
+                self.geom_bounding_radii = self._compute_bounding_spheres()
+
             first = np.empty(n_pairs, dtype=np.intp)
             second = np.empty(n_pairs, dtype=np.intp)
             for k, cp in enumerate(self.geom_model.collisionPairs):
@@ -84,7 +101,8 @@ class Broadphase:
                 "first": first,
                 "second": second,
                 # 预计算对端几何半径之和，避免每轮迭代重复求和
-                "radii_sum": self.geom_bounding_radii[first] + self.geom_bounding_radii[second],
+                "radii_sum": self.geom_bounding_radii[first]
+                + self.geom_bounding_radii[second],
                 "centers": np.empty((n_geoms, 3), dtype=float),
             }
             self._bp_cache = cached
@@ -96,9 +114,15 @@ class Broadphase:
 
         for g in range(n_geoms):
             go = geom_objs[g]
-            oMi = oMi_all[go.parentJoint]
-            # c = p_joint + R_joint @ p_geom_local
-            centers[g] = oMi.translation + oMi.rotation @ go.placement.translation
+            if go.parentJoint > 0:
+                oMi = oMi_all[go.parentJoint]
+                # c = p_joint + R_joint @ p_geom_local
+                centers[g] = (
+                    oMi.translation + oMi.rotation @ go.placement.translation
+                )
+            else:
+                # 挂在 universe (joint 0) 上的环境障碍物直接取 placement.translation
+                centers[g] = go.placement.translation
 
         # 3. 向量化粗筛 (坐标差 -> 欧氏范数 -> 保守下界)
         diff = centers[cached["first"]] - centers[cached["second"]]

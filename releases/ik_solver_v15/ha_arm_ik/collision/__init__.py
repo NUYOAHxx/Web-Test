@@ -4,21 +4,30 @@
 from __future__ import annotations
 
 try:
-    from .mount import auto_mount, shutdown
+    from .auto_mount import auto_mount, build_collision_manager, shutdown
     from .collision_world import CollisionWorld, RobotCollisionManager
 except ImportError:
     auto_mount = None
+    build_collision_manager = None
     shutdown = None
     CollisionWorld = None
     RobotCollisionManager = None
 
-from .collision_config import BROADPHASE_ENABLED, PACKAGE_DIRS
+from .collision_config import (
+    BROADPHASE_ENABLED,
+    PACKAGE_DIRS,
+    CollisionAvoidanceParams,
+    CollisionConfig,
+)
 
 __all__ = [
     "auto_mount",
+    "build_collision_manager",
     "shutdown",
     "CollisionWorld",
     "RobotCollisionManager",
+    "CollisionAvoidanceParams",
+    "CollisionConfig",
     "BROADPHASE_ENABLED",
     "PACKAGE_DIRS",
 ]
