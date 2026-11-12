@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""机器人碰撞几何模型构建: 胶囊包络、机身凸包、mesh 凸包化与资产解析。
+
+本模块只负责"几何模型从哪来":
+  - align_z_to_vector:            SO(3) 胶囊轴向对齐工具
+  - _resolve_package_dirs:        mesh 资产目录嗅探
+  - _resolve_urdf_collision_mesh: URDF collision mesh 路径解析
+  - _load_or_build_hull:          凸包构建 + 内容哈希缓存
+  - _apply_hull_decomposition:    mesh 档逐连杆 BVH -> Convex 原地替换
+
+构建入口 (胶囊表注册 / 机身凸包注册) 以功能块形式挂载于
+RobotCollisionManager 上 (RobotCollisionGeometry), 保持 manager 为
+状态唯一持有者——本模块自身不持有运行时状态。
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import struct
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Union
+
+import numpy as np
+import pinocchio as pin
+from scipy.spatial import ConvexHull
+
+# FCL 的 Python 绑定包已由 hppfcl 演进为 coal，优先支持 coal，平滑回退 hppfcl
+try:
+    import coal
+except ImportError:
+    import hppfcl as coal
+
+from .collision_config import (
+    BODY_HULL_LINKS,
+    HULL_CACHE_DIR,
+    HULL_DECOMPOSE_LINK_PREFIXES,
+    PACKAGE_DIRS,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def align_z_to_vector(vec: np.ndarray) -> np.ndarray:
+    """计算将局部 +Z 轴 [0, 0, 1] 旋转对齐至目标向量 vec 的正交旋转矩阵 R ∈ SO(3)。
+
+    用于将 FCL 默认沿局部 Z 轴延伸的 Capsule 精确对齐至连杆骨骼位移方向。
+    """
+    v = np.asarray(vec, dtype=float).reshape(3)
+    norm = float(np.linalg.norm(v))
+    if norm < 1e-9:
+        return np.eye(3, dtype=float)
+
+    u = v / norm
+    z = np.array([0.0, 0.0, 1.0], dtype=float)
+    c = float(np.dot(z, u))
+
+    if c > 1.0 - 1e-9:
+        return np.eye(3, dtype=float)
+    if c < -1.0 + 1e-9:
+        return np.diag([1.0, -1.0, -1.0])
+
+    axis = np.cross(z, u)
+    s = float(np.linalg.norm(axis))
+    axis /= s
+
+    K = np.array(
+        [
+            [0.0, -axis[2], axis[1]],
+            [axis[2], 0.0, -axis[0]],
+            [-axis[1], axis[0], 0.0],
+        ],
+        dtype=float,
+    )
+
+    return np.eye(3, dtype=float) + s * K + (1.0 - c) * (K @ K)
+
+
+def _resolve_package_dirs() -> List[str]:
+    """解析 mesh 资产目录: 硬编码表按存在性过滤并去重。"""
+    dirs = [d for d in PACKAGE_DIRS if os.path.isdir(d)]
+    dirs.append(os.getcwd())
+
+    unique_dirs: List[str] = []
+    seen: Set[str] = set()
+
+    for d in dirs:
+        try:
+            rp = os.path.realpath(d)
+            if os.path.isdir(rp) and rp not in seen:
+                seen.add(rp)
+                unique_dirs.append(rp)
+        except Exception:
+            pass
+
+    return unique_dirs
+
+
+def _sha1_short(path: Path, n: int = 8) -> str:
+    """文件内容 sha1 前 n 位 (凸包缓存失效键: 源 mesh 变更即换名重建)。"""
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:n]
+
+
+def _resolve_urdf_collision_mesh(
+    urdf_root: ET.Element,
+    link: str,
+    package_dirs: List[str],
+) -> Optional[Path]:
+    """从 URDF 解析指定连杆的 collision mesh 绝对路径 (缩放 mesh 直接放弃)。"""
+    for l in urdf_root.findall("link"):
+        if l.get("name") != link:
+            continue
+
+        col = l.find("collision")
+        mesh = col.find("geometry/mesh") if col is not None else None
+        if mesh is None:
+            return None
+
+        scale = mesh.get("scale")
+        if scale is not None:
+            try:
+                s = [float(v) for v in scale.split()]
+            except ValueError:
+                return None
+            if s != [1.0, 1.0, 1.0]:
+                return None
+
+        fname = mesh.get("filename") or ""
+        if fname.startswith("package://"):
+            rel_full = fname[len("package://") :]
+            rel_stem = rel_full.split("/", 1)[1] if "/" in rel_full else rel_full
+            for d in package_dirs:
+                for rel in (rel_full, rel_stem):
+                    cand = Path(d) / rel
+                    if cand.is_file():
+                        return cand
+            return None
+
+        cand = Path(fname)
+        return cand if cand.is_absolute() and cand.is_file() else None
+
+    return None
+
+
+def _save_hull_stl(path: Path, verts: np.ndarray, faces: np.ndarray) -> None:
+    """凸包网格写二进制 STL (coal MeshLoader 可直接加载的通用交换格式)。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"\0" * 80)
+        f.write(struct.pack("<I", len(faces)))
+        for a, b, c in faces:
+            v1, v2, v3 = verts[a], verts[b], verts[c]
+            normal = np.cross(v2 - v1, v3 - v1)
+            ln = float(np.linalg.norm(normal))
+            normal = normal / ln if ln > 1e-12 else np.zeros(3)
+            f.write(
+                struct.pack(
+                    "<12fH",
+                    *normal.tolist(),
+                    *v1.tolist(),
+                    *v2.tolist(),
+                    *v3.tolist(),
+                    0,
+                )
+            )
+
+
+def _load_or_build_hull(src: Path, cache_dir: Path) -> Any:
+    """加载缓存凸包, 未命中则从源 mesh 现算并写盘; 返回 coal 碰撞几何。
+
+    返回值两种形态 (引擎对 CollisionGeometry 子类无感知, 混用已验证):
+      - 缓存命中/写盘成功: MeshLoader 加载的 BVHModel;
+      - 缓存目录不可写: 内存构建的 coal.Convex (本次构建付现算成本)。
+    """
+    cache = cache_dir / f"{src.stem}_{_sha1_short(src)}.STL"
+    loader = coal.MeshLoader()
+
+    if cache.is_file():
+        return loader.load(str(cache))
+
+    bvh_src = loader.load(str(src))
+    verts = np.array(
+        [bvh_src.vertex(i) for i in range(bvh_src.num_vertices)],
+        dtype=float,
+    )
+    hull = ConvexHull(verts)
+    hv = verts[hull.vertices]
+    remap = {v: i for i, v in enumerate(hull.vertices)}
+    faces = np.array(
+        [[remap[a], remap[b], remap[c]] for a, b, c in hull.simplices],
+        dtype=int,
+    )
+
+    try:
+        _save_hull_stl(cache, hv, faces)
+        return loader.load(str(cache))
+    except Exception:
+        vs = coal.StdVec_Vec3s()
+        for v in hv:
+            vs.append(v)
+        ts = coal.StdVec_Triangle()
+        for a, b, c in faces:
+            ts.append(coal.Triangle(int(a), int(b), int(c)))
+        cv = coal.Convex(vs, ts)
+        cv.computeLocalAABB()
+        return cv
+
+
+def _apply_hull_decomposition(
+    geom_model: pin.GeometryModel,
+    pin_model: pin.Model,
+    package_dirs: List[str],
+    urdf_path: Union[str, Path],
+) -> int:
+    """mesh 档 GJK 加速: HULL_DECOMPOSE_LINK_PREFIXES 匹配的连杆 BVH
+    逐个替换为凸包 (原地), 源 mesh 经内容哈希缓存 (_load_or_build_hull)。
+
+    替换只换 geometry 指针, name/parentJoint/placement 保留——geom_to_link /
+    FK 挂载均无感知。单连杆失败保留原始 BVH (打印, 不中断)。
+    返回替换的连杆数。
+    """
+    try:
+        urdf_root = ET.parse(str(urdf_path)).getroot()
+    except Exception as e:
+        logger.warning("[Collision] 凸包替换跳过: URDF 解析失败 (%s)", e)
+        return 0
+
+    replaced = 0
+    frames = pin_model.frames
+
+    for gid in range(geom_model.ngeoms):
+        go = geom_model.geometryObjects[gid]
+        l_name = frames[go.parentFrame].name
+        if not l_name.startswith(HULL_DECOMPOSE_LINK_PREFIXES):
+            continue
+
+        src = _resolve_urdf_collision_mesh(urdf_root, l_name, package_dirs)
+        if src is None:
+            logger.debug("[Collision] %s: collision mesh 未解析到, 保留 BVH", l_name)
+            continue
+
+        try:
+            hull_geom = _load_or_build_hull(src, HULL_CACHE_DIR)
+        except Exception as e:
+            logger.warning("[Collision] %s: 凸包构建失败, 保留 BVH (%s)", l_name, e)
+            continue
+
+        go.geometry = hull_geom
+        replaced += 1
+
+    if replaced:
+        logger.info(
+            "[Collision] 凸包替换: %d 连杆 BVH -> Convex (缓存 %s)",
+            replaced,
+            HULL_CACHE_DIR,
+        )
+    return replaced
+
+
+class RobotCollisionGeometry:
+    """胶囊/机身凸包包络注册 (构建期功能块, 状态归 manager)。"""
+
+    chain: Any
+    pin_model: Optional[pin.Model]
+    geom_model: pin.GeometryModel
+    link_geom_ids: Dict[str, List[int]]
+    geom_to_link: Dict[int, str]
+    _urdf_path: Optional[Union[str, Path]]
+
+    def _build_capsule_proxies(self) -> None:
+        """双臂胶囊包络: 每侧 4 骨段, 按实测段表注册。
+
+        半径 = 段内最粗连杆 mesh 横向最大半径。
+        对侧臂胶囊挂对侧冻结连杆帧, FK 位姿由 q_template 驱动——对侧臂
+        包络当静态障碍处理 (机器人×障碍物通道)。重合关节 (URDF xyz=0)
+        与基座/腰/TCP 不单独生成包络。
+        """
+        chain = getattr(self, "chain", None)
+        if chain is None or not hasattr(chain, "joints"):
+            return
+
+        # 段表: (段首连杆=登记名, 段末连杆=挂载帧, 半径, 骨向量[段末连杆系])
+        segment_table = {
+            "left": [
+                ("LHand_Link1", "LHand_Link2", 0.0640, (0.0, 0.2378, 0.0)),
+                ("LHand_Link3", "LHand_Link4", 0.0640, (0.0, 0.1719, 0.0)),
+                ("LHand_Link5", "LHand_Link6", 0.0559, (0.084, 0.0, 0.0)),
+                ("LHand_Link7", "LHand_Link7", 0.0422, (0.16, 0.0, 0.0)),
+            ],
+            "right": [
+                ("RHand_Link1", "RHand_Link2", 0.0640, (0.0, 0.2378, 0.0)),
+                ("RHand_Link3", "RHand_Link4", 0.0640, (0.0, 0.1719, 0.0)),
+                ("RHand_Link5", "RHand_Link6", 0.0559, (0.084, 0.0, 0.0)),
+                ("RHand_Link7", "RHand_Link7", 0.0422, (0.16, 0.0, 0.0)),
+            ],
+        }
+
+        side = (
+            "left"
+            if any(j.get("child", "").startswith("LHand") for j in chain.joints)
+            else "right"
+        )
+        other = "right" if side == "left" else "left"
+
+        # 镜像臂挂对侧冻结关节才有正确 FK 位姿, 无对侧帧时只建本臂
+        sides = [side]
+        other_check_link = segment_table[other][0][1]
+        if self.pin_model is not None and self.pin_model.existFrame(
+            other_check_link, pin.FrameType.BODY
+        ):
+            sides.append(other)
+
+        for s in sides:
+            for first_link, end_link, r_seg, bone in segment_table[s]:
+                bone_vec = np.asarray(bone, dtype=float)
+                capsule = coal.Capsule(r_seg, float(np.linalg.norm(bone_vec)))
+                place = pin.SE3(align_z_to_vector(bone_vec), bone_vec * 0.5)
+
+                jid, fid = 0, 0
+                # 显式指定 FrameType.BODY 防止与同名 JOINT frame 冲突
+                if self.pin_model is not None and self.pin_model.existFrame(
+                    end_link, pin.FrameType.BODY
+                ):
+                    fid = self.pin_model.getFrameId(end_link, pin.FrameType.BODY)
+                    jid = self.pin_model.frames[fid].parentJoint
+
+                go = pin.GeometryObject(f"{first_link}_col", jid, fid, place, capsule)
+                gid = self.geom_model.addGeometryObject(go)
+                self.link_geom_ids.setdefault(first_link, []).append(gid)
+                self.geom_to_link[gid] = first_link
+
+    def _build_body_hull_proxies(self) -> None:
+        """机身凸包包络 (躯干/骨盆/头): 补胶囊表缺失的身体覆盖。
+
+        挂载取 pin_model 对应 BODY 帧的 parentJoint/parentFrame——腰关节
+        驱动 FK, 排斥雅可比自动只对腰非零。注册名 "{link}_hull_col" 登记
+        geom_to_link 纳入机器人×障碍物对。任一步失败整组放弃退化回纯
+        胶囊口径, 不抛异常。
+        """
+        if self.pin_model is None:
+            return
+        urdf_path = getattr(self, "_urdf_path", None)
+        if not urdf_path or not os.path.exists(str(urdf_path)):
+            return
+
+        try:
+            urdf_root = ET.parse(str(urdf_path)).getroot()
+        except Exception as e:
+            logger.warning("[Collision] 机身凸包跳过: URDF 解析失败 (%s)", e)
+            return
+
+        package_dirs = _resolve_package_dirs()
+        registered = 0
+
+        for link in BODY_HULL_LINKS:
+            if not self.pin_model.existFrame(link, pin.FrameType.BODY):
+                continue
+            try:
+                src = _resolve_urdf_collision_mesh(urdf_root, link, package_dirs)
+                if src is None:
+                    continue
+                hull_geom = _load_or_build_hull(src, HULL_CACHE_DIR)
+                fid = self.pin_model.getFrameId(link, pin.FrameType.BODY)
+                frame = self.pin_model.frames[fid]
+                jid = frame.parentJoint
+                place = frame.placement
+                go = pin.GeometryObject(
+                    f"{link}_hull_col",
+                    jid,
+                    fid,
+                    place,
+                    hull_geom,
+                )
+                gid = self.geom_model.addGeometryObject(go)
+                self.link_geom_ids.setdefault(link, []).append(gid)
+                self.geom_to_link[gid] = link
+                registered += 1
+            except Exception as e:
+                logger.warning("[Collision] %s 凸包注册失败 (跳过): %s", link, e)
+
+        if registered:
+            logger.info(
+                "[Collision] 机身凸包已挂载: %d/%d (%s)",
+                registered,
+                len(BODY_HULL_LINKS),
+                ", ".join(BODY_HULL_LINKS),
+            )
+
