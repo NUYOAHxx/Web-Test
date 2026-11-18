@@ -162,7 +162,7 @@ $$
 
 #### 模式 2：`tool_dir`（5D 位置 + 工具轴方向对齐，允许绕工具轴自转）
 
-在世界对齐系（`pin.LOCAL_WORLD_ALIGNED`）下，设工具轴单位向量在当前系与目标系下的朝向分别为 $a = R_c u_{\text{axis}}$ 与 $b = R_t u_{\text{axis}}$，两者夹角 $\theta = \operatorname{atan2}(\|a \times b\|_2, a^\top b)$：
+在世界对齐系（`pin.LOCAL_WORLD_ALIGNED`）下，设工具轴单位向量在当前系与目标系下的朝向分别为 $a = R_c u_{\text{axis}}$ 与 $b = R_t u_{\text{axis}}$，两者夹角 $\theta = \mathrm{atan2}(\|a \times b\|_2, a^\top b)$：
 
 * **常规情况（$a^\top b \ge -1 + 10^{-8}$）**：
 
@@ -207,13 +207,13 @@ $$
   * **距离释放函数 $f_{\text{rel}}(d)$**：设肩关节到目标的距离为 $d$，最大臂展为 $R_{\max}$，在 $r_0 = 0.75$（`WAIST_RELEASE_START`）到 $r_1 = 0.94$（`WAIST_RELEASE_END`）之间做三次 Hermite 平滑阶跃（Smoothstep）：
 
 $$
-u = \operatorname{clamp}\left(\frac{d - r_0 R_{\max}}{(r_1 - r_0) R_{\max}}, 0, 1\right), \quad f_{\text{rel}}(d) = u^2 (3 - 2u)
+u = \mathrm{clamp}\left(\frac{d - r_0 R_{\max}}{(r_1 - r_0) R_{\max}}, 0, 1\right), \quad f_{\text{rel}}(d) = u^2 (3 - 2u)
 $$
 
 * **返程解锁通道 $r_{\text{ret}}$**：当机械臂从远点往近点退回时，虽然目标距离 $d$ 已经变小（$f_{\text{rel}}(d) \to 0$），但此时腰部还停留在偏离 $q_{\text{ref}}$ 的位置。如果立刻把腰锁死（$d_{\text{waist}} = 1/6$），腰部就退不回来了！因此引入返程解锁项（尺度 $\theta_{\text{ret}} = 0.20\text{ rad}$，`WAIST_RETURN_RELEASE_RAD`）：
 
 $$
-r_{\text{ret}} = \operatorname{clamp}\left(\frac{\|q_{\text{waist}} - q_{\text{ref,waist}}\|_2}{\theta_{\text{ret}}}, 0, 1\right)
+r_{\text{ret}} = \mathrm{clamp}\left(\frac{\|q_{\text{waist}} - q_{\text{ref,waist}}\|_2}{\theta_{\text{ret}}}, 0, 1\right)
 $$
 
 * **综合释放系数**（若锁腰种子因重力矩超标触发了 `waist_load_release=True`，则直接令 $\alpha = 1.0$）：
@@ -327,7 +327,7 @@ $$
 其中：
 
 $$
-\frac{\partial H_{\text{load}}}{\partial \tau_i} = \frac{w_i}{N_g C_i} \left[ k_{\text{abs}} r_i + k_{\text{exc}} e_i \operatorname{sgn}(r_i) + k_{\text{rel}} \frac{\tau_i - \tau_{\text{ref}, i}}{C_i} \right]
+\frac{\partial H_{\text{load}}}{\partial \tau_i} = \frac{w_i}{N_g C_i} \left[ k_{\text{abs}} r_i + k_{\text{exc}} e_i \mathrm{sgn}(r_i) + k_{\text{rel}} \frac{\tau_i - \tau_{\text{ref}, i}}{C_i} \right]
 $$
 
 默认权重：$k_{\text{abs}} = 0.04$（或 0.05），$k_{\text{exc}} = 0.50$（超过 70% 负载率后惩罚力度暴增 10 倍以上），$k_{\text{rel}} = 0.0$。
@@ -363,7 +363,7 @@ $$
 \tau(\theta) = C_{\max} \sin(\delta - x_0)
 $$
 
-  代码只需在 $\theta_0$ 和 $\theta_0 + 90^\circ$ 两点各算一次重力矩 $\tau_0 = \tau(\theta_0)$ 与 $\tau_{90} = \tau(\theta_0 + \frac{\pi}{2})$，即可直接恢复出正弦幅值（上半身放平时的最大重力矩）$C_{\max} = \sqrt{\tau_0^2 + \tau_{90}^2}$ 与初始相位 $x_0 = \operatorname{atan2}(\tau_0, \tau_{90})$（并在 $\theta_0 + 45^\circ$ 处做一次精度校验）。
+  代码只需在 $\theta_0$ 和 $\theta_0 + 90^\circ$ 两点各算一次重力矩 $\tau_0 = \tau(\theta_0)$ 与 $\tau_{90} = \tau(\theta_0 + \frac{\pi}{2})$，即可直接恢复出正弦幅值（上半身放平时的最大重力矩）$C_{\max} = \sqrt{\tau_0^2 + \tau_{90}^2}$ 与初始相位 $x_0 = \mathrm{atan2}(\tau_0, \tau_{90})$（并在 $\theta_0 + 45^\circ$ 处做一次精度校验）。
   随后从 $\delta = 0$ 向正负两侧搜索，要求同时满足两条物理判据（$s = 0.70$ 为 `soft_ratio`，$A$ 为该关节容许力矩）：
 
 * 电机静态负荷不超软阈值：$|\tau(\theta)| \le \max\big(s \cdot \min(C_{\max}, A), \; |\tau_0|\big)$；
@@ -381,7 +381,7 @@ $$
 \text{cost} = W_{\text{limit}} H_{\text{limit}} + W_{\text{nom}} \phi^2 + W_{\text{smooth}} \|\Delta q_{\text{prev}}\|_2^2 + W_{\text{waist}} \|\Delta q_{\text{waist}}\|_2^2 + W_{\text{torque}} \cdot \text{mean}(r^2)
 $$
 
-其中 $\phi = \operatorname{wrap}_{\pi}(\psi(q) - \psi(q_{\text{ready}}))$ 为 SEW 肘部臂角偏离量（代码中通过 `wrap_to_pi` 规范化至 $[-\pi, \pi]$）。若开启了 `sync_secondary_cost = True`，还会额外加上 $w_{\text{com}} H_{\text{com}} + w_{\text{col}} H_{\text{col}}$。
+其中 $\phi = \mathrm{wrap}_{\pi}(\psi(q) - \psi(q_{\text{ready}}))$ 为 SEW 肘部臂角偏离量（代码中通过 `wrap_to_pi` 规范化至 $[-\pi, \pi]$）。若开启了 `sync_secondary_cost = True`，还会额外加上 $w_{\text{com}} H_{\text{com}} + w_{\text{col}} H_{\text{col}}$。
 
 最终 `select_best_candidate` 使用 `candidate_sort_key` 按 8 级优先级元组（从小到大）选出最优解：
 
