@@ -108,7 +108,7 @@ $$
 [\text{lower}_{\text{eff}}, \text{upper}_{\text{eff}}] = \big[\max(\text{lower}_{\text{phy}}, q_{\text{ready}} - w_v), \; \min(\text{upper}_{\text{phy}}, q_{\text{ready}} + w_v)\big]
 $$
 
-* 在搜索阶段判定“可接受解（acceptable）”时，还要求所有可动关节距离有效限位边界的最小余量 $\text{margin} = \min_i \min(q_i - l_i, u_i - q_i) \ge m_{\text{safe}}$（对应 `SAFE_MARGIN` = $0.02\text{ rad} \approx 1.15^\circ$）。若最终只能选出 $\text{margin} < 0.02\text{ rad}$ 的解，状态会降级为 `Status.NEAR_LIMIT`。
+  * 在搜索阶段判定“可接受解（acceptable）”时，还要求所有可动关节距离有效限位边界的最小余量 $\text{margin} = \min_i \min(q_i - l_i, u_i - q_i) \ge m_{\text{safe}}$（对应 `SAFE_MARGIN` = $0.02\text{ rad} \approx 1.15^\circ$）。若最终只能选出 $\text{margin} < 0.02\text{ rad}$ 的解，状态会降级为 `Status.NEAR_LIMIT`。
 * **H3 静态重力矩不超载（仅 `load_mode="strict"` 生效）**：
   * 所有受守护关节 $\mathcal{J}_{\text{guard}}$（配置项 `guard_joint_names`，默认全模型所有关节）在当前构型下的静态重力矩绝对值不得超过实测标定的容许力矩：
 
@@ -175,7 +175,6 @@ e = \begin{bmatrix} \frac{\Delta p}{L_c} \\ e_{\text{dir}} \end{bmatrix}, \quad 
 $$
 
   其中 $[a]_\times$ 为反对称矩阵，因为 $\dot{a} = \omega \times a = -[a]_\times \omega = -[a]_\times J_\omega \dot{q}$。
-
 * **180° 对径奇异死点逃逸（$a^\top b < -1 + 10^{-8}$）**：
   此时 $b = -a$，方向残差 $b - a = -2a$ 与雅可比行向量 $-[a]_\times J_\omega$ 的列空间完全正交（$(-[a]_\times J_\omega)^\top (-2a) = 0$），常规梯度直接归零锁死！
   代码通过 `_antipodal_tangent` 对矩阵 $M = J_{\text{dir}} - a(a^\top J_{\text{dir}})$ 做 SVD 分解，提取最大奇异值对应的左奇异向量作为当前构型最容易转动的单位切向量 $t \perp a$，将残差替换为 $e_{\text{dir}} = \theta \cdot t$，从而平滑逃离 180° 死点。
@@ -210,13 +209,13 @@ $$
 u = \mathrm{clamp}\left(\frac{d - r_0 R_{\max}}{(r_1 - r_0) R_{\max}}, 0, 1\right), \quad f_{\text{rel}}(d) = u^2 (3 - 2u)
 $$
 
-* **返程解锁通道 $r_{\text{ret}}$**：当机械臂从远点往近点退回时，虽然目标距离 $d$ 已经变小（$f_{\text{rel}}(d) \to 0$），但此时腰部还停留在偏离 $q_{\text{ref}}$ 的位置。如果立刻把腰锁死（$d_{\text{waist}} = 1/6$），腰部就退不回来了！因此引入返程解锁项（尺度 $\theta_{\text{ret}} = 0.20\text{ rad}$，`WAIST_RETURN_RELEASE_RAD`）：
+  * **返程解锁通道 $r_{\text{ret}}$**：当机械臂从远点往近点退回时，虽然目标距离 $d$ 已经变小（$f_{\text{rel}}(d) \to 0$），但此时腰部还停留在偏离 $q_{\text{ref}}$ 的位置。如果立刻把腰锁死（$d_{\text{waist}} = 1/6$），腰部就退不回来了！因此引入返程解锁项（尺度 $\theta_{\text{ret}} = 0.20\text{ rad}$，`WAIST_RETURN_RELEASE_RAD`）：
 
 $$
 r_{\text{ret}} = \mathrm{clamp}\left(\frac{\|q_{\text{waist}} - q_{\text{ref,waist}}\|_2}{\theta_{\text{ret}}}, 0, 1\right)
 $$
 
-* **综合释放系数**（若锁腰种子因重力矩超标触发了 `waist_load_release=True`，则直接令 $\alpha = 1.0$）：
+  * **综合释放系数**（若锁腰种子因重力矩超标触发了 `waist_load_release=True`，则直接令 $\alpha = 1.0$）：
 
 $$
 \alpha = \max\big(f_{\text{rel}}(d_{\text{tar}}), \; f_{\text{rel}}(d_{\text{cur}}), \; r_{\text{ret}}\big)
@@ -243,7 +242,6 @@ M_f = A_f D_f A_f^\top + \lambda_{\text{eff}} I, \quad \lambda_{\text{eff}} = \l
 $$
 
   其中基础阻尼 $\lambda_0 = 10^{-6}$（`PIN_IK_DAMPING`）。
-
 * **主任务步与度量一致零空间步**（通过 LAPACK `dpotrf`/`dpotrs` 进行上三角 Cholesky 分解求解，若非正定则回退至 `_metric_svd_step`）：
 
 $$
@@ -256,9 +254,9 @@ $$
 P_f = D_f - D_f A_f^\top M_f^{-1} A_f D_f
 $$
 
-> **为什么零空间投影算子写成 $P_f = D_f - D_f A_f^\top M_f^{-1} A_f D_f$？**
-> 因为 $P_f$ 是对称半正定矩阵！对于次任务负梯度 $z = -\nabla H(q)$，必然满足 $z_f^\top \Delta q_{\text{null}, f} = w_{\text{null}} z_f^\top P_f z_f \ge 0$，从代数上严格保证了零空间步永远是次任务代价 $H(q)$ 的下降方向。
-
+  > **为什么零空间投影算子写成 $P_f = D_f - D_f A_f^\top M_f^{-1} A_f D_f$？**
+  > 因为 $P_f$ 是对称半正定矩阵！对于次任务负梯度 $z = -\nabla H(q)$，必然满足 $z_f^\top \Delta q_{\text{null}, f} = w_{\text{null}} z_f^\top P_f z_f \ge 0$，从代数上严格保证了零空间步永远是次任务代价 $H(q)$ 的下降方向。
+  >
 * **零空间权重自适应衰减 $w_{\text{null}}$**：
 
 $$
@@ -266,7 +264,6 @@ w_{\text{null}} = \frac{c}{1 + (\|e\|_2 / s_e)^2}, \quad c = \begin{cases} 1.5, 
 $$
 
   其中衰减尺度 $s_e = 0.06$（`NULLSPACE_ERR_SCALE`）。当末端离目标很远（$\|e\|_2 \gg 0.06$）时，$w_{\text{null}} \to 0$，全力追踪主任务，防止零空间梯度干扰主任务收敛；当末端接近目标（$\|e\|_2 \ll 0.06$）时，$w_{\text{null}} \to 1.0 \sim 1.5$，全力在零空间内优化姿态与卸载力矩。
-
 * **正交信赖域截断与单关节逐个钳制循环**：
 
   * 由于 $\Delta q_{\text{clamped}}$ 位于已饱和坐标轴，而 $\Delta q_f = \Delta q_{\text{task}, f} + \Delta q_{\text{null}, f}$ 位于自由坐标轴，两者正交：
@@ -275,8 +272,8 @@ $$
 \|\Delta q_{\text{total}}\|_2^2 = \|\Delta q_{\text{clamped}}\|_2^2 + \|\Delta q_f\|_2^2
 $$
 
-* 因此自由关节的剩余可用步长半径为 $R_{\text{rem}} = \sqrt{\Delta q_{\max}^2 - \|\Delta q_{\text{clamped}}\|_2^2}$。若 $\|\Delta q_f\|_2 > R_{\text{rem}}$，仅等比例缩放自由关节步长 $\Delta q_f$，绝不缩放已钳制在边界上的 $\Delta q_{\text{clamped}}$。
-* 检验试探点 $q_{\text{trial}} = q + \Delta q_{\text{total}}$：若仍有自由关节越界，挑出越界量最大的那 1 个关节 $i^*$，将其位移死死钉在边界上（$\Delta q_{\text{clamped}}[i^*] = \text{bound}[i^*] - q[i^*]$），移出自由集 $f$，进入下一轮内循环重算剩余关节。
+  * 因此自由关节的剩余可用步长半径为 $R_{\text{rem}} = \sqrt{\Delta q_{\max}^2 - \|\Delta q_{\text{clamped}}\|_2^2}$。若 $\|\Delta q_f\|_2 > R_{\text{rem}}$，仅等比例缩放自由关节步长 $\Delta q_f$，绝不缩放已钳制在边界上的 $\Delta q_{\text{clamped}}$。
+  * 检验试探点 $q_{\text{trial}} = q + \Delta q_{\text{total}}$：若仍有自由关节越界，挑出越界量最大的那 1 个关节 $i^*$，将其位移死死钉在边界上（$\Delta q_{\text{clamped}}[i^*] = \text{bound}[i^*] - q[i^*]$），移出自由集 $f$，进入下一轮内循环重算剩余关节。
 
 ---
 
@@ -366,8 +363,8 @@ $$
   代码只需在 $\theta_0$ 和 $\theta_0 + 90^\circ$ 两点各算一次重力矩 $\tau_0 = \tau(\theta_0)$ 与 $\tau_{90} = \tau(\theta_0 + \frac{\pi}{2})$，即可直接恢复出正弦幅值（上半身放平时的最大重力矩）$C_{\max} = \sqrt{\tau_0^2 + \tau_{90}^2}$ 与初始相位 $x_0 = \mathrm{atan2}(\tau_0, \tau_{90})$（并在 $\theta_0 + 45^\circ$ 处做一次精度校验）。
   随后从 $\delta = 0$ 向正负两侧搜索，要求同时满足两条物理判据（$s = 0.70$ 为 `soft_ratio`，$A$ 为该关节容许力矩）：
 
-* 电机静态负荷不超软阈值：$|\tau(\theta)| \le \max\big(s \cdot \min(C_{\max}, A), \; |\tau_0|\big)$；
-* 上半身水平质心偏移受控：$|\tau(\theta) - \tau_0| \le s \cdot C_{\max}$（因为 $\Delta \tau$ 正比于子树质心相对转轴的水平力臂变化量 $\Delta x_{\text{com}}$）。
+  * 电机静态负荷不超软阈值：$|\tau(\theta)| \le \max\big(s \cdot \min(C_{\max}, A), \; |\tau_0|\big)$；
+  * 上半身水平质心偏移受控：$|\tau(\theta) - \tau_0| \le s \cdot C_{\max}$（因为 $\Delta \tau$ 正比于子树质心相对转轴的水平力臂变化量 $\Delta x_{\text{com}}$）。
 
   由此二分求解出的区间 $[\theta_0 - \delta_{\text{lo}}, \theta_0 + \delta_{\text{hi}}]$ 即为该腰关节的物理舒适窗。
 
@@ -412,7 +409,7 @@ $$
 | `WAIST_RELEASE_START / END`           | 0.75 / 0.94        | 手臂伸展到 75% 臂展时肘部开始变直、操作度下降，此时平滑引入腰部；94% 时接近奇异边界，腰部完全释放。                                       | 区间前移（如 0.5~0.8）：机器人在中近距离就会积极用腰配合手臂，手臂肘部弯曲余量更大，但整机重心晃动变多。                               |
 | `WAIST_RETURN_RELEASE_RAD`            | 0.20 rad (~11.5°) | 返程防卡死阈值：只要腰部偏离 $q_{\text{ready}}$ 超过 11.5°，即使目标已回到近处，腰部依然保持释放状态以便零空间力将其拉回正位。         | 调得太小：腰部只要稍微偏一点就一直处于高灵活度状态；调得太大（或删掉该项）：远点抓完物体缩回胸前时，腰部会卡在半弯腰姿态回不来！       |
 | `NULLSPACE_GAIN / WAIST_NULL_GAIN`    | 0.30 / 0.50        | 零空间回中弹簧刚度。腰部设 0.50 比手臂 0.30 略强，优先保证躯干直立。                                                                      | 调大：姿态更接近 $q_{\text{ready}}$，但在姿态整理阶段（Settle）可能因步长过大导致线搜索无法保持位姿容差而提前终止。                  |
-| `GRAVITY_TORQUE_GAIN / excess_weight` | 0.04 / 0.50        | 正常负载（$\le 70\%$）下用 0.04 温和引导低力矩构型（如肘部下垂）；一旦超过 `soft_ratio` (0.70)，0.50 的超限刚度强力把关节推回安全区。 | `GRAVITY_TORQUE_GAIN` 调太大：会导致肘部拼命往重力方向掉，破坏标准臂角构型，甚至在回溯线搜索中与回中项打架震荡。                     |
+| `GRAVITY_TORQUE_GAIN / excess_weight` | 0.04 / 0.50        | 正常负载（$\le 70\%$）下用 0.04 温和引导低力矩构型（如肘部下垂）；一旦超过 `soft_ratio` (0.70)，0.50 的超限刚度强力把关节推回安全区。 | `GRAVITY_TORQUE_GAIN` 调太大：会导致肘部拼命往重力方向掉，破坏标准臂角构型，甚至在回溯线搜索中与回中项打架震荡。                         |
 | `CONTINUATION_MAX_STEP`               | 0.15 rad (~8.6°)  | 伺服轨迹跟踪（续算模式）时，相邻两帧关节跳变不应超过 8.6°，且关闭姿态整理（`CONTINUATION_POSTURE_SETTLE=False`）实现零漂移死区保持。   | 调大：续算框变宽，更容易吸收剧烈的目标跳变，但也更容易在相邻路点间发生零空间自运动漂移。                                               |
 
 ### 6.2 外层候选解打分参数 (`ik_base.py`)
